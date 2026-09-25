@@ -2,12 +2,13 @@
 
 // Run by test/reentry.test.js in a plain node process. Unlike a
 // `node --test` child, where test/helpers.js has already removed a tree,
-// nothing has loaded Node's rimraf yet — the JavaScript walk of a recursive
-// rmSync on Node 22 — so it first loads while the patch is installed and
-// keeps the functions it finds on node:fs, as it would in an application.
-// Each way to remove a tree removes one whose files the routed listing
-// does not show (written after the scan: hidden under strict) and one that
-// exists on disk only. Prints one JSON line.
+// nothing has loaded Node's rimraf yet — the JavaScript walk of fs.rm and
+// fs.promises.rm, and of a recursive rmSync on Node 22 — which keeps the
+// functions it finds on node:fs when it first loads. initialize() loads it
+// before the patch is installed. Each way to remove a tree removes one
+// whose files the routed listing does not show (written after the scan:
+// hidden under strict) and one that exists on disk only. Prints one JSON
+// line.
 
 const fs = require('node:fs');
 const path = require('node:path');
@@ -15,15 +16,21 @@ const fsPatch = require('../../lib/adapters/fs-patch.js');
 const { tmpDir, writeTree, rm, kernel } = require('../helpers.js');
 
 const RIMRAF = 'NativeModule internal/fs/rimraf';
+const loaded = () => process.moduleLoadList.includes(RIMRAF);
 
 // name → remove(kernel, absolute path, place key), recursively.
 const REMOVALS = {
   place: (k, abs, key) => k.fs('site').rm(key, { recursive: true }),
   rmSync: (k, abs) => fs.rmSync(abs, { recursive: true }),
+  rm: (k, abs) =>
+    new Promise((resolve, reject) => {
+      fs.rm(abs, { recursive: true }, (err) => (err ? reject(err) : resolve()));
+    }),
+  promises: (k, abs) => fs.promises.rm(abs, { recursive: true }),
 };
 
 const main = async () => {
-  const loadedBefore = process.moduleLoadList.includes(RIMRAF);
+  const loadedBefore = loaded();
   const names = Object.keys(REMOVALS);
   const tree = {};
   for (const name of names) tree[`site/${name}/a.txt`] = 'a';
@@ -41,6 +48,7 @@ const main = async () => {
     fs.mkdirSync(at(`${name}-only`));
     fs.writeFileSync(at(`${name}-only`, 'd.txt'), 'd');
   }
+  const loadedAtInstall = loaded();
   fsPatch.install(k);
   const failed = {};
   for (const [name, remove] of Object.entries(REMOVALS)) {
@@ -56,7 +64,8 @@ const main = async () => {
   const left = fs.readdirSync(at()).sort();
   k.close();
   rm(root);
-  process.stdout.write(JSON.stringify({ loadedBefore, failed, left }) + '\n');
+  const result = { loadedBefore, loadedAtInstall, failed, left };
+  process.stdout.write(JSON.stringify(result) + '\n');
 };
 
 main().catch((err) => {

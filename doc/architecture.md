@@ -638,6 +638,18 @@ in the section, the filter would read past strict routing — and so does
 loaded under the patch keeps walking through routing; watchers and streams
 deliver later; `existsSync` calls nothing back.
 
+**`initialize()` loads Node's rimraf before anything can install the patch
+(`loadRimraf()`, a workaround).** _Why:_ the asynchronous `fs.rm` and
+`fs.promises.rm` — and a recursive `rmSync` on Node 22 — are a JavaScript
+rimraf that takes its functions from the public `node:fs` when it first
+loads. Loaded under the patch, it walked a tree through routing — the
+place's listing, not the disk — and, asynchronous, past any section: a
+recursive `rm` removed part of the tree and failed with `ENOTEMPTY`. The
+bootstrap and a manual `await initialize()` install the patch afterwards,
+so they get rimraf over `node:fs` itself; a worker's `attach()` installs
+it synchronously, so there an asynchronous recursive `rm` of managed
+territory can still walk the routed listing.
+
 **Listings sort and deduplicate the string names, then encode them as
 asked; a recursive `encoding: 'buffer'` listing works in places.** _Why:_
 the encoding must not change order or duplicates, and a Buffer name cannot
@@ -705,6 +717,7 @@ workers call `attach()`.** _Why:_ preloads do not run in worker threads.
 | An asynchronous native section (`AsyncLocalStorage`)                                                            | user callbacks inherit it, past strict; `async_hooks` cost on 22  |
 | Own primitives in place of `rmSync`                                                                             | rewrites its retries (`EBUSY`, `EPERM`, `maxRetries`) and errors  |
 | A native section around `cp`                                                                                    | its `filter`, the caller's code, would read past strict           |
+| Preloading rimraf when the package is imported                                                                  | races a synchronous `install()`; disk I/O on every import         |
 | Standalone place-level `script` domain, provider `memory`, `vfs:` URLs, metawatch, root-level `ext` / `compile` | superseded by the place / domain model; no aliases                |
 
 ## Invariants
@@ -737,6 +750,11 @@ workers call `attach()`.** _Why:_ preloads do not run in worker threads.
 - `watchPath()` is a load-bearing workaround (nodejs/node#63638: an 8.3
   alias in a watched path aborts libuv on Windows); remove it only when the
   engines floor clears every affected release.
+- `loadRimraf()` is a load-bearing workaround (Node's asynchronous `rm`,
+  and `rmSync` on Node 22, is a JavaScript rimraf that takes its functions
+  from the public `node:fs` when it first loads): `initialize()` waits for
+  it before publishing; remove it only when every supported Node line
+  removes a tree natively.
 - `install()` records every replaced `node:fs` property and `uninstall()`
   restores them in reverse; `.native` variants are preserved; with no
   kernel installed, and inside the native section, a wrapper is its
@@ -793,8 +811,8 @@ stat        { size, mtimeMs } (+ sourceSize, encoding for compressed companions)
   and a `node --test` child loads it before any test runs: a glob that kept
   the patched functions is tested in a plain node process
   (`test/fixtures/glob-kept.cjs`). So does Node's rimraf, which
-  `test/helpers.js` loads with its first removal: a rimraf first loaded
-  under the patch is tested in `test/fixtures/rm-kept.cjs`.
+  `test/helpers.js` loads with its first removal: which functions it keeps
+  is tested in a plain node process too (`test/fixtures/rm-kept.cjs`).
 - A refused operation is tested for its error (`code`, `syscall`, `path`,
   `dest`) and for leaving nothing behind — no copy, no deletion, no move.
 - Prove V8 cached-data acceptance in a worker: the per-isolate compilation
