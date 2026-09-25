@@ -5,8 +5,17 @@ const assert = require('node:assert/strict');
 const { execFileSync } = require('node:child_process');
 const fs = require('node:fs');
 const path = require('node:path');
+const { VfsKernel } = require('../lib/kernel.js');
 const fsPatch = require('../lib/adapters/fs-patch.js');
-const { tmpDir, writeTree, rm, kernel, drain } = require('./helpers.js');
+const {
+  tmpDir,
+  writeTree,
+  rm,
+  config,
+  kernel,
+  drain,
+  quiet,
+} = require('./helpers.js');
 
 // The disk as it is, behind the patch: captured before any install.
 const {
@@ -368,14 +377,27 @@ describe('fs-patch under strict: the caller never runs in the section', () => {
   });
 });
 
-describe("Node's rimraf, first loaded while the patch is installed", () => {
-  it('removes whole trees: published, hidden and disk-only entries', () => {
+describe("Node's rimraf, loaded by initialize() before the patch", () => {
+  it('removes whole trees, sync or not: published, hidden and disk-only entries', () => {
     const script = path.join(__dirname, 'fixtures', 'rm-kept.cjs');
     const out = execFileSync(process.execPath, [script], { encoding: 'utf8' });
     assert.deepEqual(JSON.parse(out), {
       loadedBefore: false,
+      loadedAtInstall: true,
       failed: {},
       left: [],
     });
+  });
+
+  it('a close() while initialize() waits for it is final', async () => {
+    const root = tmpDir('vfs-reentry-close');
+    const places = { v: { origin: 'virtual', fs: { writable: true } } };
+    const k = new VfsKernel(config(places), { appRoot: root, console: quiet });
+    const init = k.initialize();
+    k.close();
+    await assert.rejects(init, /kernel closed before publication/);
+    assert.equal(k.state, 'closed');
+    assert.equal(k.cache, null);
+    rm(root);
   });
 });
