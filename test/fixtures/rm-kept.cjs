@@ -19,6 +19,7 @@ const RIMRAF = 'NativeModule internal/fs/rimraf';
 // name → remove(kernel, absolute path, place key), recursively.
 const REMOVALS = {
   place: (k, abs, key) => k.fs('site').rm(key, { recursive: true }),
+  rmSync: (k, abs) => fs.rmSync(abs, { recursive: true }),
 };
 
 const main = async () => {

@@ -621,6 +621,23 @@ depth counter per thread under `try` / `finally` — so no callback or
 continuation ever runs inside it, and a stream, which opens after the call
 returned, reads through captured functions instead.
 
+**A call the routing passes through runs its original in the native section
+— every form of every implemented operation and every guard, except `cp`;
+`glob`, `watch`, `watchFile`, `existsSync` and `createReadStream` pass
+through as they are. A callback `node:fs` calls before returning runs
+outside the section.** _Why:_ what Node's implementation calls back into
+`node:fs` before it returns is the call routed already, not a new one:
+`writeFileSync` and `truncateSync` open the file through `fs.openSync`, the
+callback forms of `writeFile`, `appendFile` and `truncate` do so before
+returning, `rmSync` lstats its path and on Node 22 walks the tree. Routed
+again, they refused what the first routing allowed: a write to a published
+file of a writable place (`ENOTSUP`), a recursive `rm` under strict
+(`EACCES`). `cp` calls its `filter`, the caller's code, inside the call —
+in the section, the filter would read past strict routing — and so does
+`node:fs` with a callback it calls at once (an aborted signal). A glob
+loaded under the patch keeps walking through routing; watchers and streams
+deliver later; `existsSync` calls nothing back.
+
 **Listings sort and deduplicate the string names, then encode them as
 asked; a recursive `encoding: 'buffer'` listing works in places.** _Why:_
 the encoding must not change order or duplicates, and a Buffer name cannot
@@ -687,6 +704,7 @@ workers call `attach()`.** _Why:_ preloads do not run in worker threads.
 | A glob-only fix for stale patched references; a wrapper that keeps or re-installs a kernel                      | every captured reference is affected; a closed kernel is gone     |
 | An asynchronous native section (`AsyncLocalStorage`)                                                            | user callbacks inherit it, past strict; `async_hooks` cost on 22  |
 | Own primitives in place of `rmSync`                                                                             | rewrites its retries (`EBUSY`, `EPERM`, `maxRetries`) and errors  |
+| A native section around `cp`                                                                                    | its `filter`, the caller's code, would read past strict           |
 | Standalone place-level `script` domain, provider `memory`, `vfs:` URLs, metawatch, root-level `ext` / `compile` | superseded by the place / domain model; no aliases                |
 
 ## Invariants
@@ -713,6 +731,9 @@ workers call `attach()`.** _Why:_ preloads do not run in worker threads.
   implementations call the public `node:fs` back (`writeFileSync` →
   `openSync`, `rmSync` → rimraf), and the patch passes such calls through
   untouched while the section is open.
+- The native section opens only around the library's own disk I/O and a
+  call its routing passed through — never around `cp`, whose `filter` is
+  the caller's code — and no callback of the caller runs inside it.
 - `watchPath()` is a load-bearing workaround (nodejs/node#63638: an 8.3
   alias in a watched path aborts libuv on Windows); remove it only when the
   engines floor clears every affected release.
