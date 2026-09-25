@@ -997,6 +997,7 @@ in `readdir` / `exists` / patched `fs`.
 ```
 npm test        # node --test "test/*.test.js"
 npm run lint    # eslint + prettier
+npm run bench   # hot-path benchmarks (not part of npm test or CI)
 ```
 
 Run the complete test suite with `npm test`. The suite covers
@@ -1004,6 +1005,13 @@ configuration, cache allocation, scanner, places, routing, module hooks,
 compression, SEA, watcher, bootstrap, workers and strict routing
 behavior. The symlink test may be skipped on platforms where test
 symlinks are unavailable.
+
+`npm run bench [-- --only read,patch]` measures the hot paths — reads,
+streams, the patched `node:fs`, routing, publication, update → ACK →
+free, watcher epochs, compaction, `require` and `initialize()` — each
+scenario in its own process, and writes JSON to `tmp/bench/`;
+`node bench/compare.js base.json new.json [--noise base2.json]` compares
+two runs.
 
 ## Support
 
