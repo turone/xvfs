@@ -755,3 +755,9 @@ stat        { size, mtimeMs } (+ sourceSize, encoding for compressed companions)
   cache masks `cachedDataRejected` in the compiling thread.
 - `npm ci` must work without git or SSH access: git dependencies are pinned
   as HTTPS tarball URLs with lockfile integrity.
+- Performance claims rest on `npm run bench` (`bench/`, outside `npm test`
+  and CI): one process per scenario, a warm-up, then the median of several
+  rounds; latencies as p50 / p99, memory as RSS and pool usage. A change is
+  significant when it exceeds max(5 %, 2 × noise), the noise being the
+  difference between two baseline runs (`bench/compare.js --noise`). Every
+  reach into kernel internals is in `bench/lib.js`.
