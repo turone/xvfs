@@ -70,6 +70,7 @@ SAB segments ──────────── one physical copy ────
 | `lib/mutation-rpc.js`           | `MutationClient` + `RemoteStore`: worker → main mutations                                                                                                 |
 | `lib/scanner.js`                | `scan()`: directory walk → `Map<key, FileInput>`                                                                                                          |
 | `lib/watcher.js`                | `DirWatcher`: `fs.watch` over each place tree (recursive where native, else one per directory) → debounced epochs; `watchPath()`                          |
+| `lib/disk.js`                   | the disk past the patch: `node:fs` captured at load; the native section (`native()`, `inNative()`) for calls that re-enter it; own `fs` for streams       |
 | `lib/companion.js`              | companion keys: `src\0require:bytecode`, `src\0script:bytecode`, `src\0fs:<enc>`                                                                          |
 | `lib/stats.js`, `lib/errors.js` | `VfsStats` / `VfsDirent`; node:fs-shaped errors                                                                                                           |
 | `lib/adapters/fs-patch.js`      | table-driven `node:fs` patch executing router decisions                                                                                                   |
@@ -604,6 +605,22 @@ glob keeps from its first use — outlives `uninstall()`; it threw a
 result. Wrapping the restored originals keeps repeated install / uninstall
 from stacking wrappers.
 
+**The library's own disk I/O — kernel, scanner, watcher, `PlaceFs`, the
+copy engine — goes through `lib/disk.js`: `node:fs` as it was when it
+loaded, and a native section around every synchronous call whose
+implementation calls the public `node:fs` back; until it returns, each
+wrapper is its original. A disk entry's stream gets an `fs` of its own.**
+_Why:_ a captured function is not enough: `readFileSync` and
+`writeFileSync` of a Buffer open the file through `fs.openSync`, `rmSync`
+lstats its path through `fs.lstatSync` and on Node 22 walks the tree with
+the functions its rimraf took from `node:fs`. Routed, those inner calls
+refused a write to a published file (`ENOTSUP`), a new or hidden file under
+strict (`EACCES`), and a recursive `rm` listed the place instead of the
+disk and stopped with part of the tree gone. The section is synchronous — a
+depth counter per thread under `try` / `finally` — so no callback or
+continuation ever runs inside it, and a stream, which opens after the call
+returned, reads through captured functions instead.
+
 **Listings sort and deduplicate the string names, then encode them as
 asked; a recursive `encoding: 'buffer'` listing works in places.** _Why:_
 the encoding must not change order or duplicates, and a Buffer name cannot
@@ -668,6 +685,8 @@ workers call `attach()`.** _Why:_ preloads do not run in worker threads.
 | A guarded native `opendir`; a native listing of a disk-only directory                                           | a second listing path: hidden raw files, no virtual entries       |
 | Native passthrough of the strict `appRoot`                                                                      | lists unmanaged names                                             |
 | A glob-only fix for stale patched references; a wrapper that keeps or re-installs a kernel                      | every captured reference is affected; a closed kernel is gone     |
+| An asynchronous native section (`AsyncLocalStorage`)                                                            | user callbacks inherit it, past strict; `async_hooks` cost on 22  |
+| Own primitives in place of `rmSync`                                                                             | rewrites its retries (`EBUSY`, `EPERM`, `maxRetries`) and errors  |
 | Standalone place-level `script` domain, provider `memory`, `vfs:` URLs, metawatch, root-level `ext` / `compile` | superseded by the place / domain model; no aliases                |
 
 ## Invariants
@@ -688,15 +707,19 @@ workers call `attach()`.** _Why:_ preloads do not run in worker threads.
   whose `stat` lands after `close()` is dropped.
 - Companions never appear in `readdir`, `exists`, routing or the patched fs;
   `Place.companions(key)` enumerates them — never hand-roll key lists.
-- Kernel-internal disk I/O (kernel, scanner, watcher, disk territory in
-  `PlaceFs`) uses `node:fs` functions captured at load time, so the patch
-  never blocks the kernel.
+- Kernel-internal disk I/O (kernel, scanner, watcher, `PlaceFs`, the copy
+  engine) uses `lib/disk.js`: functions captured at load time, the
+  synchronous ones that re-enter run in a native section — Node's own
+  implementations call the public `node:fs` back (`writeFileSync` →
+  `openSync`, `rmSync` → rimraf), and the patch passes such calls through
+  untouched while the section is open.
 - `watchPath()` is a load-bearing workaround (nodejs/node#63638: an 8.3
   alias in a watched path aborts libuv on Windows); remove it only when the
   engines floor clears every affected release.
 - `install()` records every replaced `node:fs` property and `uninstall()`
   restores them in reverse; `.native` variants are preserved; with no
-  kernel installed a wrapper is its original.
+  kernel installed, and inside the native section, a wrapper is its
+  original.
 - Listings are sorted and deduplicated by string name before any encoding.
 - A preparer runs once per publication attempt, on the publishing thread,
   never on read; its raw input is never kept in the VFS; a prepared source
@@ -748,7 +771,9 @@ stat        { size, mtimeMs } (+ sourceSize, encoding for compressed companions)
 - glob captures the `node:fs` functions it walks with when it is loaded,
   and a `node --test` child loads it before any test runs: a glob that kept
   the patched functions is tested in a plain node process
-  (`test/fixtures/glob-kept.cjs`).
+  (`test/fixtures/glob-kept.cjs`). So does Node's rimraf, which
+  `test/helpers.js` loads with its first removal: a rimraf first loaded
+  under the patch is tested in `test/fixtures/rm-kept.cjs`.
 - A refused operation is tested for its error (`code`, `syscall`, `path`,
   `dest`) and for leaving nothing behind — no copy, no deletion, no move.
 - Prove V8 cached-data acceptance in a worker: the per-isolate compilation
