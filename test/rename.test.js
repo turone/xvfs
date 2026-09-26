@@ -406,3 +406,101 @@ describe('rename routes its source and its destination', () => {
     assert.equal(refused[0][0].code, 'EACCES');
   });
 });
+
+// A file renamed onto itself, as node:fs renames it: once the rename's
+// checks pass, nothing changes — no publication, no update. Nor does a
+// directory renamed onto itself.
+describe('a rename onto itself', () => {
+  it('changes nothing in sab, map or from a worker; its checks still refuse', async () => {
+    const root = writeTree(tmpDir('vfs-rename-self'), { 'ro/r.txt': 'r' });
+    const places = {
+      writable: true,
+      ext: ['txt', 'js'],
+      prepare: { wrap: ['js'] },
+    };
+    const k = await kernel(
+      root,
+      {
+        v: { origin: 'virtual', fs: places },
+        m: { provider: 'map', origin: 'virtual', fs: places },
+        ro: { fs: { ext: ['txt'] } },
+      },
+      {},
+      { preparers: { wrap: (raw) => `[${raw}]` } },
+    );
+    for (const name of ['v', 'm']) {
+      await k.fs(name).writeFile('/a.txt', 'alpha');
+      await k.fs(name).writeFile('/d/b.txt', 'bravo');
+      await k.fs(name).writeFile('/p.js', 'p');
+    }
+    const w = worker(k);
+    const realNow = Date.now;
+    try {
+      const at = (name, key) => k.fs(name).pathOf(key);
+      // The published version of every file of both places: its entry,
+      // bytes and mtime.
+      const versions = () =>
+        ['v', 'm'].flatMap((name) =>
+          [...k.registry.get(name).files].map(([key, entry]) => [
+            key,
+            entry,
+            Buffer.from(entry.data),
+            entry.stat.mtimeMs,
+          ]),
+        );
+      const before = versions();
+      const updates = k.nextUpdateId;
+      const retires = k.nextRetireId;
+      const used = k.cache.stats().totalUsed;
+      const threads = [
+        ['sab', 'v', k.fs('v')],
+        ['map', 'm', k.fs('m')],
+        ['worker', 'v', w.kernel.fs('v')],
+      ];
+      // However late the renames, nothing takes their time.
+      Date.now = () => realNow() + 60_000;
+      for (const [label, , place] of threads) {
+        for (const [from, to] of [
+          ['/a.txt', '/a.txt'],
+          ['/d', '/d'],
+          ['/d/', '/d/'],
+        ]) {
+          const done = await place.rename(from, to);
+          assert.equal(done, undefined, `${label}: ${from}`);
+        }
+      }
+      Date.now = realNow;
+      for (const [label, name, place] of threads) {
+        for (const [from, to, code] of [
+          ['/none.txt', '/none.txt', 'ENOENT'],
+          ['/p.js', '/p.js', 'ENOTSUP'],
+          ['/a.txt/', '/a.txt', 'ENOTDIR'],
+        ]) {
+          const err = await outcome(() => place.rename(from, to));
+          const key = from.replace(/\/$/, '');
+          refusal(err, code, at(name, key), at(name, to));
+          assert.ok(err.message.includes(code), label);
+        }
+      }
+      for (const place of [k.fs('ro'), w.kernel.fs('ro')]) {
+        const err = await outcome(() => place.rename('/r.txt', '/r.txt'));
+        refusal(err, 'EROFS', at('ro', '/r.txt'), undefined);
+      }
+      assert.deepEqual(versions(), before, 'the same versions');
+      for (const [i, [key, entry]] of versions().entries()) {
+        assert.equal(entry, before[i][1], `${key}: not republished`);
+      }
+      assert.equal(w.kernel.fs('v').readFile('/a.txt', 'utf8'), 'alpha');
+      assert.equal(w.kernel.fs('v').readFile('/d/b.txt', 'utf8'), 'bravo');
+      assert.equal(k.nextUpdateId, updates, 'no update');
+      assert.equal(k.nextRetireId, retires, 'nothing retired');
+      assert.equal(k.cache.stats().totalUsed, used, 'nothing allocated');
+      assert.equal(k.mutations.size, 0);
+    } finally {
+      Date.now = realNow;
+      w.kernel.close();
+      k.close();
+      rm(root);
+    }
+  });
+});
