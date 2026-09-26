@@ -57,7 +57,7 @@ SAB segments ──────────── one physical copy ────
 | `lib/config.js`                 | `VfsConfig`: raw → deep-frozen `{ global, places }`; domains, `prepare` index, `fs.fallback` normalization                                                |
 | `lib/cache.js`                  | `Pool` + `SegmentRegistry` + `FilesystemCache`: SAB allocator; `allocate()` places bytes privately, `put()` / `remove()` publish, `compact()` plans moves |
 | `lib/kernel.js`                 | `VfsKernel`: lifecycle, the publication pipeline, epochs (`#flush`), retirement, watcher FIFO, mutation queue + RPC server, `link()`, worker side         |
-| `lib/pipeline.js`               | What a file is: `Preparers`, `prepareInput()`, `bytecodeFor()`, `subtreeMoves()` (what moves without the pipeline)                                        |
+| `lib/pipeline.js`               | What a file is: `Preparers`, `prepareInput()`, `bytecodeFor()`                                                                                            |
 | `lib/compressor.js`             | `Compressor`: codec work only                                                                                                                             |
 | `lib/pins.js`                   | `Pins`: per-thread direct consumers of shared versions                                                                                                    |
 | `lib/serial-queue.js`           | `SerialQueue`: one task at a time, arrival order                                                                                                          |
@@ -65,8 +65,9 @@ SAB segments ──────────── one physical copy ────
 | `lib/place.js`                  | `Place`: projection (`PlaceFiles`, with its directory index), `visible()`, `cached()`, `scripted()`, `prepared()`, `preparerOf()`, `companions()`         |
 | `lib/place-fs.js`               | `PlaceFs` facade, `VfsReadStream`, view leases, disk territory of `fs.fallback: 'disk'`                                                                   |
 | `lib/registry.js`               | `PlaceRegistry` (path → place, key; `Containment` in `appRoot`) + `FsRouter` (read / mutate / copy / rename / link decisions)                             |
-| `lib/map-store.js`              | `MapStore`: the per-thread Map sink, atomic publish                                                                                                       |
-| `lib/sab-store.js`              | `SabStore`: main-thread mutations of a `sab + virtual` place                                                                                              |
+| `lib/virtual-store.js`          | `VirtualStore`: the semantics of a virtual place's mutations, once — checks, their order, refusals (`checkHierarchy`, `subtreeMoves()`)                   |
+| `lib/map-store.js`              | `MapStore` (a `VirtualStore`): mutations at once on the thread's own Map; the Map sink of the pipeline, atomic publish                                    |
+| `lib/sab-store.js`              | `SabStore` (a `VirtualStore`): main-thread mutations of a `sab + virtual` place, each in its key's turn; keys in flight                                   |
 | `lib/mutation-queue.js`         | `MutationQueue`: per-(place, key) ordering, exclusive place barrier                                                                                       |
 | `lib/mutation-rpc.js`           | `MutationClient` + `RemoteStore`: worker → main mutations                                                                                                 |
 | `lib/scanner.js`                | `scan()`: directory walk, then stats `IO_LIMIT` at a time → `Map<key, FileInput>` in the order of the walk                                                |
@@ -369,6 +370,18 @@ deadlocks and stalls both.
 one update per accepted mutation, no coalescing.** _Why:_ each Promise
 corresponds to its own publication; validation and publication see the same
 state without serializing unrelated keys.
+
+**The semantics of a virtual place's mutations is written once
+(`VirtualStore`): which checks run, in which order, and what each refusal
+is; a store only executes it — `MapStore` at once, on the thread's own Map,
+`SabStore` in the key's turn of the kernel's queue (under the place barrier
+for `rm` and the rename of a directory), publishing through the kernel.
+Every check runs inside that turn, and a mutation takes the bytes it is
+given when it is called.** _Why:_ the two stores followed the same
+`node:fs` rules, each with its own copy of them to keep in step; a template
+method keeps apart only what differs — at once or queued, keys in flight or
+none — where one class over an execution engine would test every result for
+a thenable.
 
 **`link()` / `attach()` is the only worker transport.** _Why:_ one
 implementation of the protocol — ACKs, retained versions, releases,
@@ -795,6 +808,7 @@ workers call `attach()`.** _Why:_ preloads do not run in worker threads.
 | Recompressing, re-preparing or moving part of a subtree                                                         | wasted work; no raw input; a tree split between two names         |
 | A hierarchy check against the published index only                                                              | two overlapping mutations would both pass                         |
 | Locking every ancestor of a created key                                                                         | serializes all writes of one directory                            |
+| One store class over an execution engine, its results sync or thenable                                          | a thenable test of every result; a subclass knows its execution   |
 | Scanning every key for implicit directories                                                                     | linear in the size of the place, on hot paths                     |
 | Updating the directory index at each mutation site                                                              | one new call site could forget it                                 |
 | A native watcher for a published file                                                                           | raw disk events are not publications                              |
