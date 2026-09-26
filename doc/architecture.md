@@ -454,18 +454,20 @@ raw bytes and miss virtual entries.
   `createReadStream`, `writeFile`, `appendFile`, `unlink`, `mkdir`, `rm`,
   `rename`, `copyFile` and a non-recursive `cp`.
 - _Recognized but unsupported for managed territory_ (`ENOTSUP`): `open` of
-  a virtual entry; a copy or `rename` of a prepared virtual entry, a copy
-  of a place directory; a recursive `cp` of or into managed territory; a
-  hard link into or out of a place; `watch` of managed territory; recursive
-  walks (`readdir`, `opendir`, `watch`, `rm`, `rmdir`) and `rename` of a
-  tree that holds places; a directory renamed across a place's boundary (a
-  place's root included); a virtual subtree rename that is not raw-only;
-  guarded mutations in a virtual place. A hidden source is `EACCES`.
+  a virtual entry, whatever its flags; a copy or `rename` of a prepared
+  virtual entry, a copy of a place directory; a recursive `cp` of or into
+  managed territory; a hard link into or out of a place; `watch` of managed
+  territory; recursive walks (`readdir`, `opendir`, `watch`, `rm`, `rmdir`)
+  and `rename` of a tree that holds places; a directory renamed across a
+  place's boundary (a place's root included); a virtual subtree rename that
+  is not raw-only; guarded mutations in a virtual place. A hidden source is
+  `EACCES`.
 - _Native passthrough outside managed territory_: unrelated paths outside
   `appRoot`, `disk` / `node-default` places, disk-territory files,
   unmanaged paths without strict; and the guarded APIs (`chmod`, `chown`,
   `utimes`, `truncate`, `symlink`, `readlink`, `statfs`, `watchFile`,
-  `rmdir`, `glob`) once every path argument is routed.
+  `rmdir`, `glob`, and `open` with a flag that writes) once every path
+  argument is routed.
 
 _Why:_ an application must be able to tell which calls the VFS serves, which
 it refuses and which belong to the operating system — and a new API must
@@ -597,6 +599,21 @@ entry.** _Why:_ an unimplemented API must not become a bypass; only its
 store changes a virtual place — a native `copyFile` into one left a stray
 disk file the place never showed; SAB / Map entries have no file
 descriptor.
+
+**`open` with a flag that writes — a string with `w`, `a`, `x` or `+`, a
+number with `O_WRONLY`, `O_RDWR`, `O_CREAT`, `O_TRUNC` or `O_APPEND` — is
+a guarded mutation of what its read routing passes through: `EROFS` /
+`EACCES` as routed, `ENOTSUP` in a virtual place. The read routing answers
+first: a published entry stays `ENOTSUP` and a hidden path `EACCES`,
+whatever the flag. `createWriteStream` opens through `fs.open`, so its
+stream gets the same error.** _Why:_ routed only as a read,
+`openSync(p, 'w')` and `createWriteStream` bypassed the mutation policy:
+they created a file in a read-only place, and a stray one in a virtual
+place's directory on disk, which the place never shows. Checked after the
+read routing, the check keeps every refusal `open` gave before; what Node's
+own implementation opens inside a call the routing passed through
+(`writeFileSync` → `openSync`) runs in the native section and is not
+routed again.
 
 **A wrapper calls its original once no kernel is installed, and each
 `install()` wraps the restored originals.** _Why:_ a reference taken while
@@ -768,9 +785,9 @@ workers call `attach()`.** _Why:_ preloads do not run in worker threads.
   never on read; its raw input is never kept in the VFS; a prepared source
   is never a disk entry; `prepare` and `scriptOptions` never turn
   `fs.script` on.
-- No native listing, copy, link, rename or watch runs over managed
-  territory past its routing; a refusal comes before any disk read or
-  write.
+- No native listing, copy, link, rename, watch or `open` that writes runs
+  over managed territory past its routing; a refusal comes before any disk
+  read or write.
 - A copy or a rename hands on the raw input only — never a prepared result
   or a companion; the destination prepares it once, and a virtual
   destination never gets a disk file.
