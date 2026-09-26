@@ -5,6 +5,7 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
 const { bytecodeKey, compressedKey } = require('../lib/companion.js');
+const { IO_LIMIT } = require('../lib/pool.js');
 const fsPatch = require('../lib/adapters/fs-patch.js');
 const {
   tmpDir,
@@ -424,6 +425,136 @@ describe('watcher: epoch ordering', () => {
       assert.deepEqual(errors, [], 'a closed kernel stays quiet');
     } finally {
       ctx.done();
+    }
+  });
+});
+
+// The jobs of one epoch run IO_LIMIT (16) at a time: a whole checkout at
+// once would hold a descriptor per file (EMFILE). Reads wait at a gate the
+// test opens, so how many run at once is decided by the epoch alone; it
+// still commits as one update. Epochs are emitted by hand, as above. A
+// bound other than 16 fails within seconds and never hangs: the waits for
+// the gate have a deadline, and the gate opens in `finally`.
+describe('watcher: a bounded epoch', () => {
+  const setup = async (count, console = quiet) => {
+    const files = {};
+    for (let i = 0; i < count; i++) files[`site/d${i % 4}/f${i}.txt`] = 'v1';
+    const root = writeTree(tmpDir('watch-bounded'), files);
+    const k = await kernel(
+      root,
+      { site: { fs: true } },
+      { watch: true, watchTimeout: 60000 },
+      { console },
+    );
+    const t = tap(k);
+    const at = (rel) => path.join(root, rel);
+    const real = k.cache.reader;
+    // Reads that reached the gate, those waiting at it, those past it and
+    // not done yet (`now`), and the most of those at once.
+    const reads = { arrived: 0, waiting: [], now: 0, peak: 0, open: false };
+    k.cache.reader = async (file, view) => {
+      reads.arrived++;
+      reads.peak = Math.max(reads.peak, ++reads.now);
+      try {
+        if (!reads.open) {
+          await new Promise((resolve) => reads.waiting.push(resolve));
+        }
+        await real(file, view);
+      } finally {
+        reads.now--;
+      }
+    };
+    // Once `count` reads have reached the gate; a bound that never lets
+    // them fails after a deadline.
+    const arrived = async (count) => {
+      const reached = await until(() => reads.arrived >= count, 4000, 5);
+      assert.ok(reached, `${reads.arrived} of ${count} reads at the gate`);
+    };
+    // Lets the reads at the gate through; the gate holds the next ones.
+    const release = () => {
+      for (const go of reads.waiting.splice(0)) go();
+    };
+    const open = () => {
+      reads.open = true;
+      release();
+    };
+    const done = async () => {
+      open();
+      await k.watchQueue.idle;
+      k.close();
+      rm(root);
+    };
+    const rels = Object.keys(files);
+    return { k, t, at, rels, reads, arrived, release, open, done };
+  };
+
+  it('reads at most 16 files at a time and publishes all in one update', async () => {
+    const { k, t, at, rels, reads, arrived, release, done } = await setup(40);
+    try {
+      const events = new Map();
+      for (const rel of rels) {
+        fs.writeFileSync(at(rel), `v2 ${rel}`);
+        events.set(at(rel), 'change');
+      }
+      const first = k.nextUpdateId;
+      const delivered = nextMessage(t.port);
+      k.watcher.emit('epoch', events);
+      // Waves of 16, 16 and 8: a wave reaches the gate and no read joins it
+      // until it is let through; each read that ends lets the next job in,
+      // while the reads of the wave before may still run.
+      for (let passed = 0; passed < rels.length; passed += IO_LIMIT) {
+        const wave = Math.min(IO_LIMIT, rels.length - passed);
+        await arrived(passed + wave);
+        assert.equal(reads.waiting.length, wave, 'the rest wait for a slot');
+        assert.ok(reads.now <= IO_LIMIT, `${reads.now} reads at once`);
+        release();
+      }
+      await k.watchQueue.idle;
+      assert.equal(reads.peak, 16, 'never more than 16 reads at once');
+      assert.equal(reads.arrived, rels.length, 'every file read once');
+      assert.equal(k.nextUpdateId - first, 1, 'one update');
+      await delivered;
+      const [update] = t.updates();
+      const keys = rels.map((rel) => rel.slice('site'.length));
+      assert.deepEqual(
+        update.places.site.entries.map(([key]) => key).sort(),
+        keys.sort(),
+      );
+      const site = k.fs('site');
+      for (const key of keys) {
+        assert.equal(site.readFile(key, 'utf8'), `v2 site${key}`);
+      }
+    } finally {
+      await done();
+    }
+  });
+
+  it('close() starts none of the jobs still waiting for a slot', async () => {
+    const errors = [];
+    const log = (m) => errors.push(m);
+    const capture = { ...quiet, warn: log, error: log };
+    const { k, at, rels, reads, arrived, open, done } = await setup(
+      IO_LIMIT + 1,
+      capture,
+    );
+    try {
+      // IO_LIMIT reads fill the pool; the delete of a gone file waits behind.
+      const [gone, ...changed] = rels;
+      fs.unlinkSync(at(gone));
+      const events = new Map(changed.map((rel) => [at(rel), 'change']));
+      events.set(at(gone), 'delete');
+      const first = k.nextUpdateId;
+      k.watcher.emit('epoch', events);
+      await arrived(IO_LIMIT);
+      const idle = k.watchQueue.idle;
+      k.close();
+      open();
+      await idle;
+      assert.equal(reads.arrived, IO_LIMIT, 'no read after close()');
+      assert.equal(k.nextUpdateId, first, 'nothing published');
+      assert.deepEqual(errors, [], 'the waiting delete never ran');
+    } finally {
+      await done();
     }
   });
 });
