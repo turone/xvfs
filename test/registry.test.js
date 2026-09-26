@@ -78,6 +78,36 @@ describe('PlaceRegistry.route: appRoot containment', () => {
     assert.equal(registry.route(`${drive}\\srv\\app\\api\\x.js`), null);
   });
 
+  // path.resolve counted where the registry calls it, on node:path.
+  it('a path in resolved form is not resolved again; the rest is', () => {
+    const { resolve } = path;
+    let calls = 0;
+    path.resolve = (...args) => {
+      calls++;
+      return resolve(...args);
+    };
+    try {
+      const x = { place: api, key: '/x.js' };
+      assert.deepEqual(registry.route(at('api', 'x.js')), x);
+      assert.deepEqual(registry.route(at('api')), { place: api, key: '' });
+      assert.equal(registry.route(path.parse(appRoot).root), null);
+      assert.equal(registry.encloses(appRoot), true);
+      assert.equal(calls, 0);
+      assert.deepEqual(
+        registry.route(`${at('api')}${path.sep}.${path.sep}x.js`),
+        x,
+      );
+      assert.deepEqual(registry.route(at('api', 'x.js') + path.sep), x);
+      assert.equal(registry.encloses(appRoot + path.sep), true);
+      assert.equal(calls, 3);
+    } finally {
+      path.resolve = resolve;
+    }
+    assert.throws(() => registry.route(Buffer.from(appRoot)), {
+      code: 'ERR_INVALID_ARG_TYPE',
+    });
+  });
+
   it('appRoot matches as path.relative does, a place by its exact name', () => {
     const win32 = process.platform === 'win32';
     const upper = path.join(appRoot.toUpperCase(), 'api', 'x.js');
@@ -309,6 +339,47 @@ describe('Containment: path.relative, computed from the strings', () => {
     assert.equal(app.encloses('/SRV'), false);
     assert.equal(new Containment(path.posix, '/').below('/x'), 'x');
   });
+
+  // The flavor with its relative and resolve counted.
+  const counted = (P) => {
+    const spy = { ...P, relatives: 0, resolves: 0 };
+    spy.relative = (from, to) => {
+      spy.relatives++;
+      return P.relative(from, to);
+    };
+    spy.resolve = (...args) => {
+      spy.resolves++;
+      return P.resolve(...args);
+    };
+    return spy;
+  };
+
+  for (const flavor of ['win32', 'posix']) {
+    it(`${flavor}: a plain path takes neither path.relative nor path.resolve`, () => {
+      const P = path[flavor];
+      const spy = counted(P);
+      const root = P.resolve(ROOTS[flavor][0]);
+      const app = new Containment(spy, root);
+      const { sep } = P;
+      const plain = [
+        root,
+        root + sep + 'site' + sep + 'a.txt',
+        root.toUpperCase() + sep + 'site',
+        root + 'x',
+        root.slice(0, -1),
+        P.dirname(root),
+        P.parse(root).root,
+        P.resolve(ROOTS[flavor][1]) + sep + 'x',
+      ];
+      const answers = plain.map((p) => [app.below(p), app.encloses(p)]);
+      assert.deepEqual([spy.relatives, spy.resolves], [0, 0]);
+      const slow = reference(P, root);
+      assert.deepEqual(
+        answers,
+        plain.map((p) => [slow.below(p), slow.encloses(p)]),
+      );
+    });
+  }
 });
 
 // A path the router takes as resolved skips path.resolve, so the check may
