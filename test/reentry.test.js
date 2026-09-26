@@ -377,13 +377,30 @@ describe('fs-patch under strict: the caller never runs in the section', () => {
   });
 });
 
-describe("Node's rimraf, loaded by initialize() before the patch", () => {
-  it('removes whole trees, sync or not: published, hidden and disk-only entries', () => {
-    const script = path.join(__dirname, 'fixtures', 'rm-kept.cjs');
-    const out = execFileSync(process.execPath, [script], { encoding: 'utf8' });
-    assert.deepEqual(JSON.parse(out), {
+describe("Node's rimraf keeps the node:fs it first loads with", () => {
+  const script = path.join(__dirname, 'fixtures', 'rm-kept.cjs');
+  const run = (mode) =>
+    JSON.parse(
+      execFileSync(process.execPath, [script, mode], { encoding: 'utf8' }),
+    );
+
+  it('loaded by initialize() before the patch: every form removes whole trees', () => {
+    assert.deepEqual(run('native'), {
+      mode: 'native',
       loadedBefore: false,
       loadedAtInstall: true,
+      loadedAtRemoval: true,
+      failed: {},
+      left: [],
+    });
+  });
+
+  it('loaded under the patch, as in a worker: the synchronous forms still do', () => {
+    assert.deepEqual(run('patched'), {
+      mode: 'patched',
+      loadedBefore: false,
+      loadedAtInstall: false,
+      loadedAtRemoval: true,
       failed: {},
       left: [],
     });

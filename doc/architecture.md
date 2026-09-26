@@ -812,7 +812,8 @@ stat        { size, mtimeMs } (+ sourceSize, encoding for compressed companions)
   the patched functions is tested in a plain node process
   (`test/fixtures/glob-kept.cjs`). So does Node's rimraf, which
   `test/helpers.js` loads with its first removal: which functions it keeps
-  is tested in a plain node process too (`test/fixtures/rm-kept.cjs`).
+  is tested in a plain node process too (`test/fixtures/rm-kept.cjs`),
+  loaded by `initialize()` and, as in a worker, under the patch.
 - A refused operation is tested for its error (`code`, `syscall`, `path`,
   `dest`) and for leaving nothing behind — no copy, no deletion, no move.
 - Prove V8 cached-data acceptance in a worker: the per-isolate compilation
