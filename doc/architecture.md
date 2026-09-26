@@ -78,7 +78,8 @@ SAB segments ──────────── one physical copy ────
 | `lib/disk.js`                   | the disk past the patch: `node:fs` captured at load; the native section (`native()`, `inNative()`) for calls that re-enter it; own `fs` for streams       |
 | `lib/companion.js`              | companion keys: `src\0require:bytecode`, `src\0script:bytecode`, `src\0fs:<enc>`                                                                          |
 | `lib/stats.js`, `lib/errors.js` | `VfsStats` / `VfsDirent`, a listing's result (`listing()`); node:fs-shaped errors                                                                         |
-| `lib/adapters/fs-patch.js`      | table-driven `node:fs` patch executing router decisions                                                                                                   |
+| `lib/adapters/fs-patch.js`      | table-driven `node:fs` patch executing router decisions: the operation cores and their variants, guards, glob, watch, the strict root's listing, install  |
+| `lib/adapters/fs-copy.js`       | the copy engine of the patch: a copy's options, the source's raw input, the write through the destination — its store or the disk                         |
 | `lib/adapters/module-hook.js`   | `module.registerHooks` resolve/load + `_compile` cached data                                                                                              |
 | `lib/bootstrap/*`               | `register.mjs` (main thread, `--import`), `attach.js` (workers)                                                                                           |
 
@@ -483,9 +484,9 @@ before the queue, it would not be exclusive.
 
 ## Routing and strict mode
 
-**The router decides, the adapters execute; `fs-patch` and `module-hook`
-never read the config.** _Why:_ one chokepoint, uniform across sync,
-callback, promise and guarded APIs.
+**The router decides, the adapters execute; `fs-patch` (with `fs-copy`) and
+`module-hook` never read the config.** _Why:_ one chokepoint, uniform across
+sync, callback, promise and guarded APIs.
 
 **Containment is lexical: only a real `..` component leaves `appRoot`; the
 router never stats or resolves paths.** _Why:_ `..private` is a legal name
@@ -643,7 +644,13 @@ store: its preparer runs once and no file appears on disk. Raw on disk into
 a native destination is `node:fs` itself. Companions are never copied.
 `node:fs` options keep their meaning for one file; one the VFS cannot honor
 (`COPYFILE_FICLONE_FORCE`, `filter`, `preserveTimestamps`) is `ENOTSUP`.
-Errors name the source (`path`) and the destination (`dest`). _Why:_ the
+Errors name the source (`path`) and the destination (`dest`). The patch
+routes both ends and refuses, before anything is read, an option the copy
+cannot honor and a `*Sync` copy into a place that cannot block; given the
+kernel, the two routes and the two paths, the copy engine
+(`lib/adapters/fs-copy.js`) refuses what needs a stat — a symbolic link, a
+directory in the way — reads the raw input and writes the destination,
+answering the write's `EEXIST` as the copy's options say. _Why:_ the
 raw input is what a publication consumes, so the destination's policy
 decides the content — copying canonical (prepared) content into a place
 that prepares the same extension would prepare it twice, and its bundle may
@@ -920,7 +927,8 @@ workers call `attach()`.** _Why:_ preloads do not run in worker threads.
   `node:fs` back (`writeFileSync` → `openSync`, `rmSync` → rimraf), and
   the patch passes such calls through untouched while the section is
   open. Inside `lib/`, only `disk.js`, which captures `node:fs`, and
-  `fs-patch.js`, which patches it, load `node:fs`.
+  `fs-patch.js`, which patches it, load `node:fs`; the copy engine takes
+  `fs.constants` from `disk.js`.
 - The native section opens only around the library's own disk I/O and a
   call its routing passed through — never around `cp`, whose `filter` is
   the caller's code — and no callback of the caller runs inside it.
