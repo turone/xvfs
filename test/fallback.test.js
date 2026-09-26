@@ -503,7 +503,10 @@ describe("fs.fallback: 'disk' — nested listings, named as path.relative does",
     }
   });
 
-  it('the strict appRoot lists its place the same way', () => {
+  // As given, with a trailing separator and, where it routes too, in the
+  // other case: names below each place, Dirent parents under the root as
+  // the caller spelled it.
+  it('the strict appRoot lists its place the same way, however spelled', () => {
     const expected = [
       ['site', true],
       ...reference().map(([name, isDirectory]) => [
@@ -512,15 +515,63 @@ describe("fs.fallback: 'disk' — nested listings, named as path.relative does",
       ]),
     ];
     const names = expected.map(([name]) => name);
-    assert.deepEqual(fs.readdirSync(root, { recursive: true }), names);
-    const typed = fs.readdirSync(root, {
-      recursive: true,
-      withFileTypes: true,
-    });
-    assert.deepEqual(
-      shown(typed),
-      expected.map((entry) => dirent(root, entry)),
-    );
+    const spellings = [root, root + path.sep];
+    if (process.platform === 'win32') spellings.push(root.toUpperCase());
+    for (const given of spellings) {
+      assert.deepEqual(fs.readdirSync(given, { recursive: true }), names);
+      const typed = fs.readdirSync(given, {
+        recursive: true,
+        withFileTypes: true,
+      });
+      const parentOf = (name) => {
+        const dir = path.dirname(name);
+        return dir === '.' ? given : path.join(given, dir);
+      };
+      assert.deepEqual(
+        shown(typed),
+        expected.map(([name, isDirectory]) => [
+          path.basename(name),
+          parentOf(name),
+          isDirectory,
+        ]),
+        given,
+      );
+    }
+  });
+
+  // path.relative and the Dirent parents a listing builds, counted: one
+  // path.relative for where the listing starts, none per entry, one parent
+  // per directory — for the place, and for the strict appRoot spelled with
+  // a trailing separator.
+  it('no path.relative per entry, one parent path per directory', () => {
+    const { relative } = path;
+    let relatives = 0;
+    path.relative = (...args) => {
+      relatives++;
+      return relative(...args);
+    };
+    const place = k.registry.get('site');
+    let parents = 0;
+    place.pathOf = function (key) {
+      parents++;
+      return Object.getPrototypeOf(this).pathOf.call(this, key);
+    };
+    try {
+      const listed = k
+        .fs('site')
+        .readdir('/', { recursive: true, withFileTypes: true });
+      const directories = listed.filter((d) => d.isDirectory()).length;
+      assert.ok(listed.length > directories + 5, `${listed.length} entries`);
+      assert.ok(relatives <= 1, `${relatives} path.relative`);
+      assert.ok(parents <= directories + 1, `${parents} parent paths`);
+      relatives = 0;
+      const all = fs.readdirSync(root + path.sep, { recursive: true });
+      assert.ok(all.length > 10, `${all.length} names`);
+      assert.ok(relatives <= 1, `${relatives} path.relative`);
+    } finally {
+      path.relative = relative;
+      delete place.pathOf;
+    }
   });
 });
 
