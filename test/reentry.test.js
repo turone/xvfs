@@ -253,6 +253,8 @@ describe('PlaceFs under strict: the place writes and removes what it hides', () 
     mkdirDisk(at('only'));
     writeDisk(at('only', 'x.txt'), 'x');
     writeDisk(at('only', 'y.bin'), 'y');
+    writeDisk(at('dir', 'late.txt'), 'late');
+    writeDisk(at('dir', 'u.bin'), 'uncached');
     fsPatch.install(k);
   });
 
@@ -277,6 +279,12 @@ describe('PlaceFs under strict: the place writes and removes what it hides', () 
     assert.equal(readDisk(at('a.txt'), 'utf8'), 'a', 'nothing else removed');
   });
 
+  it('removes a directory of published, unpublished and uncached files', () => {
+    assert.deepEqual(fs.readdirSync(at('dir')), ['c.txt'], 'routed listing');
+    k.fs('site').rm('/dir', { recursive: true });
+    assert.equal(onDisk(at('dir')), false);
+  });
+
   it('a call that throws inside the section leaves routing in force', () => {
     assert.throws(() => k.fs('site').rm('/missing.txt'), {
       code: 'ENOENT',
@@ -285,6 +293,46 @@ describe('PlaceFs under strict: the place writes and removes what it hides', () 
     assert.throws(() => fs.readFileSync(at('hidden.txt')), {
       code: 'EACCES',
     });
+  });
+});
+
+describe('copies under strict: the destination disk past the patch', () => {
+  let root;
+  let k;
+  const at = (...p) => path.join(root, ...p);
+
+  before(async () => {
+    root = writeTree(tmpDir('vfs-reentry-copy'), { 'site/a.txt': 'a' });
+    k = await kernel(
+      root,
+      {
+        site: { fs: { ext: ['txt'], writable: true } },
+        mem: { provider: 'map', origin: 'virtual', fs: { writable: true } },
+      },
+      { strict: true, watchTimeout: 60000 },
+    );
+    k.fs('mem').writeFile('/x.txt', 'x');
+    fsPatch.install(k);
+  });
+
+  after(() => {
+    fsPatch.uninstall();
+    k.close();
+    rm(root);
+  });
+
+  it('cpSync of a virtual entry creates the directories it lacks, then the file', () => {
+    const to = at('site', 'deep', 'er', 'x.txt');
+    fs.cpSync(at('mem', 'x.txt'), to);
+    assert.equal(readDisk(to, 'utf8'), 'x');
+  });
+
+  it('the asynchronous copies write the disk the same way', async () => {
+    await fs.promises.copyFile(at('mem', 'x.txt'), at('site', 'p.txt'));
+    assert.equal(readDisk(at('site', 'p.txt'), 'utf8'), 'x');
+    const nested = at('site', 'nested', 'q.txt');
+    await fs.promises.cp(at('mem', 'x.txt'), nested);
+    assert.equal(readDisk(nested, 'utf8'), 'x');
   });
 });
 
@@ -300,6 +348,7 @@ describe('fs-patch: a passthrough is node:fs to the end', () => {
       'site/b.txt': 'b',
       'site/c.txt': 'cc',
       'site/d.txt': 'dd',
+      'site/e.txt': 'e',
     });
     out = writeTree(tmpDir('vfs-reentry-out'), { 'o.txt': 'outside' });
     k = await kernel(
@@ -334,6 +383,14 @@ describe('fs-patch: a passthrough is node:fs to the end', () => {
     await viaCallback((cb) => fs.truncate(at('d.txt'), 1, cb));
     assert.equal(readDisk(at('c.txt'), 'utf8'), 'c');
     assert.equal(readDisk(at('d.txt'), 'utf8'), 'd');
+  });
+
+  it('the promise forms of writeFile / appendFile / truncate of a published file', async () => {
+    await fs.promises.writeFile(at('e.txt'), Buffer.from('five'));
+    await fs.promises.appendFile(at('e.txt'), Buffer.from('+6'));
+    assert.equal(readDisk(at('e.txt'), 'utf8'), 'five+6');
+    await fs.promises.truncate(at('e.txt'), 4);
+    assert.equal(readDisk(at('e.txt'), 'utf8'), 'five');
   });
 
   it('routes a passthrough once', () => {
