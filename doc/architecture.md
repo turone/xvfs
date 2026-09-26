@@ -171,10 +171,11 @@ already batches events. The queue is deliberately separate from the per-key
 `MutationQueue` of virtual places, which never share a key with a watched
 place.
 
-**The watcher sees the disk through `node:fs` as it was when it loaded:
-recursive `fs.watch` where it is native (Windows, macOS), elsewhere one
-plain `fs.watch` per directory, a new one added as an event shows it, the
-ones under a deleted path dropped, a link to a directory never followed.**
+**The watcher sees the disk through `lib/disk.js` — `node:fs` as it was
+when the library loaded: recursive `fs.watch` where it is native (Windows,
+macOS), elsewhere one plain `fs.watch` per directory, a new one added as an
+event shows it, the ones under a deleted path dropped, a link to a
+directory never followed.**
 _Why:_ on Linux Node builds recursive `fs.watch` over the public
 `node:fs`, which `fs-patch` routes: it listed the VFS instead of the disk
 and missed new files, and from Node 26.10 a refusal reached it as an
@@ -636,7 +637,9 @@ file of a writable place (`ENOTSUP`), a recursive `rm` under strict
 in the section, the filter would read past strict routing — and so does
 `node:fs` with a callback it calls at once (an aborted signal). A glob
 loaded under the patch keeps walking through routing; watchers and streams
-deliver later; `existsSync` calls nothing back.
+deliver later; `existsSync` calls nothing back. Node reads the caller's
+options inside the call, so a getter there runs in the section as well:
+accepted, as strict mode is a routing policy, not a sandbox.
 
 **`initialize()` loads Node's rimraf before anything can install the patch
 (`loadRimraf()`, a workaround).** _Why:_ the asynchronous `fs.rm` and
@@ -743,7 +746,8 @@ workers call `attach()`.** _Why:_ preloads do not run in worker threads.
   synchronous ones that re-enter run in a native section — Node's own
   implementations call the public `node:fs` back (`writeFileSync` →
   `openSync`, `rmSync` → rimraf), and the patch passes such calls through
-  untouched while the section is open.
+  untouched while the section is open. Inside `lib/`, only `disk.js`, which
+  captures `node:fs`, and `fs-patch.js`, which patches it, load `node:fs`.
 - The native section opens only around the library's own disk I/O and a
   call its routing passed through — never around `cp`, whose `filter` is
   the caller's code — and no callback of the caller runs inside it.
