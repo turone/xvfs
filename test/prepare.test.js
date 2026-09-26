@@ -711,9 +711,10 @@ describe('prepare pipeline: the preparer contract', () => {
     await epoch([[at('app', 'a.js'), 'change']]);
     assert.equal(k.fs('app').readFile('/a.js', 'utf8'), PREPARED);
     assert.equal(k.fs('app').script('/a.js').source, PREPARED);
-    assert.ok(
-      warnings.some((w) => /not published — fs\.script\.compile/.test(w)),
-    );
+    const refusal =
+      'not published — ENOTSUP: operation not supported ' +
+      `(fs.script.compile: source does not compile), open '${at('app', 'a.js')}'`;
+    assert.ok(warnings.some((w) => w.endsWith(refusal)));
     done();
   });
 

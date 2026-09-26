@@ -3,9 +3,10 @@
 const { describe, it } = require('node:test');
 const assert = require('node:assert/strict');
 const { Worker } = require('node:worker_threads');
+const os = require('node:os');
 const path = require('node:path');
 const { bytecodeKey } = require('../lib/companion.js');
-const { tmpDir, rm, kernel } = require('./helpers.js');
+const { tmpDir, writeTree, rm, kernel, worker } = require('./helpers.js');
 
 // Bytecode flavors: fs.script.compile (bare vm.Script, PlaceFs.script()) and
 // require.compile (Module.wrap flavor, consumed by the _compile hook) are
@@ -240,6 +241,119 @@ describe('bytecode flavors: failure and rollback', () => {
     assert.equal(v.readFile('/h.js', 'utf8'), '(x => x * 2)');
     k.close();
     rm(root);
+  });
+
+  // The fields of a refusal, and its message.
+  const shape = (err) => ({
+    code: err.code,
+    errno: err.errno,
+    syscall: err.syscall,
+    path: err.path,
+    dest: err.dest,
+    message: err.message,
+  });
+
+  // One error, whichever sink publishes the source it names.
+  const doesNotCompile = (file) => ({
+    code: 'ENOTSUP',
+    errno: -os.constants.errno.ENOTSUP,
+    syscall: 'open',
+    path: file,
+    dest: undefined,
+    message:
+      'ENOTSUP: operation not supported ' +
+      `(fs.script.compile: source does not compile), open '${file}'`,
+  });
+
+  it('fs.script.compile failure: one ENOTSUP in sab, map and a worker', async () => {
+    const root = tmpDir('bc-script-error');
+    let broken = false;
+    const scripts = {
+      writable: true,
+      ext: ['js'],
+      prepare: 'id',
+      script: { compile: true },
+    };
+    const k = await kernel(
+      root,
+      {
+        v: { origin: 'virtual', fs: scripts },
+        m: { provider: 'map', origin: 'virtual', fs: scripts },
+      },
+      {},
+      {
+        preparers: {
+          id: (raw) =>
+            broken ? '{ not valid js (((' : `(${raw.toString().trim()})`,
+        },
+      },
+    );
+    // What a reader of the place gets: the source and its cached data.
+    const bundle = (place) => {
+      const { source, cachedData } = place.script('/h.js');
+      return { source, cachedData: Buffer.from(cachedData) };
+    };
+    // The published version: the entries of the source and its companion.
+    const version = (name) => {
+      const { files } = k.registry.get(name);
+      return [files.get('/h.js'), files.get(bytecodeKey('/h.js', 'script'))];
+    };
+    await k.fs('v').writeFile('/h.js', 'x => x');
+    k.fs('m').writeFile('/h.js', 'x => x');
+    const w = worker(k);
+    try {
+      const before = { v: bundle(k.fs('v')), m: bundle(k.fs('m')) };
+      const versions = { v: version('v'), m: version('m') };
+      const updates = k.nextUpdateId;
+      const retires = k.nextRetireId;
+      const used = k.cache.stats().totalUsed;
+      broken = true;
+      for (const [label, name, place] of [
+        ['sab', 'v', k.fs('v')],
+        ['map', 'm', k.fs('m')],
+        ['worker', 'v', w.kernel.fs('v')],
+      ]) {
+        let err = null;
+        try {
+          await place.writeFile('/h.js', 'y => y');
+        } catch (error) {
+          err = error;
+        }
+        const file = path.join(root, name, 'h.js');
+        assert.deepEqual(shape(err ?? {}), doesNotCompile(file), label);
+        assert.deepEqual(bundle(k.fs(name)), before[name], label);
+        const [source, companion] = version(name);
+        assert.equal(source, versions[name][0], `${label}: the same version`);
+        assert.equal(companion, versions[name][1], `${label}: its companion`);
+      }
+      assert.deepEqual(bundle(w.kernel.fs('v')), before.v, 'worker projection');
+      assert.equal(k.nextUpdateId, updates, 'nothing published');
+      assert.equal(k.nextRetireId, retires, 'nothing retired');
+      assert.equal(k.cache.stats().totalUsed, used, 'nothing allocated');
+    } finally {
+      w.kernel.close();
+      k.close();
+      rm(root);
+    }
+  });
+
+  it('fs.script.compile failure of a disk source: initialize() fails with it', async () => {
+    const root = writeTree(tmpDir('bc-script-init'), {
+      'app/ok.js': 'x => x',
+      'app/bad.js': '{ not valid js (((',
+    });
+    try {
+      const init = kernel(root, {
+        app: { fs: { ext: ['js'], script: { compile: true } } },
+      });
+      await assert.rejects(init, (err) => {
+        const file = path.join(root, 'app', 'bad.js');
+        assert.deepEqual(shape(err), doesNotCompile(file));
+        return true;
+      });
+    } finally {
+      rm(root);
+    }
   });
 
   it('map: a fs.script.compile failure keeps the previous version too', async () => {
