@@ -122,13 +122,18 @@ site to forget; filling it costs about 0.3 µs per key.
 parent paths (`listedNames()`): an entry of the listed directory is its
 own name, one below it the rest of its parent past the directory and a
 separator, then its name; the directory is walked without a trailing
-separator, as its entries' parents are named. Where the directory or a
-parent is not in the form `path.resolve` returns, `path.relative` names
-the entry, as it named every entry before. A `Dirent`'s parent path is
-built once per directory.** _Why:_ `path.join` and `path.relative` per
-entry were three quarters of a listing of a disk directory; the strings
-give the same names, which a test holds to `path.relative` for both path
-flavors — disk territory and the strict `appRoot` list this way.
+separator, as its entries' parents are named. The directory is taken as
+`path.resolve` makes it, so any spelling of it will do (the strict
+`appRoot` with a trailing separator, `.`); where a parent is not in the
+form `path.resolve` returns, or not in or below that directory,
+`path.relative` names the entry, as it named every entry before. A
+`Dirent`'s parent path is built once per directory.** _Why:_ `path.join`
+and `path.relative` per entry were three quarters of a listing of a disk
+directory; the strings give the same names, which a test holds to
+`path.relative` for both path flavors — disk territory and the strict
+`appRoot` list this way. The directory is resolved, not joined with each
+place's name: `path.join('C:', 'site')` is `C:\site`, which is not below
+what `path.resolve('C:')` is.
 
 ## Storage
 
