@@ -10,6 +10,16 @@ const { pool } = require('../lib/pool.js');
 // Settles once the microtasks queued so far ran.
 const turn = () => new Promise((resolve) => setImmediate(resolve));
 
+// How `promise` stands after one turn: `{ value }`, `{ error }` or pending.
+const settled = (promise) =>
+  Promise.race([
+    promise.then(
+      (value) => ({ value }),
+      (error) => ({ error }),
+    ),
+    turn().then(() => 'pending'),
+  ]);
+
 // A pool function over `count` items: records each call and how many run
 // at once, then waits for the item's gate.
 const gated = (count) => {
@@ -54,19 +64,30 @@ describe('pool', () => {
     );
   });
 
-  it('starts nothing after the first failure and rejects with it', async () => {
+  it('rejects with the first failure at once and starts nothing after it', async () => {
     const { gates, started, fn } = gated(6);
     const done = pool([0, 1, 2, 3, 4, 5], 3, fn);
     assert.deepEqual(started, [0, 1, 2]);
     const failure = new Error('first');
     gates[1].reject(failure);
-    await assert.rejects(done, (err) => err === failure);
+    // Like Promise.all: before the calls still running have settled.
+    assert.deepEqual(await settled(done), { error: failure });
     assert.deepEqual(started, [0, 1, 2], 'nothing started after it');
-    // Calls still running settle unobserved, a later failure included.
-    gates[0].resolve();
-    gates[2].reject(new Error('second'));
-    await turn();
+    // The calls still running settle unobserved: one that succeeds starts
+    // nothing, and a later failure is handled all the same.
+    const unhandled = [];
+    const record = (err) => unhandled.push(err);
+    process.on('unhandledRejection', record);
+    try {
+      gates[0].resolve();
+      gates[2].reject(new Error('second'));
+      await turn();
+      await turn();
+    } finally {
+      process.off('unhandledRejection', record);
+    }
     assert.deepEqual(started, [0, 1, 2], 'nor after they settled');
+    assert.deepEqual(unhandled, [], 'no unhandled rejection');
   });
 
   it('settles at once on an empty list, without a call', async () => {

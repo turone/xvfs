@@ -3,6 +3,7 @@
 const { describe, it, before, after } = require('node:test');
 const assert = require('node:assert/strict');
 const path = require('node:path');
+const { availableParallelism } = require('node:os');
 const { Worker } = require('node:worker_threads');
 const { VfsKernel } = require('../lib/kernel.js');
 const { bytecodeKey } = require('../lib/companion.js');
@@ -64,6 +65,48 @@ describe('VfsKernel: lifecycle', () => {
     });
     await assert.rejects(k.initialize(), /boom/);
     assert.equal(k.state, 'closed');
+  });
+
+  // Init publishes a few files at a time — initConcurrency() of kernel.js:
+  // the libuv threadpool, at most the cores — and the first source that
+  // cannot be read aborts it. The reader exists once initialize() is
+  // called: the scan before it reads nothing.
+  it('an unreadable source aborts initialize(); a few reads start at most', async () => {
+    const threads = Number(process.env.UV_THREADPOOL_SIZE) || 4;
+    const limit = Math.max(1, Math.min(threads, availableParallelism()));
+    const tree = {};
+    for (let i = 0; i <= 2 * limit; i++) tree[`site/f${i}.txt`] = 'x';
+    const big = writeTree(tmpDir('kernel-abort'), tree);
+    const k = new VfsKernel(config({ site: { fs: true } }), {
+      appRoot: big,
+      console: quiet,
+    });
+    // An init still waiting for the reads held at the gate fails the test
+    // after a deadline instead of hanging it.
+    const within = (promise, ms = 4000) =>
+      new Promise((resolve, reject) => {
+        const late = setTimeout(() => {
+          reject(new Error(`still pending after ${ms} ms`));
+        }, ms);
+        promise.finally(() => clearTimeout(late)).then(resolve, reject);
+      });
+    const gate = Promise.withResolvers();
+    try {
+      const init = k.initialize();
+      let started = 0;
+      // The first read fails; the others wait for the end of the test.
+      k.cache.reader = async () => {
+        if (++started === 1) throw new Error('unreadable');
+        await gate.promise;
+      };
+      await assert.rejects(within(init), /unreadable/);
+      assert.equal(k.state, 'closed');
+      assert.ok(started <= limit, `${started} reads started, limit ${limit}`);
+    } finally {
+      gate.resolve();
+      k.close();
+      rm(big);
+    }
   });
 
   it('fs() explains unknown places, missing fs domain and passthrough providers', async () => {

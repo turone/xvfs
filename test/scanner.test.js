@@ -84,9 +84,16 @@ describe('scanner', () => {
           if (entry.isDirectory()) return walk(abs);
           return entry.isFile() ? [keyOf(abs, base)] : [];
         });
+      const walked = walk(base);
       const files = await scan(base);
       assert.equal(files.size, Object.keys(tree).length);
-      assert.deepEqual([...files.keys()], walk(base));
+      assert.deepEqual([...files.keys()], walked);
+      // From a startPath: its subtree in the same order, keyed from the root.
+      const sub = await scan(base, { startPath: path.join(base, 'd1') });
+      assert.deepEqual(
+        [...sub.keys()],
+        walked.filter((key) => key.startsWith('/d1/')),
+      );
     } finally {
       rm(base);
     }
