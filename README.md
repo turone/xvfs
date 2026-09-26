@@ -877,7 +877,8 @@ A `rename` routes both paths as mutations and its source as a read:
   `node:fs` territory.
 - In a virtual place the store moves an ordinary entry atomically and keeps
   its mtime; the preparer of a new extension runs once. A prepared entry
-  has no raw input to move: `ENOTSUP`.
+  has no raw input to move: `ENOTSUP`. A file renamed onto itself changes
+  nothing — no publication, no update — as with `node:fs`.
 - A virtual directory moves as a whole subtree when every source under it
   is raw-only — no preparer, no bytecode (`require.compile`,
   `fs.script.compile`), no path-dependent `scriptOptions` / `meta`.

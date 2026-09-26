@@ -391,9 +391,13 @@ mutations — instead of every integration re-implementing retirement.
 synchronous scratch space without coordination; shared writable state goes
 through `sab + virtual`.
 
-**Renaming a virtual entry keeps its mtime, like a rename on disk.** _Why:_
-a move is not a write: the content is the same, so is its time — in `sab`
-and `map` places alike.
+**Renaming a virtual entry keeps its mtime, like a rename on disk; a file
+renamed onto itself, once the rename's checks pass, changes nothing — no
+publication, no `vfs-update` — as `node:fs` renames a file onto itself.**
+_Why:_ a move is not a write: the content is the same, so is its time — in
+`sab` and `map` places alike. Onto itself nothing moves at all: the SAB
+store republished the file under its own key, retiring the old version
+and telling every worker, while the Map store left it as it was.
 
 **A virtual place keeps the hierarchy of a filesystem: a path is a file or a
 directory, never both. One check (`checkHierarchy`) runs before every
