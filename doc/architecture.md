@@ -44,7 +44,7 @@ Main thread                                  Worker threads
 │ ├─ FilesystemCache (SAB pool)     │        │ ├─ per-thread map places     │
 │ ├─ publication pipeline + epochs  │ update │ └─ Pins: streams and leases  │
 │ ├─ DirWatcher → SerialQueue       │ ─────► │                              │
-│ ├─ retirement: acks + retired     │ ◄───── │ vfs-ack (+ retained)         │
+│ ├─ Retirement: acks + retired     │ ◄───── │ vfs-ack (+ retained)         │
 │ └─ Pins (main-thread consumers)   │ ◄───── │ vfs-release / vfs-mutate     │
 └───────────────────────────────────┘        └──────────────────────────────┘
 SAB segments ──────────── one physical copy ──────────── views in every thread
@@ -56,10 +56,11 @@ SAB segments ──────────── one physical copy ────
 | ------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `lib/config.js`                 | `VfsConfig`: raw → deep-frozen `{ global, places }`; domains, `prepare` index, `fs.fallback` normalization                                                |
 | `lib/cache.js`                  | `Pool` + `SegmentRegistry` + `FilesystemCache`: SAB allocator; `allocate()` places bytes privately, `put()` / `remove()` publish, `compact()` plans moves |
-| `lib/kernel.js`                 | `VfsKernel`: lifecycle, the publication pipeline, epochs (`#flush`), retirement, watcher FIFO, mutation queue, `link()`, worker side                      |
+| `lib/kernel.js`                 | `VfsKernel`: lifecycle, the publication pipeline, epochs (`#flush`), freeing retired versions, watcher FIFO, mutation queue, `link()`, worker side        |
 | `lib/pipeline.js`               | What a file is: `Preparers`, `prepareInput()`, `bytecodeFor()`                                                                                            |
 | `lib/compressor.js`             | `Compressor`: codec work only                                                                                                                             |
 | `lib/pins.js`                   | `Pins`: per-thread direct consumers of shared versions                                                                                                    |
+| `lib/retirement.js`             | `Retirement`: the books of ACK-before-free — retired versions, the ACKs they wait for, their holders; decides what is free, frees nothing                 |
 | `lib/serial-queue.js`           | `SerialQueue`: one task at a time, arrival order                                                                                                          |
 | `lib/pool.js`                   | `pool()`: a list worked through at most `limit` calls at a time, stopping at the first failure; `IO_LIMIT`                                                |
 | `lib/place.js`                  | `Place`: projection (`PlaceFiles`, with its directory index), `visible()`, `cached()`, `scripted()`, `prepared()`, `preparerOf()`, `companions()`         |
@@ -255,6 +256,15 @@ diagnostics (`kernel.retirements()`, labels like `static:/a.mp4 [fs:br]#17`,
 never parsed back). _Why:_ current entries are identified by (place, key);
 a permanent id would bloat every entry and message for the rare case; a
 never-reused id means a late release can never match a later retirement.
+
+**`Retirement` (`lib/retirement.js`) keeps the books — the retired
+versions, the ACKs each update still waits for, the holders — and decides
+what is free; it frees nothing. Each change of the books hands the kernel
+the records it may have left unheld, and the kernel's `#settle`, the only
+free of a retired version, returns their bytes to the pool and compacts
+once.** _Why:_ ACK-before-free is bookkeeping of its own; the pool, the
+compaction a free may start and the epoch that publishes it belong to the
+kernel, which owns the index, the links and the pins an update commits to.
 
 **A consumer pins only the representation it reads — the source or one
 companion; each is retired and freed on its own.** _Why:_ pinning a whole
@@ -808,6 +818,7 @@ workers call `attach()`.** _Why:_ preloads do not run in worker threads.
 | A permanent allocation id in every entry                                                                        | retirement needs an identity only while a version is retired      |
 | IPC per chunk or per pin                                                                                        | pins of current versions must stay local                          |
 | Freeing a retired version on a timeout                                                                          | reuse under a slow reader returns another file's bytes            |
+| Retirement books that free the bytes themselves                                                                 | a free starts a compaction, whose epoch only the kernel commits   |
 | GC-driven release of views                                                                                      | use-after-free for destructured views and subarrays               |
 | Releasing zero-copy streams on `'end'`                                                                          | sockets still hold the last chunks                                |
 | Manual worker transports (`broadcast`, `getWorkerIds`)                                                          | every one would have to re-implement retirement                   |
