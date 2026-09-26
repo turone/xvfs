@@ -602,10 +602,11 @@ descriptor.
 
 **`open` with a flag that writes — a string with `w`, `a`, `x` or `+`, a
 number with `O_WRONLY`, `O_RDWR`, `O_CREAT`, `O_TRUNC` or `O_APPEND` — is
-a guarded mutation of what its read routing passes through: `EROFS` /
-`EACCES` as routed, `ENOTSUP` in a virtual place. The read routing answers
+a guarded mutation of what its read routing passes through: `EROFS` in a
+read-only place, `ENOTSUP` in a virtual one. The read routing answers
 first: a published entry stays `ENOTSUP` and a hidden path `EACCES`,
-whatever the flag. `createWriteStream` opens through `fs.open`, so its
+whatever the flag — the `EACCES` of an `open` that writes always comes
+from its read routing. `createWriteStream` opens through `fs.open`, so its
 stream gets the same error.** _Why:_ routed only as a read,
 `openSync(p, 'w')` and `createWriteStream` bypassed the mutation policy:
 they created a file in a read-only place, and a stray one in a virtual
@@ -737,6 +738,8 @@ workers call `attach()`.** _Why:_ preloads do not run in worker threads.
 | An asynchronous native section (`AsyncLocalStorage`)                                                            | user callbacks inherit it, past strict; `async_hooks` cost on 22  |
 | Own primitives in place of `rmSync`                                                                             | rewrites its retries (`EBUSY`, `EPERM`, `maxRetries`) and errors  |
 | A native section around `cp`                                                                                    | its `filter`, the caller's code, would read past strict           |
+| Refusing an `open` that writes only where the mutation routing denies it                                        | a virtual place's directory on disk still got a stray file        |
+| Routing an `open` that writes as a mutation before its read                                                     | a published entry would answer `EROFS`, not `ENOTSUP`             |
 | Preloading rimraf when the package is imported                                                                  | races a synchronous `install()`; disk I/O on every import         |
 | Standalone place-level `script` domain, provider `memory`, `vfs:` URLs, metawatch, root-level `ext` / `compile` | superseded by the place / domain model; no aliases                |
 
@@ -785,9 +788,10 @@ workers call `attach()`.** _Why:_ preloads do not run in worker threads.
   never on read; its raw input is never kept in the VFS; a prepared source
   is never a disk entry; `prepare` and `scriptOptions` never turn
   `fs.script` on.
-- No native listing, copy, link, rename, watch or `open` that writes runs
-  over managed territory past its routing; a refusal comes before any disk
-  read or write.
+- No native listing, copy, link, rename or watch runs over managed
+  territory past its routing, and no descriptor that writes is opened there
+  past the mutation routing; a refusal comes before any disk read or
+  write.
 - A copy or a rename hands on the raw input only — never a prepared result
   or a companion; the destination prepares it once, and a virtual
   destination never gets a disk file.
