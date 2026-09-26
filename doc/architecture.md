@@ -42,7 +42,7 @@ Main thread                                  Worker threads
 │ VfsKernel                         │ link() │ attach() → VfsKernel         │
 │ ├─ VfsConfig (frozen)             │ ─────► │ ├─ projected Maps (zero-copy)│
 │ ├─ FilesystemCache (SAB pool)     │        │ ├─ per-thread map places     │
-│ ├─ publication pipeline + epochs  │ update │ └─ Pins: streams and leases  │
+│ ├─ SAB sink → #stage → #flush     │ update │ └─ Pins: streams and leases  │
 │ ├─ WatchPipeline: watcher → FIFO  │ ─────► │                              │
 │ ├─ Retirement: acks + retired     │ ◄───── │ vfs-ack (+ retained)         │
 │ └─ Pins (main-thread consumers)   │ ◄───── │ vfs-release / vfs-mutate     │
@@ -56,8 +56,9 @@ SAB segments ──────────── one physical copy ────
 | ------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `lib/config.js`                 | `VfsConfig`: raw → deep-frozen `{ global, places }`; domains, `prepare` index, `fs.fallback` normalization                                                |
 | `lib/cache.js`                  | `Pool` + `SegmentRegistry` + `FilesystemCache`: SAB allocator; `allocate()` places bytes privately, `put()` / `remove()` publish, `compact()` plans moves |
-| `lib/kernel.js`                 | `VfsKernel`: lifecycle, the publication pipeline, epochs (`#flush`), freeing retired versions, mutation queue, `link()`, worker side                      |
+| `lib/kernel.js`                 | `VfsKernel`: lifecycle, init, virtual publications, epochs and their commit (`#flush`), freeing retired versions, mutation queue, `link()`, worker side   |
 | `lib/pipeline.js`               | What a file is: `Preparers`, `prepareInput()`, `bytecodeFor()`                                                                                            |
+| `lib/publication.js`            | `inputOf()`: a source's canonical input, for either sink; the stateless SAB sink, `sharedPublish()` / `sharedCopies()`: hands the kernel what to stage    |
 | `lib/compressor.js`             | `Compressor`: codec work only                                                                                                                             |
 | `lib/pins.js`                   | `Pins`: per-thread direct consumers of shared versions                                                                                                    |
 | `lib/retirement.js`             | `Retirement`: the books of ACK-before-free — retired versions, the ACKs they wait for, their holders; decides what is free, frees nothing                 |
@@ -178,6 +179,24 @@ frees only its own bytes; the entry a change replaces is read at commit
 time, so two publications can never retire the same version twice.
 Consequence: there is no global commit lock — virtual publications of
 different keys may overlap.
+
+**The SAB sink (`lib/publication.js`) places the bytes; the kernel commits
+them. `sharedPublish()` allocates a canonical input's source, bytecode
+flavors and compressed representations privately and hands back the
+changes to stage — each new version, then each stale companion to drop;
+`sharedCopies()` the versions of a subtree under their new keys and the
+old keys to drop; `inputOf()` makes the canonical input for either sink —
+a raw input read through the kernel's reader, its preparer run once — and
+the Map sink is `MapStore.publish()`. A failure frees the attempt's own
+allocations and nothing else. The sink keeps no state and calls nothing
+private: it reads the kernel's `cache` and `compressor` at each call —
+after `close()` both are gone — and the kernel stages what comes back into
+its epoch.** _Why:_ what a publication places is one idea; what commits it
+— the index, retirement, the pins, the links — is the kernel's, so the
+commit stays a private step of the owner of that state. A sink that kept
+the pool or the compressor would outlive `close()` and serve a later
+kernel from the old pool; one that kept a function — the reader, a free, a
+codec — would miss the one a test puts on the kernel's objects.
 
 **One `vfs-update` per epoch or accepted mutation; a file's source and
 companions travel together, a companion that failed to rebuild is listed in
@@ -833,6 +852,7 @@ workers call `attach()`.** _Why:_ preloads do not run in worker threads.
 | Parallel watcher epochs                                                                                         | an older epoch could publish over a newer one                     |
 | Committing an epoch (`#flush`) outside the kernel                                                               | it writes the index, retirement, pins and links the kernel owns   |
 | A watch pipeline that holds the kernel's epoch state and passes it back (`publish(ep, …)`, `flush(ep)`)         | kernel state leaves the kernel; no commit is bound to its epoch   |
+| A publication sink that stages into the kernel's epoch, or keeps its pool or compressor                         | kernel state leaves the kernel; a kept pool outlives `close()`    |
 | Unbounded jobs of a watcher epoch                                                                               | a descriptor per changed file: `EMFILE` at `ulimit -n 1024`       |
 | A scan's stats pooled per directory, or listed in the order they finish                                         | no faster on sparse trees; init's order would change run to run   |
 | A permanent allocation id in every entry                                                                        | retirement needs an identity only while a version is retired      |
@@ -893,14 +913,14 @@ workers call `attach()`.** _Why:_ preloads do not run in worker threads.
   whose `stat` lands after `close()` is dropped.
 - Companions never appear in `readdir`, `exists`, routing or the patched fs;
   `Place.companions(key)` enumerates them — never hand-roll key lists.
-- Kernel-internal disk I/O (kernel, watch pipeline, scanner, watcher,
-  `PlaceFs`, the copy engine) uses `lib/disk.js`: functions captured at
-  load time, the synchronous ones that re-enter run in a native section —
-  Node's own implementations call the public `node:fs` back
-  (`writeFileSync` → `openSync`, `rmSync` → rimraf), and the patch passes
-  such calls through untouched while the section is open. Inside `lib/`,
-  only `disk.js`, which captures `node:fs`, and `fs-patch.js`, which
-  patches it, load `node:fs`.
+- Kernel-internal disk I/O (kernel, the publication sink, watch pipeline,
+  scanner, watcher, `PlaceFs`, the copy engine) uses `lib/disk.js`:
+  functions captured at load time, the synchronous ones that re-enter run
+  in a native section — Node's own implementations call the public
+  `node:fs` back (`writeFileSync` → `openSync`, `rmSync` → rimraf), and
+  the patch passes such calls through untouched while the section is
+  open. Inside `lib/`, only `disk.js`, which captures `node:fs`, and
+  `fs-patch.js`, which patches it, load `node:fs`.
 - The native section opens only around the library's own disk I/O and a
   call its routing passed through — never around `cp`, whose `filter` is
   the caller's code — and no callback of the caller runs inside it.
