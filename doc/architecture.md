@@ -226,9 +226,15 @@ written, and a flapping file must not loop.
 **Failure policy.** Init aborts on any unreadable source, preparer error,
 failing `fs.script.compile` or path-less input that does not fit. Live
 updates keep the previous version and companions. `require.compile` is
-best-effort. _Why:_ startup is all or nothing; live traffic keeps serving the
-last good version; Node's CommonJS loader compiles fine without cached data,
-while a script bundle promises its cached data.
+best-effort. A source `fs.script.compile` cannot compile is one error
+wherever it is published: `ENOTSUP` (`fs.script.compile: source does not
+compile`), `syscall` `open`, `path` the source's — `bytecodeFor()` throws it
+for the SAB and the Map sink alike, and a worker's mutation gets it back
+with the same fields. _Why:_ startup is all or nothing; live traffic keeps
+serving the last good version; Node's CommonJS loader compiles fine without
+cached data, while a script bundle promises its cached data. A caller
+cannot tell the sinks apart: the same refusal answers the same, with a
+`code` like every other refusal of the VFS.
 
 ## Lifetime of shared bytes
 

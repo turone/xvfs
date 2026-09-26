@@ -231,8 +231,9 @@ file with independent companions, both built from the one canonical
   `scriptOptions`. `require.compile` builds `\0require:bytecode` —
   cached data of `Module.wrap(source)`. Neither substitutes for the
   other. A script-compile failure invalidates the whole publication
-  (previous version kept); a require-compile failure is best-effort (only
-  its own companion is dropped).
+  (previous version kept) with `ENOTSUP`, named by the source (`syscall`
+  `open`); a require-compile failure is best-effort (only its own
+  companion is dropped).
 - `kernel.fs(name).script(key)` →
   `{ source, cachedData, scriptOptions, meta } | null`; `ENOTSUP` when the
   place has no `fs.script`. It never prepares or compiles anything itself.
