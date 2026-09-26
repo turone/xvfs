@@ -3,6 +3,24 @@
 Future project work. Priority: **P1** — strict boundary or correctness,
 **P2** — policy gaps and missing implementations, **P3** — improvements.
 
+## P1 — Windows: case and namespace spellings of managed paths
+
+**Problem.** Routing compares strings. On Windows a place segment in
+another case (`appRoot\RO\…` for place `ro`) routes as owned by nobody:
+without strict it passes through natively — the raw file instead of its
+prepared content, files that `fs.fallback: 'deny'` hides, writes into a
+read-only place. Under strict, `\\?\C:\…\place\hidden` and
+`\\localhost\C$\…` read files the place hides. 8.3 aliases are likely the
+same class.
+
+**Cause.** Containment is lexical and the mount lookup is case-sensitive,
+while one file has several spellings on Windows: case, `\\?\`, UNC
+loopback, 8.3.
+
+**Done when.** The router folds the place segment on case-insensitive
+platforms (names stay unique after lowercasing) and normalizes or refuses
+namespace spellings under strict, with tests on Windows.
+
 ## P2 — VFS-aware versions of the operations refused today
 
 **Problem.** For managed territory, native operations that walk a tree or
@@ -72,6 +90,51 @@ every fs call — and `symlink` targets are resolved only when read.
 serves or that enclose `appRoot`, refuse links in disk territory, or check
 the real path of passthrough reads) is implemented with tests on Linux and
 Windows.
+
+## P2 — Recursive `rm` under the patch in a worker
+
+**Problem.** In a worker, asynchronous `fs.rm` / `fs.promises.rm` with
+`recursive` in a disk-origin place walks the place's listing instead of
+the disk and removes the tree only in part (`ENOTEMPTY`). The main thread
+is covered: `initialize()` loads Node's rimraf before the patch, while
+`attach()` is synchronous and installs the patch first.
+
+**Done when.** Workers get the same guarantee — a preload before
+`attach()` installs the patch, or the VFS-aware recursive `rm` above —
+with a worker test.
+
+## P2 — Writes that bypass the mutation routing
+
+**Problem.** `fs.readFile*(p, { flag: 'w' })` truncates a disk-territory
+file of a read-only place (and answers `EBADF`); `{ flag: 'a+' }` creates
+a file in a virtual place's directory on disk; `fs.mkdtemp*` is not
+patched and creates directories in read-only and virtual places.
+
+**Done when.** These pass the mutation routing as `open` with a writing
+flag does, with tests of all three forms.
+
+## P2 — A write resolves without publishing when `close()` comes first
+
+**Problem.** A virtual write whose kernel is closed after the publication
+sink's last `alive()` check and before `#flush` resolves successfully,
+though nothing was published: `#flush` returns silently on a closed
+kernel, so the caller sees success for a write that did not happen.
+
+**Done when.** Such a write rejects with the closed-kernel error, with a
+test that closes the kernel between the sink and the commit.
+
+## P2 — Two watcher tests race the delivery of the update
+
+**Problem.** `watcher.test.js` «syntax error: source published, stale
+bytecode removed…» and «deleting a directory removes sources and
+companions in one message» wait until the main thread's projection shows
+the change, then read the messages of the `tap` port. `#flush` updates
+the projection synchronously and only then posts the update, and the
+port's message can arrive after the `until` timer fires: about 1 run in 12
+fails.
+
+**Done when.** Both tests wait for the message they read (`nextMessage`,
+or `until` over the port's messages), and 50 runs under load pass.
 
 ## P3 — Separators of recursive listings on Windows
 
@@ -168,6 +231,83 @@ lists through the places — with a test for both load orders.
 
 **Done when.** Declarations cover the public API (`VfsConfig`, `VfsKernel`,
 `PlaceFs`, `attach`) and a type check runs in CI.
+
+## P3 — `open` for writing of a published disk-origin file
+
+**Problem.** `open(p, 'w')` / `createWriteStream(p)` of a published file
+of a writable disk-origin place is `ENOTSUP 'virtual file'`, while
+`writeFile(p)` writes it; under strict, `open(new, 'w')` there is
+`EACCES` while `writeFileSync(new)` passes.
+
+**Done when.** A decided policy for descriptors that write in disk-origin
+places is documented and tested.
+
+## P3 — The compile refusal of a rename names neither the call nor its destination
+
+**Problem.** A rename onto an extension whose script flavor does not
+compile is refused with `syscall: 'open'` and the destination as `path`,
+without `dest`, while every other rename error carries `rename`, the
+source and `dest`.
+
+**Done when.** The refusal carries the operation's `syscall`, `path` and
+`dest`, with a test.
+
+## P3 — A watcher job in flight at `close()` logs a `TypeError`
+
+**Problem.** A job of an epoch still running when `close()` is called
+goes on over the cleared kernel: the delete of a file reaches its
+unpublish over the cleared sources, a directory rescan finds no source,
+and the closed kernel logs `[vfs] update: Cannot read properties of
+undefined (reading 'has')`. Jobs the pool has not started do not start.
+
+**Done when.** A job that resumes after `close()` returns without work or
+log, with a test that counts the disk calls after `close()`.
+
+## P3 — `close()` during `initialize()` of a map place with files
+
+**Problem.** `initialize()` rejects with `TypeError: Cannot read properties
+of null (reading 'reader')` instead of the closed-kernel error.
+
+**Done when.** It rejects with the closed-kernel error, with a test.
+
+## P3 — Scanner on a filesystem without `d_type`
+
+**Problem.** A hypothesis from reading the code: `readdir(withFileTypes)`
+lstats entries of unknown type through the public `node:fs`, so after
+`install()` under strict a rescan may get `EACCES` and skip a directory
+silently.
+
+**Done when.** Reproduced on such a filesystem and the scanner reads types
+through `lib/disk.js`, or disproved.
+
+## P3 — Tests that do not test what they say, or hang instead of failing
+
+**Problem.** `subtree-rename.test.js` «a move queued behind a write in
+flight when the kernel closes» never reaches its gate on
+`k.compressor.compress`: both mutations fail on the closed kernel before
+any write is in flight. `compression.test.js`, `prepare.test.js` and
+`mutation-order.test.js` close their kernels outside `try/finally`, so a
+failing assertion leaves a watcher or a worker open and `node --test`
+hangs instead of reporting the failure.
+
+**Done when.** The subtree-rename test holds a write in flight at
+`close()` (the compressor taken before it), and every test closes its
+kernel in `finally`.
+
+## P3 — Coverage gaps found by mutation testing
+
+**Problem.** Mutants survive on `main` as on later revisions: a
+publication that fails does not free its own allocations
+(`cache.stats().totalUsed` counts segments, not the bytes in them); no
+test fills the pool, so a subtree move that stops half-way, a source that
+silently does not publish, or a script flavor dropped instead of refused
+go unseen; no test reads a map + disk place without a preparer; no test
+closes a kernel with a recheck pending, sees a recheck succeed, or deletes
+a map + disk file through the watcher; no test copies a symbolic link
+into a store place without `dereference`, fixes the order of the two
+refusals of a copy, or shows that a `Dir` is a snapshot.
+
+**Done when.** A test for each, each seen failing under its mutant.
 
 ## After the next Node.js 26.x release — `doc/alternatives.md`
 
