@@ -2,14 +2,20 @@
 
 const { describe, it, before, after } = require('node:test');
 const assert = require('node:assert/strict');
+const { once } = require('node:events');
 const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
+const { finished } = require('node:stream/promises');
 const fsPatch = require('../lib/adapters/fs-patch.js');
 const { tmpDir, writeTree, rm, kernel, drain } = require('./helpers.js');
 
 // The disk as it is, behind the patch: captured before any install.
-const { existsSync: onDisk } = fs;
+const {
+  existsSync: onDisk,
+  readFileSync: readDisk,
+  readdirSync: listDisk,
+} = fs;
 
 // fs-patch executes router decisions; these tests exercise node:fs itself
 // while the patch is installed. Suites install/uninstall around themselves.
@@ -624,5 +630,248 @@ describe('fs-patch: strict routing', () => {
   it('paths outside appRoot pass through', () => {
     assert.ok(fs.readFileSync(__filename, 'utf8').length > 0);
     assert.ok(fs.existsSync(__dirname));
+  });
+});
+
+// open() routes its path as a read; a flag that writes routes what the read
+// passes through as a mutation as well. Before, node:fs created the file in
+// a read-only place, and a stray one in a virtual place's directory on disk,
+// which the place never shows.
+
+const { O_RDONLY, O_WRONLY, O_RDWR, O_CREAT, O_TRUNC, O_APPEND } = fs.constants;
+const WRITE_FLAGS = [
+  'w',
+  'wx',
+  'w+',
+  'a',
+  'ax',
+  'a+',
+  'as',
+  'r+',
+  'rs+',
+  O_WRONLY,
+  O_RDWR,
+  O_CREAT,
+  O_TRUNC,
+  O_APPEND,
+];
+const READ_FLAGS = [undefined, 'r', 'rs', O_RDONLY];
+
+// open() in each form — sync, callback, promise — closing what it opens:
+// 'ok' or the error, per form.
+const openEach = async (file, flags) => {
+  const forms = [
+    () => fs.closeSync(fs.openSync(file, flags)),
+    () =>
+      new Promise((resolve, reject) => {
+        fs.open(file, flags, (err, fd) =>
+          err ? reject(err) : resolve(fs.closeSync(fd)),
+        );
+      }),
+    async () => (await fs.promises.open(file, flags)).close(),
+  ];
+  const outcomes = [];
+  for (const form of forms) {
+    try {
+      await form();
+      outcomes.push('ok');
+    } catch (err) {
+      outcomes.push(err);
+    }
+  }
+  return outcomes;
+};
+
+// A refusal of open(): its code, syscall and path, no dest; `detail` tells
+// the ENOTSUP of a virtual place from that of a virtual file.
+const refused = (err, { code, file, detail, flags }) => {
+  const what = `${file} ${String(flags)}: ${err?.message ?? err}`;
+  assert.ok(err instanceof Error, what);
+  assert.equal(err.code, code, what);
+  assert.equal(err.syscall, 'open', what);
+  assert.equal(err.path, file, what);
+  assert.equal(err.dest, undefined, what);
+  if (detail) assert.ok(err.message.includes(`(${detail})`), what);
+};
+
+// Every form of open() with every flag is refused so.
+const refusedEach = async (file, flags, expected) => {
+  for (const flag of flags) {
+    for (const outcome of await openEach(file, flag)) {
+      refused(outcome, { ...expected, file, flags: flag });
+    }
+  }
+};
+
+describe('fs-patch: open with a flag that writes', () => {
+  let root;
+  let k;
+  const at = (...p) => path.join(root, ...p);
+
+  before(async () => {
+    root = writeTree(tmpDir('fspatch-open'), {
+      'ro/a.txt': 'published',
+      'ro/raw.bin': 'raw', // not cached: the disk territory
+      'site/a.txt': 'published',
+      'site/b.txt': 'published',
+      'drive/d.txt': 'disk',
+    });
+    // The directories of the virtual places exist on disk, empty.
+    fs.mkdirSync(at('v'));
+    fs.mkdirSync(at('m'));
+    k = await kernel(
+      root,
+      {
+        ro: { fs: { ext: ['txt'] } },
+        site: { fs: { ext: ['txt'], writable: true } },
+        drive: { provider: 'disk', fs: true },
+        v: { origin: 'virtual', fs: { writable: true } },
+        m: { provider: 'map', origin: 'virtual', fs: { writable: true } },
+      },
+      { watchTimeout: 60000 },
+    );
+    k.fs('m').writeFile('/p.txt', 'virtual');
+    await k.fs('v').writeFile('/p.txt', 'virtual');
+    fsPatch.install(k);
+  });
+
+  after(() => {
+    fsPatch.uninstall();
+    k.close();
+    rm(root);
+  });
+
+  it('a read-only place is EROFS, without strict: nothing created or changed', async () => {
+    for (const file of [at('ro', 'new.txt'), at('drive', 'new.txt')]) {
+      await refusedEach(file, WRITE_FLAGS, { code: 'EROFS' });
+      assert.equal(onDisk(file), false, file);
+    }
+    // Its disk territory, and a read-only disk place.
+    for (const file of [at('ro', 'raw.bin'), at('drive', 'd.txt')]) {
+      const bytes = readDisk(file, 'utf8');
+      await refusedEach(file, WRITE_FLAGS, { code: 'EROFS' });
+      assert.equal(readDisk(file, 'utf8'), bytes, file);
+    }
+  });
+
+  it('a flag that reads opens what the read routing passes through', async () => {
+    for (const file of [at('ro', 'raw.bin'), at('drive', 'd.txt')]) {
+      for (const flags of READ_FLAGS) {
+        assert.deepEqual(await openEach(file, flags), ['ok', 'ok', 'ok']);
+      }
+    }
+  });
+
+  it('a virtual place is ENOTSUP: no stray file in its directory on disk', async () => {
+    for (const name of ['v', 'm']) {
+      const file = at(name, 'x.txt');
+      await refusedEach(file, WRITE_FLAGS, {
+        code: 'ENOTSUP',
+        detail: 'virtual place',
+      });
+      assert.deepEqual(listDisk(at(name)), [], name);
+      assert.equal(k.fs(name).exists('/x.txt'), false, name);
+    }
+  });
+
+  it('a published entry is ENOTSUP whatever the flag, as before', async () => {
+    const flags = ['r', 'w', O_RDONLY, O_WRONLY | O_TRUNC];
+    const expected = { code: 'ENOTSUP', detail: 'virtual file' };
+    for (const file of [at('ro', 'a.txt'), at('site', 'a.txt')]) {
+      await refusedEach(file, flags, expected);
+      assert.equal(readDisk(file, 'utf8'), 'published', file);
+    }
+    for (const name of ['v', 'm']) {
+      await refusedEach(at(name, 'p.txt'), flags, expected);
+      assert.equal(k.fs(name).readFile('/p.txt', 'utf8'), 'virtual', name);
+    }
+  });
+
+  it('a writable disk-origin place: a new file is created, as before', async () => {
+    const file = at('site', 'new.txt');
+    assert.deepEqual(await openEach(file, 'a'), ['ok', 'ok', 'ok']);
+    const fd = fs.openSync(file, 'w');
+    fs.writeSync(fd, 'new');
+    fs.closeSync(fd);
+    assert.equal(readDisk(file, 'utf8'), 'new');
+    const stream = fs.createWriteStream(at('site', 'stream.txt'));
+    stream.end('streamed');
+    await finished(stream);
+    assert.equal(readDisk(at('site', 'stream.txt'), 'utf8'), 'streamed');
+  });
+
+  it('writeFileSync of a published file opens it past the routing, as before', () => {
+    fs.writeFileSync(at('site', 'b.txt'), Buffer.from('two'));
+    fs.appendFileSync(at('site', 'b.txt'), Buffer.from('+3'));
+    assert.equal(readDisk(at('site', 'b.txt'), 'utf8'), 'two+3');
+  });
+
+  it('createWriteStream: the refusal is emitted on the stream', async () => {
+    for (const [file, flags, expected] of [
+      [at('ro', 'ws.txt'), 'w', { code: 'EROFS' }],
+      [at('drive', 'd.txt'), 'a', { code: 'EROFS' }],
+      [at('v', 'ws.txt'), 'w', { code: 'ENOTSUP', detail: 'virtual place' }],
+      [at('m', 'ws.txt'), 'w', { code: 'ENOTSUP', detail: 'virtual place' }],
+    ]) {
+      // An 'error' instead of an 'open' rejects.
+      const stream = fs.createWriteStream(file, { flags });
+      await assert.rejects(once(stream, 'open'), (err) => {
+        refused(err, { ...expected, file, flags });
+        return true;
+      });
+    }
+    assert.equal(onDisk(at('ro', 'ws.txt')), false);
+    assert.equal(readDisk(at('drive', 'd.txt'), 'utf8'), 'disk');
+    assert.deepEqual(listDisk(at('v')), []);
+    assert.deepEqual(listDisk(at('m')), []);
+  });
+});
+
+describe('fs-patch under strict: open with a flag that writes', () => {
+  let root;
+  let k;
+  const at = (...p) => path.join(root, ...p);
+
+  before(async () => {
+    root = writeTree(tmpDir('fspatch-open-strict'), {
+      'ro/raw.bin': 'raw', // not cached: the disk territory
+      'stray/s.txt': 'unmanaged',
+    });
+    fs.mkdirSync(at('m'));
+    k = await kernel(
+      root,
+      {
+        ro: { fs: { ext: ['txt'], fallback: 'disk' } },
+        m: { provider: 'map', origin: 'virtual', fs: { writable: true } },
+      },
+      { strict: true },
+    );
+    fsPatch.install(k);
+  });
+
+  after(() => {
+    fsPatch.uninstall();
+    k.close();
+    rm(root);
+  });
+
+  it('the read routing answers first: a hidden path stays EACCES', async () => {
+    for (const file of [
+      at('ro', 'new.txt'), // a cached extension, unpublished
+      at('m', 'x.txt'),
+      at('stray', 's.txt'),
+    ]) {
+      await refusedEach(file, ['w', 'a', O_CREAT], { code: 'EACCES' });
+    }
+    assert.equal(onDisk(at('ro', 'new.txt')), false);
+    assert.deepEqual(listDisk(at('m')), []);
+    assert.equal(readDisk(at('stray', 's.txt'), 'utf8'), 'unmanaged');
+  });
+
+  it('what it passes through is routed as a mutation: EROFS', async () => {
+    const file = at('ro', 'raw.bin');
+    await refusedEach(file, WRITE_FLAGS, { code: 'EROFS' });
+    assert.equal(readDisk(file, 'utf8'), 'raw');
+    assert.deepEqual(await openEach(file, 'r'), ['ok', 'ok', 'ok']);
   });
 });
