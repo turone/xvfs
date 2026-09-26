@@ -119,6 +119,52 @@ describe('mutation ordering: same key', () => {
     rm(root);
   });
 
+  it("mkdir runs in its key's turn, after the mutations queued before it", async () => {
+    const root = tmpDir('vfs-order');
+    const k = await kernel(root, {
+      v: { origin: 'virtual', fs: { writable: true } },
+    });
+    const v = k.fs('v');
+    // The write is still publishing when mkdir is asked: in its turn, mkdir
+    // finds the key the unlink left, not the file in flight.
+    const results = await Promise.allSettled([
+      v.writeFile('/c', 'c'),
+      v.unlink('/c'),
+      v.mkdir('/c'),
+    ]);
+    assert.deepEqual(
+      results.map((r) => r.reason?.code ?? r.status),
+      ['fulfilled', 'fulfilled', 'fulfilled'],
+    );
+    assert.equal(v.exists('/c'), false);
+    assert.equal(k.mutations.size, 0);
+    k.close();
+    rm(root);
+  });
+
+  it('a write takes the bytes it is given when it is called', async () => {
+    const root = tmpDir('vfs-order');
+    const k = await kernel(root, {
+      v: { origin: 'virtual', fs: { writable: true } },
+      m: { provider: 'map', origin: 'virtual', fs: { writable: true } },
+    });
+    for (const name of ['v', 'm']) {
+      const place = k.fs(name);
+      const bytes = Buffer.from('first');
+      const written = place.writeFile('/b.txt', bytes);
+      bytes.write('xxxxx');
+      await written;
+      assert.equal(place.readFile('/b.txt', 'utf8'), 'first', name);
+      const tail = Buffer.from('+tail');
+      const appended = place.appendFile('/b.txt', tail);
+      tail.write('xxxxx');
+      await appended;
+      assert.equal(place.readFile('/b.txt', 'utf8'), 'first+tail', name);
+    }
+    k.close();
+    rm(root);
+  });
+
   it('two workers writing the same key: order = arrival at main, one update each', async () => {
     const root = tmpDir('vfs-order');
     const k = await kernel(root, {
@@ -331,6 +377,68 @@ describe('mutation ordering: rename and rm coordination', () => {
       'no orphan companion of the removed file',
     );
     assert.notEqual(place.bytecode('/d/two.js', 'require'), null);
+    assert.equal(k.mutations.size, 0);
+    k.close();
+    rm(root);
+  });
+
+  it('a recursive rm waits for a write in flight below it: nothing comes back', async () => {
+    const root = tmpDir('vfs-order');
+    const k = await kernel(root, {
+      v: { origin: 'virtual', fs: { writable: true } },
+    });
+    const v = k.fs('v');
+    await v.writeFile('/d/one.txt', '1');
+    const gate = Promise.withResolvers();
+    const original = k.publishVirtual.bind(k);
+    k.publishVirtual = async (place, key, raw) => {
+      if (key === '/d/slow.txt') await gate.promise;
+      return original(place, key, raw);
+    };
+    const slow = v.writeFile('/d/slow.txt', 'slow');
+    const removed = v.rm('/d', { recursive: true });
+    // Give the removal every chance to run while the write is at its gate.
+    await new Promise((r) => setImmediate(r));
+    gate.resolve();
+    await Promise.all([slow, removed]);
+    assert.equal(v.exists('/d'), false, 'the write in flight went with it');
+    assert.equal(k.mutations.size, 0);
+    k.close();
+    rm(root);
+  });
+
+  it('a file gone before its rename runs stays ENOENT, though a directory took its name', async () => {
+    const root = tmpDir('vfs-order');
+    const k = await kernel(root, {
+      v: { origin: 'virtual', fs: { writable: true } },
+    });
+    const v = k.fs('v');
+    await v.writeFile('/x', 'x');
+    const gate = Promise.withResolvers();
+    const original = k.publishVirtual.bind(k);
+    k.publishVirtual = async (place, key, raw) => {
+      if (key === '/y') await gate.promise;
+      return original(place, key, raw);
+    };
+    // Asked while /x is a file, the rename waits for the unlink of /x and
+    // for the write that holds /y; meanwhile /x becomes a directory.
+    const held = v.writeFile('/y', 'y');
+    const gone = v.unlink('/x');
+    const moved = v.rename('/x', '/y');
+    await gone;
+    await v.writeFile('/x/a', 'a');
+    gate.resolve();
+    await held;
+    const err = await moved.then(
+      () => null,
+      (error) => error,
+    );
+    assert.equal(err?.code, 'ENOENT');
+    assert.equal(err.syscall, 'rename');
+    assert.equal(err.path, v.pathOf('/x'));
+    assert.equal(err.dest, v.pathOf('/y'));
+    assert.equal(v.readFile('/x/a', 'utf8'), 'a', 'the directory stays');
+    assert.equal(v.readFile('/y', 'utf8'), 'y');
     assert.equal(k.mutations.size, 0);
     k.close();
     rm(root);
