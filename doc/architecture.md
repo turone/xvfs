@@ -407,11 +407,13 @@ or namespace `appRoot` routes at the speed it had before.
 
 **A path already in the form `path.resolve` returns is taken as it is: a
 drive letter, `:` and `\` on Windows (UNC paths are resolved), `/` on
-POSIX, then names none of which is empty, `.` or `..`, no trailing
-separator, and no `/` on Windows.** _Why:_ most paths the router is handed
-come from `path.join` or `path.resolve` already, and `path.resolve` was
-most of what a routing decision still cost; a fuzz test holds the check to
-`path.resolve` for both path flavors (`resolvedFor()`).
+POSIX, alone or then names none of which is empty, `.` or `..`, no
+trailing separator, and no `/` on Windows.** _Why:_ most paths the router
+is handed come from `path.join` or `path.resolve` already, and
+`path.resolve` was most of what a routing decision still cost; a fuzz test
+holds the check to `path.resolve` for both path flavors
+(`resolvedFor()`): what it takes, `path.resolve` gives back, and every
+path `path.resolve` gives on a drive it takes.
 
 **A trailing separator names a directory, as on POSIX, on every platform
 for what a place serves or stores: the router answers `ENOTDIR` for a
