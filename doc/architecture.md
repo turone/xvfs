@@ -393,6 +393,14 @@ or `path.posix`). A path on a drive is what `path.resolve` keeps as it
 is, so the strings compared are the ones `path.relative` compares; a UNC
 or namespace `appRoot` routes at the speed it had before.
 
+**A path already in the form `path.resolve` returns is taken as it is: a
+drive letter, `:` and `\` on Windows (UNC paths are resolved), `/` on
+POSIX, then names none of which is empty, `.` or `..`, no trailing
+separator, and no `/` on Windows.** _Why:_ most paths the router is handed
+come from `path.join` or `path.resolve` already, and `path.resolve` was
+most of what a routing decision still cost; a fuzz test holds the check to
+`path.resolve` for both path flavors (`resolvedFor()`).
+
 **A trailing separator names a directory, as on POSIX, on every platform
 for what a place serves or stores: the router answers `ENOTDIR` for a
 served file named so; a store route keeps the slash on its key, so a file
