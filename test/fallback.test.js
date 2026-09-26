@@ -11,7 +11,7 @@ const moduleHook = require('../lib/adapters/module-hook.js');
 const { tmpDir, writeTree, rm, kernel } = require('./helpers.js');
 
 // Disk edits behind the VFS's back: captured before any patch is installed.
-const { writeFileSync: writeDisk } = fs;
+const { writeFileSync: writeDisk, readdirSync: listDisk } = fs;
 
 // Strict appRoot as a managed root, and `fs.fallback` — what a disk-origin
 // place does with a path it does not serve: 'deny' (published canonical
@@ -404,6 +404,123 @@ describe("fs.fallback: 'disk' — a partial disk cache", () => {
     } finally {
       moduleHook.uninstall();
     }
+  });
+});
+
+// A listing names its disk entries from the parent paths a native walk
+// gives them: a nested tree — dotted, spaced and non-ASCII names, cached
+// and uncached files at several depths — listed from several levels and in
+// every form gives the names path.relative gives that walk.
+describe("fs.fallback: 'disk' — nested listings, named as path.relative does", () => {
+  let root;
+  let k;
+  const at = (...p) => path.join(root, ...p);
+
+  before(async () => {
+    root = writeTree(tmpDir('vfs-names'), {
+      'site/a.html': 'a',
+      'site/a.bin': 'b',
+      'site/..private/x.bin': 'x',
+      'site/..private/deep/er/y.bin': 'y',
+      'site/..private/deep/er/z.html': 'z',
+      'site/.dot/n.bin': 'n',
+      'site/x y/ü.bin': 'u',
+      'site/x y/ü/İ.bin': 'i',
+      'site/a..b/c/d/e.bin': 'e',
+      'site/a..b/c/d/f.html': 'f',
+    });
+    k = await kernel(
+      root,
+      { site: { fs: { ext: ['html'], fallback: 'disk' } } },
+      { strict: true },
+    );
+    fsPatch.install(k);
+  });
+
+  after(() => {
+    fsPatch.uninstall();
+    k.close();
+    rm(root);
+  });
+
+  // Everything below a directory of the place — cached files published,
+  // the rest on disk — as [name, isDirectory]: a native walk, its names by
+  // path.relative, sorted as listings sort.
+  const reference = (...dir) => {
+    const base = at('site', ...dir);
+    const names = new Map();
+    for (const entry of listDisk(base, {
+      recursive: true,
+      withFileTypes: true,
+    })) {
+      const file = path.join(entry.parentPath, entry.name);
+      const name = path.relative(base, file).split(path.sep).join('/');
+      names.set(name, entry.isDirectory());
+    }
+    return [...names.keys()].sort().map((name) => [name, names.get(name)]);
+  };
+
+  // A Dirent as [name, parentPath, isDirectory], from a listing name.
+  const dirent = (base, [name, isDirectory]) => [
+    path.basename(name),
+    path.join(base, path.dirname(name)),
+    isDirectory,
+  ];
+  const shown = (entries) =>
+    entries.map((d) => [String(d.name), d.parentPath, d.isDirectory()]);
+
+  const DIRS = [[], ['..private'], ['x y'], ['a..b', 'c']];
+
+  it('names: PlaceFs and node:fs, strings and Buffers', () => {
+    for (const dir of DIRS) {
+      const names = reference(...dir).map(([name]) => name);
+      const key = '/' + dir.join('/');
+      const options = { recursive: true };
+      assert.deepEqual(k.fs('site').readdir(key, options), names, key);
+      assert.deepEqual(fs.readdirSync(at('site', ...dir), options), names);
+      const buffers = fs.readdirSync(at('site', ...dir), {
+        ...options,
+        encoding: 'buffer',
+      });
+      assert.ok(buffers.every((name) => Buffer.isBuffer(name)));
+      assert.deepEqual(buffers.map(String), names);
+    }
+  });
+
+  it('Dirents: name, parent path and kind, listed and opened', () => {
+    for (const dir of DIRS) {
+      const base = at('site', ...dir);
+      const expected = reference(...dir).map((entry) => dirent(base, entry));
+      const options = { recursive: true, withFileTypes: true };
+      assert.deepEqual(shown(fs.readdirSync(base, options)), expected);
+      const buffers = { ...options, encoding: 'buffer' };
+      assert.deepEqual(shown(fs.readdirSync(base, buffers)), expected);
+      const handle = fs.opendirSync(base, { recursive: true });
+      const opened = [];
+      for (let d = handle.readSync(); d; d = handle.readSync()) opened.push(d);
+      handle.closeSync();
+      assert.deepEqual(shown(opened), expected);
+    }
+  });
+
+  it('the strict appRoot lists its place the same way', () => {
+    const expected = [
+      ['site', true],
+      ...reference().map(([name, isDirectory]) => [
+        `site/${name}`,
+        isDirectory,
+      ]),
+    ];
+    const names = expected.map(([name]) => name);
+    assert.deepEqual(fs.readdirSync(root, { recursive: true }), names);
+    const typed = fs.readdirSync(root, {
+      recursive: true,
+      withFileTypes: true,
+    });
+    assert.deepEqual(
+      shown(typed),
+      expected.map((entry) => dirent(root, entry)),
+    );
   });
 });
 

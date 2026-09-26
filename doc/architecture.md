@@ -118,6 +118,18 @@ tens of nanoseconds indexed). Kept inside the Map, the index follows every
 writer — kernel deltas, Map stores, worker snapshots — without one call
 site to forget; filling it costs about 0.3 µs per key.
 
+**A listing names the entries of a native walk from the strings of their
+parent paths (`listedNames()`): an entry of the listed directory is its
+own name, one below it the rest of its parent past the directory and a
+separator, then its name; the directory is walked without a trailing
+separator, as its entries' parents are named. Where the directory or a
+parent is not in the form `path.resolve` returns, `path.relative` names
+the entry, as it named every entry before. A `Dirent`'s parent path is
+built once per directory.** _Why:_ `path.join` and `path.relative` per
+entry were three quarters of a listing of a disk directory; the strings
+give the same names, which a test holds to `path.relative` for both path
+flavors — disk territory and the strict `appRoot` list this way.
+
 ## Storage
 
 **Pooled SAB segments (default 64 MiB), a best-fit allocator; emptied

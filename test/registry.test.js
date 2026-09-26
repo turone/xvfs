@@ -7,6 +7,7 @@ const {
   PlaceRegistry,
   Containment,
   resolvedFor,
+  listedNames,
 } = require('../lib/registry.js');
 
 // Lexical containment: only a real `..` component leaves appRoot. Names that
@@ -419,5 +420,78 @@ describe('resolvedFor: a path that path.resolve gives back', () => {
         assert.throws(() => app.encloses(p), invalid);
       }
     }
+  });
+});
+
+// The names of a recursive listing, read from the strings, against the
+// path.relative(base, path.join(parent, name)) listings computed per entry:
+// bases in the form path.resolve returns and not (a trailing separator, a
+// drive or a UNC root, relative, `..` inside, İ against a decomposed i̇);
+// parents that are the base, below it (plain, doubled separators, dots,
+// the other slash, another case, a reserved name with a colon) or
+// elsewhere; the names a listing holds. Parents change and come back, as
+// they do in a listing that walks several directories.
+
+const BASES = {
+  win32: [
+    ...['C:\\a', 'c:\\A\\b c', 'C:\\x\\i\u0307', 'C:\\\u0130', 'C:\\a\\'],
+    ...['C:\\', 'C:', 'C:x', '.', '..\\up', '', '\\\\srv\\share\\a'],
+    ...['\\\\srv\\share', '\\\\srv', 'C:\\a\\..\\b', 'C:/a'],
+  ],
+  posix: ['/a', '/a/b c', '/\u0130', '/a/', '/', '.', '../up', '', '//a', 'a'],
+};
+const TAILS = [
+  ...['x', 'x\\y', 'X', '..private', '.a', 'x\\\\y', 'x\\.\\y', 'x\\..\\y'],
+  ...['x/y', '\u0130', 'i\u0307', 'con:x', ' ', 'a\\b\\c\\d', '..', '.'],
+];
+const LISTED = {
+  win32: ['n', 'N.txt', '..private', '.a', 'a b', '\u0130', 'con:x', '...'],
+  posix: ['n', 'N.txt', '..private', '.a', 'a b', '\u0130', 'a\\b', '...'],
+};
+
+describe('listedNames: listing names read from the strings', () => {
+  for (const flavor of ['win32', 'posix']) {
+    it(`${flavor}: agree with path.relative for every entry`, () => {
+      const P = path[flavor];
+      const { sep } = P;
+      const tails = TAILS.map((t) => (sep === '/' ? t.replace(/\\/g, sep) : t));
+      const wrong = [];
+      for (const base of BASES[flavor]) {
+        const parents = [
+          base,
+          ...tails.map((tail) => base + sep + tail),
+          base.toUpperCase() + sep + 'x',
+          base + 'x',
+          P.resolve(base),
+          P.resolve(base) + sep + 'x',
+          P.dirname(P.resolve(base)),
+          'x' + sep + 'y',
+        ];
+        const nameOf = listedNames(P, base);
+        for (const pass of [parents, [...parents].reverse(), parents]) {
+          for (const parent of pass) {
+            for (const name of LISTED[flavor]) {
+              const got = nameOf(parent, name);
+              const rel = P.relative(base, P.join(parent, name));
+              const want = rel.split(sep).join('/');
+              if (got !== want) wrong.push({ base, parent, name, got, want });
+            }
+          }
+        }
+      }
+      assert.deepEqual(wrong.slice(0, 5), []);
+    });
+  }
+
+  it('reads a base and the directories below it without path.relative', () => {
+    const win32 = listedNames(path.win32, 'C:\\srv\\site');
+    assert.equal(win32('C:\\srv\\site', 'a.png'), 'a.png');
+    assert.equal(win32('C:\\srv\\site\\x\\Y', 'b'), 'x/Y/b');
+    assert.equal(win32('C:\\srv\\site\\..private', '.a'), '..private/.a');
+    const posix = listedNames(path.posix, '/srv/site');
+    assert.equal(posix('/srv/site/x\\y', 'b'), 'x\\y/b');
+    // path.relative for what is not below the base in plain form:
+    assert.equal(win32('C:\\srv\\site\\x\\..\\y', 'b'), 'y/b');
+    assert.equal(win32('C:\\srv\\other', 'b'), '../other/b');
   });
 });
