@@ -5,6 +5,7 @@ const assert = require('node:assert/strict');
 const { execFileSync } = require('node:child_process');
 const fs = require('node:fs');
 const path = require('node:path');
+const disk = require('../lib/disk.js');
 const { VfsKernel } = require('../lib/kernel.js');
 const fsPatch = require('../lib/adapters/fs-patch.js');
 const {
@@ -63,6 +64,48 @@ const spyRouteRead = (k) => {
 };
 
 describe('lib/disk.js', () => {
+  it('native() keeps the section open until it returns: nested, or by a throw', () => {
+    assert.equal(disk.inNative(), false);
+    const seen = disk.native(() => [
+      disk.inNative(),
+      disk.native(() => disk.inNative()),
+      disk.inNative(),
+    ]);
+    assert.deepEqual(seen, [true, true, true]);
+    assert.equal(disk.inNative(), false);
+    assert.throws(
+      () =>
+        disk.native(() => {
+          throw new Error('boom');
+        }),
+      /boom/,
+    );
+    assert.equal(disk.inNative(), false, 'closed by the throw');
+  });
+
+  it('sectioned() opens it for a call, outside() closes it for one; both keep the receiver', () => {
+    const target = {};
+    const probe = function (...args) {
+      // eslint-disable-next-line no-invalid-this
+      return [this === target, args, disk.inNative()];
+    };
+    target.inside = disk.sectioned(probe);
+    target.outside = disk.outside(probe);
+    target.fail = disk.outside(() => {
+      throw new Error('boom');
+    });
+    assert.deepEqual(target.inside(1, 2), [true, [1, 2], true]);
+    assert.equal(disk.inNative(), false);
+    const seen = disk.native(() => {
+      const before = disk.inNative();
+      const call = target.outside(3);
+      assert.throws(() => target.fail(), /boom/);
+      return [before, call, disk.inNative()];
+    });
+    assert.deepEqual(seen, [true, [true, [3], false], true]);
+    assert.equal(disk.inNative(), false);
+  });
+
   // A copy of the module over stand-ins for the node:fs functions it
   // captures: called with MARK, each reports whether it ran in the native
   // section. (readdirSync calls node:fs back only on a filesystem that does
@@ -306,7 +349,7 @@ describe('fs-patch: a passthrough is node:fs to the end', () => {
   });
 });
 
-describe('fs-patch under strict: the caller never runs in the section', () => {
+describe('fs-patch under strict: the native section and the caller', () => {
   let root;
   let out;
   let k;
@@ -332,6 +375,21 @@ describe('fs-patch under strict: the caller never runs in the section', () => {
     k.close();
     rm(root);
     rm(out);
+  });
+
+  it('inside the section a wrapper is its original; past it, routed again', () => {
+    assert.equal(readCode(hidden), 'EACCES');
+    assert.equal(fs.existsSync(hidden), false);
+    assert.equal(
+      disk.native(() => fs.readFileSync(hidden, 'utf8')),
+      'unmanaged',
+    );
+    assert.equal(
+      disk.native(() => fs.existsSync(hidden)),
+      true,
+    );
+    assert.equal(readCode(hidden), 'EACCES');
+    assert.equal(fs.existsSync(hidden), false);
   });
 
   it('a callback runs after the passthrough returned: routed', async () => {
