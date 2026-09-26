@@ -80,6 +80,7 @@ SAB segments ──────────── one physical copy ────
 | `lib/stats.js`, `lib/errors.js` | `VfsStats` / `VfsDirent`, a listing's result (`listing()`); node:fs-shaped errors                                                                         |
 | `lib/adapters/fs-patch.js`      | table-driven `node:fs` patch executing router decisions: the operation cores and their variants, guards, glob, watch, the strict root's listing, install  |
 | `lib/adapters/fs-copy.js`       | the copy engine of the patch: a copy's options, the source's raw input, the write through the destination — its store or the disk                         |
+| `lib/adapters/fs-dir.js`        | `VfsDir`: the `fs.Dir` of the patch's `opendir`, over a listing taken when the directory is opened, with the `node:fs` close semantics                    |
 | `lib/adapters/module-hook.js`   | `module.registerHooks` resolve/load + `_compile` cached data                                                                                              |
 | `lib/bootstrap/*`               | `register.mjs` (main thread, `--import`), `attach.js` (workers)                                                                                           |
 
@@ -484,9 +485,9 @@ before the queue, it would not be exclusive.
 
 ## Routing and strict mode
 
-**The router decides, the adapters execute; `fs-patch` (with `fs-copy`) and
-`module-hook` never read the config.** _Why:_ one chokepoint, uniform across
-sync, callback, promise and guarded APIs.
+**The router decides, the adapters execute; `fs-patch` (with `fs-copy`,
+`fs-dir`) and `module-hook` never read the config.** _Why:_ one chokepoint,
+uniform across sync, callback, promise and guarded APIs.
 
 **Containment is lexical: only a real `..` component leaves `appRoot`; the
 router never stats or resolves paths.** _Why:_ `..private` is a legal name
@@ -619,7 +620,10 @@ join a group deliberately, never by default.
 
 **Every listing comes from the places: `opendir` is implemented, not
 guarded — a `Dir` over the entries `readdir` lists, taken when it is
-opened, with the `node:fs` close semantics.** _Why:_ a guarded native
+opened, with the `node:fs` close semantics.** That `Dir` is `VfsDir`
+(`lib/adapters/fs-dir.js`), a class over the listing that knows nothing of
+routing: the patch takes the listing — the strict `appRoot`'s or a
+place's — and hands it over. _Why:_ a guarded native
 `opendir` was a second listing path: it showed raw disk files a place hides
 (unpublished cached extensions, the disk behind `fallback: 'deny'`) and
 missed virtual entries. A snapshot keeps it synchronous and simple;
