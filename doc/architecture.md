@@ -63,7 +63,7 @@ SAB segments ──────────── one physical copy ────
 | `lib/serial-queue.js`           | `SerialQueue`: one task at a time, arrival order                                                                                                          |
 | `lib/place.js`                  | `Place`: projection (`PlaceFiles`, with its directory index), `visible()`, `cached()`, `scripted()`, `prepared()`, `preparerOf()`, `companions()`         |
 | `lib/place-fs.js`               | `PlaceFs` facade, `VfsReadStream`, view leases, disk territory of `fs.fallback: 'disk'`                                                                   |
-| `lib/registry.js`               | `PlaceRegistry` (path → place, key) + `FsRouter` (read / mutate / copy / rename / link decisions)                                                         |
+| `lib/registry.js`               | `PlaceRegistry` (path → place, key; `Containment` in `appRoot`) + `FsRouter` (read / mutate / copy / rename / link decisions)                             |
 | `lib/map-store.js`              | `MapStore`: the per-thread Map sink, atomic publish                                                                                                       |
 | `lib/sab-store.js`              | `SabStore`: main-thread mutations of a `sab + virtual` place                                                                                              |
 | `lib/mutation-queue.js`         | `MutationQueue`: per-(place, key) ordering, exclusive place barrier                                                                                       |
@@ -375,6 +375,23 @@ callback, promise and guarded APIs.
 router never stats or resolves paths.** _Why:_ `..private` is a legal name
 and must route like any other; the router sits on the hot path of every fs
 call. Symlink / realpath containment is out of scope.
+
+**Containment is what `path.relative` says, computed from the strings:
+`appRoot` and a separator are a prefix of the path, on Windows after the
+lower-casing `path.win32.relative` applies to both; the part below is
+sliced from the path as given, so a place's name matches case-sensitively
+as before. What `path.relative` treats apart it answers itself: a
+lower-casing that changes a length (`İ`), where it compares segment by
+segment, and, on Windows, a root or a path off a drive — `path.relative`
+resolves both paths again, which a UNC or namespace path may not survive
+(`\\?\C:\app\..\..` resolves to `\\?\`, that to `D:\?`), and trims their
+leading separators (`\\C:\app\x` is `x` under `C:\app`).** _Why:_
+`path.relative` was most of the cost of a routing decision; the prefix
+gives the same answer, and a differential test holds it to `path.relative`
+for both path flavors on every platform (`Containment` takes `path.win32`
+or `path.posix`). A path on a drive is what `path.resolve` keeps as it
+is, so the strings compared are the ones `path.relative` compares; a UNC
+or namespace `appRoot` routes at the speed it had before.
 
 **A trailing separator names a directory, as on POSIX, on every platform
 for what a place serves or stores: the router answers `ENOTDIR` for a
