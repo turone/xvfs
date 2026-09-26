@@ -366,6 +366,24 @@ describe('resolvedFor: a path that path.resolve gives back', () => {
       assert.ok(claimed > 20000, `${claimed} claimed`);
     });
 
+    // path.resolve's own answers, on a drive on win32: none goes through
+    // path.resolve again.
+    it(`${flavor}: claims every path path.resolve gives on a drive`, () => {
+      const P = path[flavor];
+      const resolved = resolvedFor(P);
+      const onDrive = flavor === 'win32' ? /^[A-Za-z]:\\/ : /^\//;
+      const missed = [];
+      let given = 0;
+      for (const p of fuzz(flavor, 50000, 3)) {
+        const abs = P.resolve(p);
+        if (!onDrive.test(abs)) continue;
+        given++;
+        if (!resolved(abs)) missed.push(abs);
+      }
+      assert.deepEqual(missed.slice(0, 5), []);
+      assert.ok(given > 20000, `${given} resolved`);
+    });
+
     it(`${flavor}: routing over the same paths agrees with path.relative`, () => {
       const P = path[flavor];
       const roots = flavor === 'win32' ? ['C:\\a', 'c:\\B\\site'] : ['/a'];
@@ -390,21 +408,22 @@ describe('resolvedFor: a path that path.resolve gives back', () => {
 
   it('takes the paths the router is handed, and no other', () => {
     const win32 = resolvedFor(path.win32);
-    for (const p of ['C:\\a', 'z:\\x\\y.txt', 'C:\\..private\\...', 'C:\\ ']) {
+    const drives = ['C:\\a', 'z:\\x\\y.txt', 'C:\\..private\\...', 'C:\\ '];
+    for (const p of [...drives, 'C:\\', 'z:\\']) {
       assert.equal(win32(p), true, p);
     }
     const unresolved = [
-      ...['C:\\', 'C:', 'C:x', 'C:/a', 'C:\\a/b', 'C:\\a\\', 'C:\\a\\\\b'],
-      ...['C:\\.\\a', 'C:\\a\\..', '\\\\srv\\share\\a', '\\a', '1:\\a', ''],
-      ...[null, undefined, 1, pathLike('C:\\a')],
+      ...['C:', 'C:x', 'C:/', 'C:/a', 'C:\\a/b', 'C:\\a\\', 'C:\\\\'],
+      ...['C:\\a\\\\b', 'C:\\.\\a', 'C:\\a\\..', 'C:\\.', '\\\\srv\\share\\a'],
+      ...['\\a', '1:\\a', '', null, undefined, 1, pathLike('C:\\a')],
     ];
     for (const p of unresolved) assert.equal(win32(p), false, String(p));
     const posix = resolvedFor(path.posix);
-    for (const p of ['/a', '/a\\b/c', '/...', '/ ']) {
+    for (const p of ['/a', '/a\\b/c', '/...', '/ ', '/']) {
       assert.equal(posix(p), true, p);
     }
     const posixUnresolved = [
-      ...['/', '//a', '/a/', '/a/./b', '/a/../b', 'a/b', ''],
+      ...['//', '//a', '/a/', '/a/./b', '/a/../b', '/.', 'a/b', ''],
       ...[null, pathLike('/a')],
     ];
     for (const p of posixUnresolved) assert.equal(posix(p), false, String(p));
