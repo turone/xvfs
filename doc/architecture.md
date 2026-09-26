@@ -43,7 +43,7 @@ Main thread                                  Worker threads
 │ ├─ VfsConfig (frozen)             │ ─────► │ ├─ projected Maps (zero-copy)│
 │ ├─ FilesystemCache (SAB pool)     │        │ ├─ per-thread map places     │
 │ ├─ publication pipeline + epochs  │ update │ └─ Pins: streams and leases  │
-│ ├─ DirWatcher → SerialQueue       │ ─────► │                              │
+│ ├─ WatchPipeline: watcher → FIFO  │ ─────► │                              │
 │ ├─ Retirement: acks + retired     │ ◄───── │ vfs-ack (+ retained)         │
 │ └─ Pins (main-thread consumers)   │ ◄───── │ vfs-release / vfs-mutate     │
 └───────────────────────────────────┘        └──────────────────────────────┘
@@ -56,7 +56,7 @@ SAB segments ──────────── one physical copy ────
 | ------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `lib/config.js`                 | `VfsConfig`: raw → deep-frozen `{ global, places }`; domains, `prepare` index, `fs.fallback` normalization                                                |
 | `lib/cache.js`                  | `Pool` + `SegmentRegistry` + `FilesystemCache`: SAB allocator; `allocate()` places bytes privately, `put()` / `remove()` publish, `compact()` plans moves |
-| `lib/kernel.js`                 | `VfsKernel`: lifecycle, the publication pipeline, epochs (`#flush`), freeing retired versions, watcher FIFO, mutation queue, `link()`, worker side        |
+| `lib/kernel.js`                 | `VfsKernel`: lifecycle, the publication pipeline, epochs (`#flush`), freeing retired versions, mutation queue, `link()`, worker side                      |
 | `lib/pipeline.js`               | What a file is: `Preparers`, `prepareInput()`, `bytecodeFor()`                                                                                            |
 | `lib/compressor.js`             | `Compressor`: codec work only                                                                                                                             |
 | `lib/pins.js`                   | `Pins`: per-thread direct consumers of shared versions                                                                                                    |
@@ -72,6 +72,7 @@ SAB segments ──────────── one physical copy ────
 | `lib/mutation-queue.js`         | `MutationQueue`: per-(place, key) ordering, exclusive place barrier                                                                                       |
 | `lib/mutation-rpc.js`           | `OPS` for both ends; `MutationClient` + `RemoteStore`: worker → main mutations; `serveMutation()`: the main end, checking each request again              |
 | `lib/scanner.js`                | `scan()`: directory walk, then stats `IO_LIMIT` at a time → `Map<key, FileInput>` in the order of the walk                                                |
+| `lib/watch-pipeline.js`         | `WatchPipeline`: watcher epochs into kernel epochs, one at a time (`SerialQueue`), their jobs `IO_LIMIT` at a time; rechecks                              |
 | `lib/watcher.js`                | `DirWatcher`: `fs.watch` over each place tree (recursive where native, else one per directory) → debounced epochs; `watchPath()`                          |
 | `lib/disk.js`                   | the disk past the patch: `node:fs` captured at load; the native section (`native()`, `inNative()`) for calls that re-enter it; own `fs` for streams       |
 | `lib/companion.js`              | companion keys: `src\0require:bytecode`, `src\0script:bytecode`, `src\0fs:<enc>`                                                                          |
@@ -191,6 +192,23 @@ old in the VFS); a FIFO is the simplest correct order, and the debounce
 already batches events. The queue is deliberately separate from the per-key
 `MutationQueue` of virtual places, which never share a key with a watched
 place.
+
+**`WatchPipeline` (`lib/watch-pipeline.js`) owns the live updates — the
+watcher, the queue, the jobs of each epoch, the rechecks — and the kernel
+keeps the commit. The pipeline is granted one capability: an epoch the
+kernel opens for it, `{ publish(place, key, file), unstage(place, key),
+flush() }`, bound to an epoch of the kernel's own whose state never leaves
+the kernel; anything else it reads from the kernel's public state when it
+runs, never while the kernel is being constructed.** _Why:_ a commit writes
+the index, retires what it replaces, binds the pins and tells the links —
+all the kernel's; bound to its epoch, a `flush()` commits what was
+published there and nothing else.
+
+**A watcher epoch takes each key once: a directory rescan and a file event
+that both reach a key publish it first-come. The keys an epoch has taken
+are the pipeline's own record, beside the kernel's epoch.** _Why:_ the rule
+belongs to the watcher, not to every epoch of the kernel; a virtual write
+stages nothing twice.
 
 **Disk work is bounded (`pool()`, `lib/pool.js`). An epoch runs its jobs
 `IO_LIMIT` (16) at a time: each logs its own failure and stops none of the
@@ -813,6 +831,8 @@ workers call `attach()`.** _Why:_ preloads do not run in worker threads.
 | Echoing file bytes in mutation responses                                                                        | the bytes are already in SAB; the update carries metadata         |
 | Provisional entries in the index                                                                                | snapshots and compaction would observe unpublished state          |
 | Parallel watcher epochs                                                                                         | an older epoch could publish over a newer one                     |
+| Committing an epoch (`#flush`) outside the kernel                                                               | it writes the index, retirement, pins and links the kernel owns   |
+| A watch pipeline that holds the kernel's epoch state and passes it back (`publish(ep, …)`, `flush(ep)`)         | kernel state leaves the kernel; no commit is bound to its epoch   |
 | Unbounded jobs of a watcher epoch                                                                               | a descriptor per changed file: `EMFILE` at `ulimit -n 1024`       |
 | A scan's stats pooled per directory, or listed in the order they finish                                         | no faster on sparse trees; init's order would change run to run   |
 | A permanent allocation id in every entry                                                                        | retirement needs an identity only while a version is retired      |
@@ -873,13 +893,14 @@ workers call `attach()`.** _Why:_ preloads do not run in worker threads.
   whose `stat` lands after `close()` is dropped.
 - Companions never appear in `readdir`, `exists`, routing or the patched fs;
   `Place.companions(key)` enumerates them — never hand-roll key lists.
-- Kernel-internal disk I/O (kernel, scanner, watcher, `PlaceFs`, the copy
-  engine) uses `lib/disk.js`: functions captured at load time, the
-  synchronous ones that re-enter run in a native section — Node's own
-  implementations call the public `node:fs` back (`writeFileSync` →
-  `openSync`, `rmSync` → rimraf), and the patch passes such calls through
-  untouched while the section is open. Inside `lib/`, only `disk.js`, which
-  captures `node:fs`, and `fs-patch.js`, which patches it, load `node:fs`.
+- Kernel-internal disk I/O (kernel, watch pipeline, scanner, watcher,
+  `PlaceFs`, the copy engine) uses `lib/disk.js`: functions captured at
+  load time, the synchronous ones that re-enter run in a native section —
+  Node's own implementations call the public `node:fs` back
+  (`writeFileSync` → `openSync`, `rmSync` → rimraf), and the patch passes
+  such calls through untouched while the section is open. Inside `lib/`,
+  only `disk.js`, which captures `node:fs`, and `fs-patch.js`, which
+  patches it, load `node:fs`.
 - The native section opens only around the library's own disk I/O and a
   call its routing passed through — never around `cp`, whose `filter` is
   the caller's code — and no callback of the caller runs inside it.
