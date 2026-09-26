@@ -3,7 +3,11 @@
 const { describe, it } = require('node:test');
 const assert = require('node:assert/strict');
 const path = require('node:path');
-const { PlaceRegistry, Containment } = require('../lib/registry.js');
+const {
+  PlaceRegistry,
+  Containment,
+  resolvedFor,
+} = require('../lib/registry.js');
 
 // Lexical containment: only a real `..` component leaves appRoot. Names that
 // merely start with dots are ordinary names routed by the usual Place rules.
@@ -303,5 +307,117 @@ describe('Containment: path.relative, computed from the strings', () => {
     assert.equal(app.encloses('/'), true);
     assert.equal(app.encloses('/SRV'), false);
     assert.equal(new Containment(path.posix, '/').below('/x'), 'x');
+  });
+});
+
+// A path the router takes as resolved skips path.resolve, so the check may
+// only claim a path that path.resolve gives back unchanged: tested on a
+// deterministic stream of paths built from heads (drives, roots, UNC,
+// relative), names (dots, colons, spaces, Unicode) and separators (both
+// kinds, doubled, trailing), for both flavors on any platform.
+
+const HEADS = {
+  win32: [
+    ...['C:\\', 'C:\\', 'C:\\', 'c:\\', 'z:\\', 'C:/', 'C:', '1:\\', '\\'],
+    ...['\\\\', '\\\\srv\\share\\', '\\\\?\\C:\\', '/', ''],
+  ],
+  posix: ['/', '/', '/', '/', '//', '', './', '\\', 'C:\\'],
+};
+const PARTS = [
+  ...['a', 'B', 'site', 'x.txt', '.', '..', '...', '.a', 'a.', ' ', ':'],
+  ...['C:', 'con', '\u0130', 'i\u0307', '\u212a', '\u00fc', 'a\\b'],
+];
+const SEPARATORS = {
+  win32: ['\\', '\\', '\\', '/', '\\\\'],
+  posix: ['/', '/', '/', '//', '\\'],
+};
+
+const fuzz = function* (flavor, count, seed) {
+  let state = seed;
+  const next = (n) => {
+    state = (Math.imul(state, 1664525) + 1013904223) >>> 0;
+    return Math.floor((state / 2 ** 32) * n);
+  };
+  const pick = (list) => list[next(list.length)];
+  for (let i = 0; i < count; i++) {
+    let p = pick(HEADS[flavor]);
+    for (let n = 1 + next(4), j = 0; j < n; j++) {
+      if (j > 0) p += pick(SEPARATORS[flavor]);
+      p += pick(PARTS) + (next(4) === 0 ? pick(PARTS) : '');
+    }
+    yield next(8) === 0 ? p + pick(SEPARATORS[flavor]) : p;
+  }
+};
+
+describe('resolvedFor: a path that path.resolve gives back', () => {
+  for (const flavor of ['win32', 'posix']) {
+    it(`${flavor}: never claims one that path.resolve changes`, () => {
+      const P = path[flavor];
+      const resolved = resolvedFor(P);
+      const wrong = [];
+      let claimed = 0;
+      for (const p of fuzz(flavor, 200000, 1)) {
+        if (!resolved(p)) continue;
+        claimed++;
+        if (P.resolve(p) !== p) wrong.push(p);
+      }
+      assert.deepEqual(wrong.slice(0, 5), []);
+      assert.ok(claimed > 20000, `${claimed} claimed`);
+    });
+
+    it(`${flavor}: routing over the same paths agrees with path.relative`, () => {
+      const P = path[flavor];
+      const roots = flavor === 'win32' ? ['C:\\a', 'c:\\B\\site'] : ['/a'];
+      const wrong = [];
+      for (const root of roots) {
+        const fast = new Containment(P, root);
+        const slow = reference(P, root);
+        for (const p of fuzz(flavor, 30000, 2)) {
+          const below = fast.below(p);
+          const encloses = fast.encloses(p);
+          if (below !== slow.below(p) || encloses !== slow.encloses(p)) {
+            wrong.push({ root, p, below, encloses });
+          }
+        }
+      }
+      assert.deepEqual(wrong.slice(0, 5), []);
+    });
+  }
+
+  // Not a string: a String object, one whose toString gives a path.
+  const pathLike = (p) => ({ toString: () => p });
+
+  it('takes the paths the router is handed, and no other', () => {
+    const win32 = resolvedFor(path.win32);
+    for (const p of ['C:\\a', 'z:\\x\\y.txt', 'C:\\..private\\...', 'C:\\ ']) {
+      assert.equal(win32(p), true, p);
+    }
+    const unresolved = [
+      ...['C:\\', 'C:', 'C:x', 'C:/a', 'C:\\a/b', 'C:\\a\\', 'C:\\a\\\\b'],
+      ...['C:\\.\\a', 'C:\\a\\..', '\\\\srv\\share\\a', '\\a', '1:\\a', ''],
+      ...[null, undefined, 1, pathLike('C:\\a')],
+    ];
+    for (const p of unresolved) assert.equal(win32(p), false, String(p));
+    const posix = resolvedFor(path.posix);
+    for (const p of ['/a', '/a\\b/c', '/...', '/ ']) {
+      assert.equal(posix(p), true, p);
+    }
+    const posixUnresolved = [
+      ...['/', '//a', '/a/', '/a/./b', '/a/../b', 'a/b', ''],
+      ...[null, pathLike('/a')],
+    ];
+    for (const p of posixUnresolved) assert.equal(posix(p), false, String(p));
+  });
+
+  it('leaves what is not a string to path.resolve and its error', () => {
+    for (const P of [path.win32, path.posix]) {
+      const app = new Containment(P, P.resolve('/srv/app'));
+      const like = pathLike(P.resolve('/srv/app/x'));
+      for (const p of [null, undefined, 1, like]) {
+        const invalid = { code: 'ERR_INVALID_ARG_TYPE' };
+        assert.throws(() => app.below(p), invalid);
+        assert.throws(() => app.encloses(p), invalid);
+      }
+    }
   });
 });
