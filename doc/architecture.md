@@ -56,7 +56,7 @@ SAB segments ──────────── one physical copy ────
 | ------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `lib/config.js`                 | `VfsConfig`: raw → deep-frozen `{ global, places }`; domains, `prepare` index, `fs.fallback` normalization                                                |
 | `lib/cache.js`                  | `Pool` + `SegmentRegistry` + `FilesystemCache`: SAB allocator; `allocate()` places bytes privately, `put()` / `remove()` publish, `compact()` plans moves |
-| `lib/kernel.js`                 | `VfsKernel`: lifecycle, the publication pipeline, epochs (`#flush`), retirement, watcher FIFO, mutation queue + RPC server, `link()`, worker side         |
+| `lib/kernel.js`                 | `VfsKernel`: lifecycle, the publication pipeline, epochs (`#flush`), retirement, watcher FIFO, mutation queue, `link()`, worker side                      |
 | `lib/pipeline.js`               | What a file is: `Preparers`, `prepareInput()`, `bytecodeFor()`                                                                                            |
 | `lib/compressor.js`             | `Compressor`: codec work only                                                                                                                             |
 | `lib/pins.js`                   | `Pins`: per-thread direct consumers of shared versions                                                                                                    |
@@ -69,7 +69,7 @@ SAB segments ──────────── one physical copy ────
 | `lib/map-store.js`              | `MapStore` (a `VirtualStore`): mutations at once on the thread's own Map; the Map sink of the pipeline, atomic publish                                    |
 | `lib/sab-store.js`              | `SabStore` (a `VirtualStore`): main-thread mutations of a `sab + virtual` place, each in its key's turn; keys in flight                                   |
 | `lib/mutation-queue.js`         | `MutationQueue`: per-(place, key) ordering, exclusive place barrier                                                                                       |
-| `lib/mutation-rpc.js`           | `MutationClient` + `RemoteStore`: worker → main mutations                                                                                                 |
+| `lib/mutation-rpc.js`           | `OPS` for both ends; `MutationClient` + `RemoteStore`: worker → main mutations; `serveMutation()`: the main end, checking each request again              |
 | `lib/scanner.js`                | `scan()`: directory walk, then stats `IO_LIMIT` at a time → `Map<key, FileInput>` in the order of the walk                                                |
 | `lib/watcher.js`                | `DirWatcher`: `fs.watch` over each place tree (recursive where native, else one per directory) → debounced epochs; `watchPath()`                          |
 | `lib/disk.js`                   | the disk past the patch: `node:fs` captured at load; the native section (`native()`, `inNative()`) for calls that re-enter it; own `fs` for streams       |
@@ -361,6 +361,16 @@ RPC over their link port.** The response follows publication — the update is
 posted first on the same port — and the payload travels as a detached copy.
 _Why:_ one writer keeps allocation single-threaded without locks inside SAB;
 a worker sees its own write before its Promise settles.
+
+**One table (`OPS`) describes each worker mutation for both ends of the
+RPC: what its request carries besides the key — bytes, a second key — and
+the options its store takes, which travel as booleans. The main end
+(`serveMutation()`) takes nothing else from a request: it checks the
+mutation, the place, its origin and writability and every key again, and
+hands the store the options of the table.** _Why:_ the worker's projection
+is read-only and never authoritative; one description keeps the two ends
+from drifting apart, and a store never gets an option its mutation does
+not take.
 
 **Mutations of shared places are asynchronous; `*Sync` forms are `ENOTSUP`;
 no `Atomics.wait()`.** _Why:_ blocking a worker on the main thread invites
