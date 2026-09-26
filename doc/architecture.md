@@ -61,6 +61,7 @@ SAB segments ──────────── one physical copy ────
 | `lib/compressor.js`             | `Compressor`: codec work only                                                                                                                             |
 | `lib/pins.js`                   | `Pins`: per-thread direct consumers of shared versions                                                                                                    |
 | `lib/serial-queue.js`           | `SerialQueue`: one task at a time, arrival order                                                                                                          |
+| `lib/pool.js`                   | `pool()`: a list worked through at most `limit` calls at a time, stopping at the first failure; `IO_LIMIT`                                                |
 | `lib/place.js`                  | `Place`: projection (`PlaceFiles`, with its directory index), `visible()`, `cached()`, `scripted()`, `prepared()`, `preparerOf()`, `companions()`         |
 | `lib/place-fs.js`               | `PlaceFs` facade, `VfsReadStream`, view leases, disk territory of `fs.fallback: 'disk'`                                                                   |
 | `lib/registry.js`               | `PlaceRegistry` (path → place, key; `Containment` in `appRoot`) + `FsRouter` (read / mutate / copy / rename / link decisions)                             |
@@ -68,7 +69,7 @@ SAB segments ──────────── one physical copy ────
 | `lib/sab-store.js`              | `SabStore`: main-thread mutations of a `sab + virtual` place                                                                                              |
 | `lib/mutation-queue.js`         | `MutationQueue`: per-(place, key) ordering, exclusive place barrier                                                                                       |
 | `lib/mutation-rpc.js`           | `MutationClient` + `RemoteStore`: worker → main mutations                                                                                                 |
-| `lib/scanner.js`                | `scan()`: directory walk → `Map<key, FileInput>`                                                                                                          |
+| `lib/scanner.js`                | `scan()`: directory walk, then stats `IO_LIMIT` at a time → `Map<key, FileInput>` in the order of the walk                                                |
 | `lib/watcher.js`                | `DirWatcher`: `fs.watch` over each place tree (recursive where native, else one per directory) → debounced epochs; `watchPath()`                          |
 | `lib/disk.js`                   | the disk past the patch: `node:fs` captured at load; the native section (`native()`, `inNative()`) for calls that re-enter it; own `fs` for streams       |
 | `lib/companion.js`              | companion keys: `src\0require:bytecode`, `src\0script:bytecode`, `src\0fs:<enc>`                                                                          |
@@ -188,6 +189,23 @@ old in the VFS); a FIFO is the simplest correct order, and the debounce
 already batches events. The queue is deliberately separate from the per-key
 `MutationQueue` of virtual places, which never share a key with a watched
 place.
+
+**Disk work is bounded (`pool()`, `lib/pool.js`). An epoch runs its jobs
+`IO_LIMIT` (16) at a time: each logs its own failure and stops none of the
+others; a job the pool reaches after `close()` does not start, one in
+flight finishes as before; a rescan among them publishes its new files one
+at a time. A scan walks the tree one directory at a time, then stats the
+files it found 16 at a time, each result landing at its index: the result
+keeps the order of the walk. Init publishes `initConcurrency()` files at a
+time; the first failure stops the rest.**
+_Why:_ a read holds a file descriptor from open to close — an unbounded
+epoch of 2000 changed files failed half of them with `EMFILE` at
+`ulimit -n 1024` — and 16 keeps the libuv threadpool busy: 4 was slower,
+more no faster. A rescan is already one job of its epoch. A stat holds no
+descriptor, but one at a time left the scan waiting on each, and a pool per
+directory is no faster on a sparse tree. In the order of the walk, init
+publishes files of equal size in the same order from run to run. Init
+shares the threadpool with zlib: more in flight only raises the peak heap.
 
 **The watcher sees the disk through `lib/disk.js` — `node:fs` as it was
 when the library loaded: recursive `fs.watch` where it is native (Windows,
@@ -752,6 +770,8 @@ workers call `attach()`.** _Why:_ preloads do not run in worker threads.
 | Echoing file bytes in mutation responses                                                                        | the bytes are already in SAB; the update carries metadata         |
 | Provisional entries in the index                                                                                | snapshots and compaction would observe unpublished state          |
 | Parallel watcher epochs                                                                                         | an older epoch could publish over a newer one                     |
+| Unbounded jobs of a watcher epoch                                                                               | a descriptor per changed file: `EMFILE` at `ulimit -n 1024`       |
+| A scan's stats pooled per directory, or listed in the order they finish                                         | no faster on sparse trees; init's order would change run to run   |
 | A permanent allocation id in every entry                                                                        | retirement needs an identity only while a version is retired      |
 | IPC per chunk or per pin                                                                                        | pins of current versions must stay local                          |
 | Freeing a retired version on a timeout                                                                          | reuse under a slow reader returns another file's bytes            |
@@ -801,7 +821,9 @@ workers call `attach()`.** _Why:_ preloads do not run in worker threads.
 - Compaction never moves or overwrites retired bytes; emptied segments are
   reused, never returned to the OS.
 - Source and companions of a file are published in one `vfs-update`.
-- Watcher epochs never overlap.
+- Watcher epochs never overlap; the jobs of one run at most `IO_LIMIT` at a
+  time, one that fails holds up nothing else, and none starts after
+  `close()`.
 - A closed kernel publishes nothing and arms no timer: a watcher event
   whose `stat` lands after `close()` is dropped.
 - Companions never appear in `readdir`, `exists`, routing or the patched fs;
