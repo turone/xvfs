@@ -72,7 +72,7 @@ SAB segments ──────────── one physical copy ────
 | `lib/watcher.js`                | `DirWatcher`: `fs.watch` over each place tree (recursive where native, else one per directory) → debounced epochs; `watchPath()`                          |
 | `lib/disk.js`                   | the disk past the patch: `node:fs` captured at load; the native section (`native()`, `inNative()`) for calls that re-enter it; own `fs` for streams       |
 | `lib/companion.js`              | companion keys: `src\0require:bytecode`, `src\0script:bytecode`, `src\0fs:<enc>`                                                                          |
-| `lib/stats.js`, `lib/errors.js` | `VfsStats` / `VfsDirent`; node:fs-shaped errors                                                                                                           |
+| `lib/stats.js`, `lib/errors.js` | `VfsStats` / `VfsDirent`, a listing's result (`listing()`); node:fs-shaped errors                                                                         |
 | `lib/adapters/fs-patch.js`      | table-driven `node:fs` patch executing router decisions                                                                                                   |
 | `lib/adapters/module-hook.js`   | `module.registerHooks` resolve/load + `_compile` cached data                                                                                              |
 | `lib/bootstrap/*`               | `register.mjs` (main thread, `--import`), `attach.js` (workers)                                                                                           |
@@ -126,8 +126,9 @@ separator, as its entries' parents are named. The directory is taken as
 `path.resolve` makes it, so any spelling of it will do (the strict
 `appRoot` with a trailing separator, `.`); where a parent is not in the
 form `path.resolve` returns, or not in or below that directory,
-`path.relative` names the entry, as it named every entry before. A
-`Dirent`'s parent path is built once per directory.** _Why:_ `path.join`
+`path.relative` names the entry, as it named every entry before. One
+builder makes the result of every listing (`listing()`), and a `Dirent`'s
+parent path is built once per directory.** _Why:_ `path.join`
 and `path.relative` per entry were three quarters of a listing of a disk
 directory; the strings give the same names, which a test holds to
 `path.relative` for both path flavors — disk territory and the strict
