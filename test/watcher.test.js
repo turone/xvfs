@@ -16,6 +16,7 @@ const {
   tap,
   quiet,
   nextMessage,
+  diskCalls,
 } = require('./helpers.js');
 
 // The disk behind the patch, captured before any install. Not rmSync: on
@@ -430,11 +431,12 @@ describe('watcher: epoch ordering', () => {
 });
 
 // The jobs of one epoch run IO_LIMIT (16) at a time: a whole checkout at
-// once would hold a descriptor per file (EMFILE). Reads wait at a gate the
-// test opens, so how many run at once is decided by the epoch alone; it
-// still commits as one update. Epochs are emitted by hand, as above. A
-// bound other than 16 fails within seconds and never hangs: the waits for
-// the gate have a deadline, and the gate opens in `finally`.
+// once would hold a descriptor per file (EMFILE). A read, once it has read
+// its file, waits at a gate the test opens, so how many run at once is
+// decided by the epoch alone; it still commits as one update. Epochs are
+// emitted by hand, as above. A bound other than 16 fails within seconds and
+// never hangs: the waits for the gate have a deadline, and the gate opens
+// in `finally`.
 describe('watcher: a bounded epoch', () => {
   const setup = async (count, console = quiet) => {
     const files = {};
@@ -446,20 +448,23 @@ describe('watcher: a bounded epoch', () => {
       { watch: true, watchTimeout: 60000 },
       { console },
     );
+    // Epochs by hand only: the fs.watch handles are closed, so no event of
+    // their own stats a path.
+    k.watcher.close();
     const t = tap(k);
     const at = (rel) => path.join(root, rel);
     const real = k.cache.reader;
-    // Reads that reached the gate, those waiting at it, those past it and
-    // not done yet (`now`), and the most of those at once.
+    // Reads that reached the gate, done with the disk, those waiting at it,
+    // those not done yet (`now`), and the most of those at once.
     const reads = { arrived: 0, waiting: [], now: 0, peak: 0, open: false };
     k.cache.reader = async (file, view) => {
-      reads.arrived++;
       reads.peak = Math.max(reads.peak, ++reads.now);
       try {
+        await real(file, view);
+        reads.arrived++;
         if (!reads.open) {
           await new Promise((resolve) => reads.waiting.push(resolve));
         }
-        await real(file, view);
       } finally {
         reads.now--;
       }
@@ -529,6 +534,7 @@ describe('watcher: a bounded epoch', () => {
     }
   });
 
+  // A job that started would make a disk call: the delete stats its path.
   it('close() starts none of the jobs still waiting for a slot', async () => {
     const errors = [];
     const log = (m) => errors.push(m);
@@ -537,6 +543,7 @@ describe('watcher: a bounded epoch', () => {
       IO_LIMIT + 1,
       capture,
     );
+    let calls = null;
     try {
       // IO_LIMIT reads fill the pool; the delete of a gone file waits behind.
       const [gone, ...changed] = rels;
@@ -546,15 +553,121 @@ describe('watcher: a bounded epoch', () => {
       const first = k.nextUpdateId;
       k.watcher.emit('epoch', events);
       await arrived(IO_LIMIT);
+      // The reads at the gate are done with the disk; nothing else runs.
+      calls = diskCalls();
       const idle = k.watchQueue.idle;
       k.close();
       open();
       await idle;
+      assert.equal(calls.count, 0, 'no disk call after close()');
       assert.equal(reads.arrived, IO_LIMIT, 'no read after close()');
       assert.equal(k.nextUpdateId, first, 'nothing published');
-      assert.deepEqual(errors, [], 'the waiting delete never ran');
+      assert.deepEqual(errors, [], 'nothing logged');
     } finally {
+      calls?.stop();
       await done();
+    }
+  });
+});
+
+// A job still running when close() is called resumes over a closed kernel:
+// it returns without work or log. The disk call it waits for finishes; none
+// starts after close(), counted by async_hooks whatever function makes it.
+// Epochs by hand; the fs.watch handles are closed, so nothing else runs.
+describe('watcher: a job in flight at close()', () => {
+  it('returns without work or log', async () => {
+    const root = writeTree(tmpDir('watch-inflight'), {
+      'site/d/a.txt': 'a',
+      'site/d/sub/b.txt': 'b',
+      'site/moved/c.txt': 'c',
+    });
+    const logs = [];
+    const log = (m) => logs.push(m);
+    const k = await kernel(
+      root,
+      { site: { fs: true } },
+      { watch: true, watchTimeout: 60000 },
+      { console: { ...quiet, warn: log, error: log } },
+    );
+    k.watcher.close();
+    const calls = diskCalls();
+    try {
+      const at = (...p) => path.join(root, 'site', ...p);
+      // Four jobs, each at its first disk call when the kernel closes: the
+      // delete of a gone file and the change of one (a stat, then the
+      // unpublish of their keys), the delete of what is a directory now (a
+      // stat, then a rescan) and a rescan (its walk, a readdir).
+      const events = new Map([
+        [at('gone.txt'), 'delete'],
+        [at('missing.txt'), 'change'],
+        [at('moved'), 'delete'],
+        [at('d'), 'scan'],
+      ]);
+      const first = k.nextUpdateId;
+      k.watcher.emit('epoch', events);
+      await calls.started(4);
+      const idle = k.watchQueue.idle;
+      k.close();
+      const atClose = calls.count;
+      await idle;
+      assert.equal(atClose, 4, 'one disk call in flight per job');
+      assert.equal(calls.count, atClose, 'no disk call after close()');
+      assert.deepEqual(logs, [], 'nothing logged');
+      assert.equal(k.nextUpdateId, first, 'nothing published');
+    } finally {
+      calls.stop();
+      k.close();
+      rm(root);
+    }
+  });
+
+  // The change of a prepared file: its job stats it, then reads it, and the
+  // kernel closes while the read is in flight. The read finishes — its
+  // file handle's stat, read, stat and close — but the preparer, the
+  // application's code, never runs on the closed kernel.
+  it('a read in flight finishes; its preparer never runs', async () => {
+    const root = writeTree(tmpDir('watch-inflight-prep'), {
+      'site/a.txt': 'a',
+    });
+    let closed = false;
+    let prepared = 0; // preparer calls after close()
+    const preparers = {
+      upper: (raw) => {
+        if (closed) prepared++;
+        return raw.toString().toUpperCase();
+      },
+    };
+    const logs = [];
+    const log = (m) => logs.push(m);
+    const k = await kernel(
+      root,
+      { site: { fs: { ext: ['txt'], prepare: 'upper' } } },
+      { watch: true, watchTimeout: 60000 },
+      { preparers, console: { ...quiet, warn: log, error: log } },
+    );
+    k.watcher.close();
+    const at = path.join(root, 'site', 'a.txt');
+    fs.writeFileSync(at, 'b');
+    const calls = diskCalls();
+    try {
+      const first = k.nextUpdateId;
+      k.watcher.emit('epoch', new Map([[at, 'change']]));
+      // Its stat, then the open of its read.
+      await calls.started(2);
+      const idle = k.watchQueue.idle;
+      closed = true;
+      k.close();
+      const atClose = calls.count;
+      await idle;
+      assert.equal(atClose, 2);
+      assert.equal(calls.count - atClose, 4, 'the rest of the read only');
+      assert.equal(prepared, 0, 'no preparer after close()');
+      assert.deepEqual(logs, [], 'nothing logged');
+      assert.equal(k.nextUpdateId, first, 'nothing published');
+    } finally {
+      calls.stop();
+      k.close();
+      rm(root);
     }
   });
 });
