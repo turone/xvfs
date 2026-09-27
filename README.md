@@ -654,7 +654,9 @@ node app.js -- --vfs.defaults.memory.limit=512mib \
 
 States: `new → initializing → ready → closed` (final). `fs()`,
 `snapshot()`, `watch()`, `link()` require `ready`. `initialize()`
-failure closes the kernel.
+failure closes the kernel; a `close()` while it runs makes it reject with
+`[vfs] kernel closed before publication` — the file reads it began
+finish, and nothing else starts: no read, no preparer.
 
 | Method               | Description                                                                                                                          |
 | -------------------- | ------------------------------------------------------------------------------------------------------------------------------------ |
