@@ -130,6 +130,19 @@ describe('PlaceFiles: the directory index of a projection', () => {
     assert.equal(files.spelling('/b/c.txt'), null);
   });
 
+  // Lower-casing equates a few names NTFS keeps apart: İ and i̇, whose
+  // lengths differ, the Kelvin sign and k. Such a name answers with the
+  // published source, never with raw bytes (Place.spelling).
+  it('caseless: spellings as lower-casing gives them, whatever the length', () => {
+    const files = new PlaceFiles(true);
+    files.set('/İ.txt', {});
+    files.set('/k.txt', {});
+    assert.equal(files.spelling('/i̇.txt'), '/İ.txt');
+    assert.equal(files.spelling('/İ.TXT'), '/İ.txt');
+    assert.equal(files.spelling('/I.txt'), null);
+    assert.equal(files.spelling('/K.txt'), '/k.txt');
+  });
+
   it('caseless: spellings follow any sequence of sets and deletes', () => {
     const next = random(7);
     const pick = (list) => list[Math.floor(next() * list.length)];
