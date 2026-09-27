@@ -1012,7 +1012,7 @@ stat        { size, mtimeMs } (+ sourceSize, encoding for compressed companions)
   as HTTPS tarball URLs with lockfile integrity.
 - Performance claims rest on `npm run bench` (`bench/`, outside `npm test`
   and CI): one process per scenario, a warm-up, then the median of several
-  rounds; latencies as p50 / p99, memory as RSS and pool usage. Two
+  rounds; latencies as p50 / p95 / p99, memory as RSS and pool usage. Two
   revisions are compared with `bench/ab.js`: both exported with
   `git archive` into sibling directories of one temporary directory — where
   the code lies changes its timings — with the same dependencies, run in

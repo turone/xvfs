@@ -6,7 +6,8 @@
 //   ops        ns/op of a synchronous call, rounds calibrated to ~targetMs
 //   opsAsync   the same for an async call, awaited one at a time
 //   throughput MiB/s of an async call that moves `bytes` per call
-//   latency    p50 / p99 of individually timed calls (sync or async)
+//   latency    p50 / p95 / p99 of individually timed calls (sync or async)
+//   percentiles the same from samples timed elsewhere (inside workers)
 
 const now = () => process.hrtime.bigint();
 
@@ -125,6 +126,24 @@ class Bench {
     this.#record(id, 'MiB/s', 'higher', mibs, { n });
   }
 
+  // p50 / p95 / p99 in microseconds, each the median over the rounds;
+  // `rounds` holds one ascending array of nanoseconds per round.
+  percentiles(id, rounds, extra = {}) {
+    for (const p of [50, 95, 99]) {
+      const values = rounds.map((ascending) => percentile(ascending, p / 100));
+      this.#record(
+        `${id}.p${p}`,
+        'us',
+        'lower',
+        values.map((ns) => ns / 1e3),
+        {
+          samples: rounds[0]?.length ?? 0,
+          ...extra,
+        },
+      );
+    }
+  }
+
   // `setup` (untimed) runs before every sample; `fn` is timed alone.
   async latency(id, fn, { warmup = 20, samples = 200, setup = null } = {}) {
     const one = async (i) => {
@@ -135,17 +154,13 @@ class Bench {
     };
     let i = 0;
     for (let w = 0; w < warmup; w++) await one(i++);
-    const p50 = [];
-    const p99 = [];
+    const rounds = [];
     for (let r = 0; r < this.repeats; r++) {
       const times = [];
       for (let s = 0; s < samples; s++) times.push(await one(i++));
-      const ascending = sorted(times);
-      p50.push(percentile(ascending, 0.5) / 1e3);
-      p99.push(percentile(ascending, 0.99) / 1e3);
+      rounds.push(sorted(times));
     }
-    this.#record(`${id}.p50`, 'us', 'lower', p50, { samples });
-    this.#record(`${id}.p99`, 'us', 'lower', p99, { samples });
+    this.percentiles(id, rounds);
   }
 }
 
