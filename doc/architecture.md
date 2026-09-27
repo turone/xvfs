@@ -519,19 +519,37 @@ call. Symlink / realpath containment is out of scope.
 **Containment is what `path.relative` says, computed from the strings:
 `appRoot` and a separator are a prefix of the path, on Windows after the
 lower-casing `path.win32.relative` applies to both; the part below is
-sliced from the path as given, so a place's name matches case-sensitively
-as before. What `path.relative` treats apart it answers itself: a
-lower-casing that changes a length (`İ`), where it compares segment by
-segment, and, on Windows, a root or a path off a drive — `path.relative`
-resolves both paths again, which a UNC or namespace path may not survive
-(`\\?\C:\app\..\..` resolves to `\\?\`, that to `D:\?`), and trims their
-leading separators (`\\C:\app\x` is `x` under `C:\app`).** _Why:_
+sliced from the path as given, and the registry matches a place's name in
+it by its own rule (below). What `path.relative` treats apart it answers
+itself: a lower-casing that changes a length (`İ`), where it compares
+segment by segment, and, on Windows, a root or a path off a drive —
+`path.relative` resolves both paths again, which a UNC or namespace path
+may not survive (`\\?\C:\app\..\..` resolves to `\\?\`, that to `D:\?`),
+and trims their leading separators (`\\C:\app\x` is `x` under
+`C:\app`).** _Why:_
 `path.relative` was most of the cost of a routing decision; the prefix
 gives the same answer, and a differential test holds it to `path.relative`
 for both path flavors on every platform (`Containment` takes `path.win32`
 or `path.posix`). A path on a drive is what `path.resolve` keeps as it
 is, so the strings compared are the ones `path.relative` compares; a UNC
 or namespace `appRoot` routes at the speed it had before.
+
+**A place's name is compared as the platform's file systems compare names,
+decided once, by the path flavor: on Windows without the case of ASCII
+letters — `appRoot\RO\x` is place `ro`, as `appRoot` matches in any case —
+elsewhere exactly, as before. The exact name is looked up first; another
+case costs only a path no place owns by its own name. A key keeps the case
+it is given, and an error names the path as the caller spelled it.**
+_Why:_ one file must have one route: Windows took `appRoot\RO\…` for a
+path no place owns, which strict refused and, without strict, passed
+natively to the disk — the raw file instead of its prepared content, a
+file `fs.fallback: 'deny'` hides, a write into a read-only place. Place
+names are ASCII and unique in any case (`VfsConfig`), and NTFS equates no
+other character with an ASCII letter, while lower-casing takes the Kelvin
+sign `K` for `k`: a name matched so would route an unmanaged directory
+under `appRoot` into a place — under strict, native reads and writes
+there. The other platforms keep their case-sensitive routing; a
+case-insensitive volume there (macOS by default) is not recognized.
 
 **A path already in the form `path.resolve` returns is taken as it is: a
 drive letter, `:` and `\` on Windows (UNC paths are resolved), `/` on
@@ -896,6 +914,7 @@ workers call `attach()`.** _Why:_ preloads do not run in worker threads.
 | Releasing zero-copy streams on `'end'`                                                                          | sockets still hold the last chunks                                |
 | Manual worker transports (`broadcast`, `getWorkerIds`)                                                          | every one would have to re-implement retirement                   |
 | `startsWith('..')` containment, `realpath` in the router                                                        | misroutes `..private`; disk access on the hot path                |
+| Lower-casing a place's name on Windows to compare it                                                            | NTFS takes no Kelvin sign `K` for `k`: an unmanaged directory     |
 | Native `cp` with a routing `filter` for managed trees                                                           | raw disk bytes, no virtual entries, no canonical content          |
 | Copying canonical (prepared) content as a copy's input                                                          | the destination prepares it again; its bundle names the source    |
 | Feeding a prepared virtual entry's canonical content back in as raw                                             | stale `meta` / filename / bytecode, a silently different input    |
