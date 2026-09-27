@@ -1,14 +1,20 @@
 'use strict';
 
+const path = require('node:path');
+// Captured before any scenario installs the fs patch.
+const { readFileSync } = require('node:fs');
 const { tmpDir, writeTree, cleanup, kernel, memory } = require('../lib.js');
 
 // PlaceFs reads over sab and map: owned copies, leases, stat, exists and a
-// 100-entry listing; 1 KiB and 1 MiB files.
+// 100-entry listing; 1 KiB, 64 KiB, 1 MiB and 8 MiB files. `disk` is
+// readFileSync of the same file through node:fs, the OS page cache warm.
 
 const PROVIDERS = ['sab', 'map'];
 const SIZES = [
   ['1k', '/small.txt', 1024],
+  ['64k', '/medium.txt', 64 * 1024],
   ['1m', '/large.bin', 2 ** 20],
+  ['8m', '/huge.bin', 8 * 2 ** 20],
 ];
 
 module.exports = async (b) => {
@@ -35,6 +41,10 @@ module.exports = async (b) => {
       b.ops(`read.${name}.stat`, () => place.stat('/small.txt'));
       b.ops(`read.${name}.exists`, () => place.exists('/small.txt'));
       b.ops(`read.${name}.readdir100`, () => place.readdir('/dir'));
+    }
+    for (const [size, key] of SIZES) {
+      const file = path.join(root, 'sab', key);
+      b.ops(`read.disk.${size}.readFileSync`, () => readFileSync(file));
     }
     memory(b, 'read', k);
   } finally {
