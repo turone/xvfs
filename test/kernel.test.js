@@ -3,7 +3,7 @@
 const { describe, it, before, after } = require('node:test');
 const assert = require('node:assert/strict');
 const path = require('node:path');
-const { availableParallelism } = require('node:os');
+const { availableParallelism, constants } = require('node:os');
 const { Worker } = require('node:worker_threads');
 const { VfsKernel } = require('../lib/kernel.js');
 const { bytecodeKey } = require('../lib/companion.js');
@@ -17,6 +17,7 @@ const {
   quiet,
   until,
   tap,
+  worker,
   nextEvent,
   diskCalls,
   leakedBytes,
@@ -419,35 +420,105 @@ describe('VfsKernel: providers', () => {
   });
 });
 
-// Content without a disk file of its own never falls back to disk: a
-// virtual write the pool has no room for is refused — a new key is not
-// published, a replaced one keeps its version — and leaves nothing behind.
+// Content without a disk file of its own never falls back to disk: what
+// the pool has no room for is refused as a full disk refuses it — ENOSPC,
+// named by the operation, whichever thread asked — a new key is not
+// published, a replaced one keeps its version, and nothing is left behind.
 describe('VfsKernel: a full pool', () => {
-  it('a virtual write that does not fit is refused', async () => {
+  const MEMORY = { limit: '8 kib', segmentSize: '4 kib', maxFileSize: '4 kib' };
+
+  // The refusal of `syscall` on `from` (and `to`); what did not fit is
+  // its detail.
+  const noRoom = (syscall, from, to) => {
+    const detail = 'canonical source does not fit in SAB';
+    const ends = to === undefined ? `'${from}'` : `'${from}' -> '${to}'`;
+    return {
+      code: 'ENOSPC',
+      errno: -constants.errno.ENOSPC,
+      syscall,
+      path: from,
+      dest: to,
+      message: `ENOSPC: no space left on device (${detail}), ${syscall} ${ends}`,
+    };
+  };
+  const shape = (err) => ({
+    code: err.code,
+    errno: err.errno,
+    syscall: err.syscall,
+    path: err.path,
+    dest: err.dest,
+    message: err.message,
+  });
+
+  it('a virtual write or rename that does not fit is ENOSPC, in main and a worker', async () => {
     const root = tmpDir('kernel-full');
     const k = await kernel(
       root,
       { v: { origin: 'virtual', fs: { writable: true } } },
-      {
-        memory: { limit: '8 kib', segmentSize: '4 kib', maxFileSize: '4 kib' },
-      },
+      { memory: MEMORY },
     );
+    let w = null;
     try {
       const v = k.fs('v');
       await v.writeFile('/a', 'a'.repeat(4000));
       await v.writeFile('/b', 'b'.repeat(4000));
+      w = worker(k);
       const updates = k.nextUpdateId;
       const version = k.cache.entry('v', '/a');
-      const refused = { message: 'canonical source does not fit in SAB' };
-      await assert.rejects(v.writeFile('/c', 'c'.repeat(2000)), refused);
+      const at = (key) => v.pathOf(key);
+      for (const [label, place] of [
+        ['main', v],
+        ['worker', w.kernel.fs('v')],
+      ]) {
+        for (const [op, refused] of [
+          [
+            () => place.writeFile('/c', 'c'.repeat(2000)),
+            noRoom('open', at('/c')),
+          ],
+          [
+            () => place.writeFile('/a', 'A'.repeat(4000)),
+            noRoom('open', at('/a')),
+          ],
+          [
+            () => place.rename('/a', '/d'),
+            noRoom('rename', at('/a'), at('/d')),
+          ],
+        ]) {
+          await assert.rejects(op(), (err) => {
+            assert.deepEqual(shape(err), refused, label);
+            return true;
+          });
+        }
+      }
       assert.equal(v.exists('/c'), false, 'not published');
-      await assert.rejects(v.writeFile('/a', 'A'.repeat(4000)), refused);
+      assert.equal(v.exists('/d'), false, 'not moved');
       assert.equal(k.cache.entry('v', '/a'), version, 'the version kept');
       assert.equal(v.readFile('/a', 'utf8'), 'a'.repeat(4000));
+      assert.equal(w.kernel.fs('v').readFile('/a', 'utf8'), 'a'.repeat(4000));
       assert.equal(k.nextUpdateId, updates, 'nothing published');
       assert.equal(leakedBytes(k), 0, 'nothing left behind');
     } finally {
+      w?.kernel.close();
       k.close();
+      rm(root);
+    }
+  });
+
+  it('a prepared source that does not fit fails initialize() with ENOSPC', async () => {
+    const root = writeTree(tmpDir('kernel-full-init'), { 'app/big.txt': 'x' });
+    try {
+      const init = kernel(
+        root,
+        { app: { fs: { ext: ['txt'], prepare: 'grow' } } },
+        { memory: MEMORY },
+        { preparers: { grow: () => 'x'.repeat(5000) } },
+      );
+      const file = path.join(root, 'app', 'big.txt');
+      await assert.rejects(init, (err) => {
+        assert.deepEqual(shape(err), noRoom('open', file));
+        return true;
+      });
+    } finally {
       rm(root);
     }
   });

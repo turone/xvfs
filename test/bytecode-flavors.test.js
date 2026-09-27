@@ -364,7 +364,9 @@ describe('bytecode flavors: failure and rollback', () => {
 
   // A script flavor that finds no room in the pool refuses the whole
   // publication, as one that does not compile does — never published
-  // without it — and what the attempt placed before it, the source and the
+  // without it — as a full disk refuses it: ENOSPC, named by the operation
+  // (a write's `open` of the source, a rename's call and ends), whichever
+  // thread asked. What the attempt placed before it, the source and the
   // require flavor, goes back to the pool. The pool is found full by the
   // third allocation of the attempt, the script flavor's.
   it('fs.script.compile flavor that does not fit: refused, and what was placed is freed', async () => {
@@ -372,20 +374,29 @@ describe('bytecode flavors: failure and rollback', () => {
     const k = await kernel(root, {
       v: {
         origin: 'virtual',
-        fs: { writable: true, ext: ['js'], script: { compile: true } },
+        fs: {
+          writable: true,
+          ext: ['txt', 'js'],
+          script: { ext: ['js'], compile: true },
+        },
         require: { compile: true },
       },
     });
+    const w = worker(k);
     try {
       const v = k.fs('v');
       await v.writeFile('/h.js', 'module.exports = 1;');
+      await v.writeFile('/r.txt', 'module.exports = 2;');
       const { files } = k.registry.get('v');
       const version = () =>
-        ['/h.js', bytecodeKey('/h.js'), bytecodeKey('/h.js', 'script')].map(
-          (key) => files.get(key),
-        );
+        [
+          '/h.js',
+          bytecodeKey('/h.js'),
+          bytecodeKey('/h.js', 'script'),
+          '/r.txt',
+        ].map((key) => files.get(key));
       const before = version();
-      assert.ok(before.every(Boolean), 'the source and both flavors');
+      assert.ok(before.every(Boolean), 'the sources and both flavors');
       const { cache } = k;
       const { allocate } = cache;
       const allocated = [];
@@ -395,14 +406,48 @@ describe('bytecode flavors: failure and rollback', () => {
         return allocate.call(this, file, options);
       };
       const updates = k.nextUpdateId;
-      await assert.rejects(v.writeFile('/h.js', 'module.exports = 2;'), {
-        message: 'fs.script.compile: source does not fit in SAB',
-      });
-      assert.equal(allocated.length, 3, 'the source, then both flavors');
+      const at = (key) => path.join(root, 'v', key);
+      const reason = 'fs.script.compile: source does not fit in SAB';
+      for (const [label, place] of [
+        ['main', v],
+        ['worker', w.kernel.fs('v')],
+      ]) {
+        for (const [op, syscall, from, to] of [
+          [
+            () => place.writeFile('/h.js', 'module.exports = 3;'),
+            'open',
+            '/h.js',
+          ],
+          [() => place.rename('/r.txt', '/r.js'), 'rename', '/r.txt', '/r.js'],
+        ]) {
+          allocated.length = 0;
+          const ends = to ? `'${at(from)}' -> '${at(to)}'` : `'${at(from)}'`;
+          await assert.rejects(op(), (err) => {
+            assert.deepEqual(
+              shape(err),
+              {
+                code: 'ENOSPC',
+                errno: -os.constants.errno.ENOSPC,
+                syscall,
+                path: at(from),
+                dest: to && at(to),
+                message:
+                  `ENOSPC: no space left on device (${reason}), ` +
+                  `${syscall} ${ends}`,
+              },
+              `${label}: ${syscall}`,
+            );
+            return true;
+          });
+          assert.equal(allocated.length, 3, 'the source, then both flavors');
+        }
+      }
       assert.deepEqual(version(), before, 'the published version stays');
+      assert.equal(files.has('/r.js'), false, 'nothing moved');
       assert.equal(k.nextUpdateId, updates, 'nothing published');
       assert.equal(leakedBytes(k), 0, 'the source and require flavor freed');
     } finally {
+      w.kernel.close();
       k.close();
       rm(root);
     }

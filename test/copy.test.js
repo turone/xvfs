@@ -4,6 +4,7 @@ const { describe, it, before, after } = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
+const os = require('node:os');
 const { VfsConfig } = require('../lib/config.js');
 const fsPatch = require('../lib/adapters/fs-patch.js');
 const {
@@ -13,6 +14,7 @@ const {
   kernel,
   worker,
   nextMessage,
+  leakedBytes,
 } = require('./helpers.js');
 
 // Disk access behind the VFS's back: captured before any patch is installed.
@@ -841,5 +843,65 @@ describe('copies without strict routing', () => {
     const raw = path.join(out, 'late.html');
     fs.cpSync(at('site', 'late.html'), raw);
     assert.equal(readDisk(raw, 'utf8'), 'unpublished');
+  });
+});
+
+// A copy into a virtual place is a write of its destination: one the pool
+// has no room for fails as the copy — ENOSPC, its call, source and
+// destination, as node:fs names a full disk — the store's refusal as its
+// cause, and publishes nothing. A *Sync copy never gets that far: the
+// place cannot block (ENOTSUP).
+describe('a copy into a full pool', () => {
+  let root;
+  let out;
+  let k;
+
+  before(async () => {
+    root = tmpDir('vfs-copy-full');
+    out = tmpDir('vfs-copy-full-out');
+    k = await kernel(
+      root,
+      { v: { origin: 'virtual', fs: { writable: true } } },
+      {
+        memory: { limit: '8 kib', segmentSize: '4 kib', maxFileSize: '4 kib' },
+      },
+    );
+    await k.fs('v').writeFile('/a', 'a'.repeat(4000));
+    await k.fs('v').writeFile('/b', 'b'.repeat(4000));
+    fsPatch.install(k);
+  });
+
+  after(() => {
+    fsPatch.uninstall();
+    k.close();
+    rm(root);
+    rm(out);
+  });
+
+  it('fails as the copy, the store refusal as its cause; nothing is published', async () => {
+    const from = path.join(out, 'c.txt');
+    writeDisk(from, 'c'.repeat(2000));
+    const to = path.join(root, 'v', 'c');
+    const updates = k.nextUpdateId;
+    for (const [form, copy] of Object.entries(COPIES)) {
+      if (form.endsWith('Sync')) continue;
+      const syscall = syscallOf(form);
+      const err = await outcome(() => copy(from, to));
+      refusal(err, 'ENOSPC', syscall, from, to);
+      assert.equal(err.errno, -os.constants.errno.ENOSPC, form);
+      assert.equal(
+        err.message,
+        `ENOSPC: no space left on device, ${syscall} '${from}' -> '${to}'`,
+      );
+      const { cause } = err;
+      assert.equal(cause.code, 'ENOSPC', form);
+      assert.equal(cause.syscall, 'open', form);
+      assert.equal(cause.path, to, form);
+      assert.equal(cause.dest, undefined, form);
+    }
+    assert.equal(k.fs('v').exists('/c'), false, 'not published');
+    assert.equal(onDisk(to), false, 'nothing on disk');
+    assert.equal(k.nextUpdateId, updates, 'nothing published');
+    assert.equal(leakedBytes(k), 0, 'nothing left behind');
   });
 });

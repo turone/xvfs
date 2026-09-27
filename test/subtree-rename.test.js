@@ -3,6 +3,7 @@
 const { describe, it } = require('node:test');
 const assert = require('node:assert/strict');
 const path = require('node:path');
+const { constants } = require('node:os');
 const {
   tmpDir,
   rm,
@@ -221,8 +222,10 @@ describe('virtual subtree rename', () => {
 
   // A subtree moves in one publication or not at all. Each source is
   // copied while the old versions are still published, so a pool without
-  // room for a copy of each refuses the move: the copies it made are freed,
-  // nothing moves and nothing is published.
+  // room for a copy of each refuses the move as a full disk refuses it —
+  // ENOSPC, named by the rename, whichever thread asked, the key that did
+  // not fit as its detail: the copies it made are freed, nothing moves and
+  // nothing is published.
   it('sab: a pool too full for the whole subtree moves none of it', async () => {
     const config = { origin: 'virtual', fs: { writable: true } };
     const memory = {
@@ -237,19 +240,40 @@ describe('virtual subtree rename', () => {
     };
     await withPlace(
       config,
-      async (k, v) => {
+      async (k, v, at) => {
         await write(v, tree);
         const keys = keysUnder(k, 'v', '/');
         const updates = k.nextUpdateId;
-        // Room for the copy of /d/a only.
-        const err = await outcome(() => v.rename('/d', '/e'));
-        assert.match(String(err?.message), /"\/d\/b" does not fit in SAB/);
-        assert.deepEqual(keysUnder(k, 'v', '/'), keys, 'nothing moved');
-        for (const [key, text] of Object.entries(tree)) {
-          assert.equal(v.readFile(key, 'utf8'), text, key);
+        const w = worker(k);
+        try {
+          for (const [label, place] of [
+            ['main', v],
+            ['worker', w.kernel.fs('v')],
+          ]) {
+            // Room for the copy of /d/a only.
+            const err = await outcome(() => place.rename('/d', '/e'));
+            assert.equal(err.code, 'ENOSPC', label);
+            assert.equal(err.errno, -constants.errno.ENOSPC, label);
+            assert.equal(err.syscall, 'rename', label);
+            assert.equal(err.path, at('/d'), label);
+            assert.equal(err.dest, at('/e'), label);
+            assert.equal(
+              err.message,
+              'ENOSPC: no space left on device ("/d/b" does not fit in SAB), ' +
+                `rename '${at('/d')}' -> '${at('/e')}'`,
+              label,
+            );
+          }
+          assert.deepEqual(keysUnder(k, 'v', '/'), keys, 'nothing moved');
+          for (const [key, text] of Object.entries(tree)) {
+            assert.equal(v.readFile(key, 'utf8'), text, key);
+          }
+          assert.equal(w.kernel.fs('v').exists('/e'), false, 'worker');
+          assert.equal(k.nextUpdateId, updates, 'nothing published');
+          assert.equal(leakedBytes(k), 0, 'the copy made is freed');
+        } finally {
+          w.kernel.close();
         }
-        assert.equal(k.nextUpdateId, updates, 'nothing published');
-        assert.equal(leakedBytes(k), 0, 'the copy made is freed');
       },
       {},
       { memory },

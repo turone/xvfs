@@ -160,10 +160,13 @@ companions never collide with files nor leak into listings.
 **Disk files above `maxFileSize` stay disk entries; content without a disk
 file of its own — prepared, virtual or SEA sources, and every companion —
 never falls back to disk: if it does not fit, its publication is refused
-(and `initialize()` fails).** _Why:_ large media do not belong in the pool;
-a disk entry must point at a file that holds exactly the content, and for
-prepared, virtual or compressed content there is none — a disk entry would
-point at the raw source, or at nothing.
+(and `initialize()` fails), as a full disk refuses a write: `ENOSPC`,
+named by the operation (Failure policy).** _Why:_ large media do not
+belong in the pool; a disk entry must point at a file that holds exactly
+the content, and for prepared, virtual or compressed content there is
+none — a disk entry would point at the raw source, or at nothing. A pool
+without room is a disk without room to the caller: a refusal with a
+`code` of its own, like every other refusal of the VFS.
 
 ## Publication
 
@@ -283,12 +286,18 @@ for the SAB and the Map sink alike, and a worker's mutation gets it back
 with the same fields. A rename that publishes a source under a new name
 refuses it as the rename: `rename`, the renamed source as `path`, the new
 name as `dest` — the operation hands the pipeline its `fail`, and so it
-does for a preparer the thread lacks. _Why:_ startup is all or nothing;
-live traffic keeps serving the last good version; Node's CommonJS loader
-compiles fine without cached data, while a script bundle promises its
-cached data. A caller cannot tell the sinks apart: the same refusal
-answers the same, with a `code` like every other refusal of the VFS, and
-names the call that was refused, as every refusal of a rename does.
+does for a preparer the thread lacks. What the pool has no room for — a
+source, a script flavor, the copy of a subtree a rename moves — is
+`ENOSPC` (`no space left on device`, what did not fit as its detail),
+named the same way: `open` of the key, else the operation's `fail`, which
+the rename of a subtree hands `sharedCopies()` too; a copy into a virtual
+place fails as the copy, the store's refusal as its `cause`. _Why:_
+startup is all or nothing; live traffic keeps serving the last good
+version; Node's CommonJS loader compiles fine without cached data, while
+a script bundle promises its cached data. A caller cannot tell the sinks
+apart: the same refusal answers the same, with a `code` like every other
+refusal of the VFS, and names the call that was refused, as every refusal
+of a rename does.
 
 ## Lifetime of shared bytes
 

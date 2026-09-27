@@ -197,26 +197,6 @@ of a writable disk-origin place is `ENOTSUP 'virtual file'`, while
 **Done when.** A decided policy for descriptors that write in disk-origin
 places is documented and tested.
 
-## P3 — A refusal for want of room names nothing
-
-**Problem.** A publication the pool has no room for is refused with a
-plain `Error` — `canonical source does not fit in SAB`, `"<key>" does not
-fit in SAB` for a moved subtree, `fs.script.compile: source does not fit
-in SAB` — without the `code`, `syscall`, `path` and `dest` every other
-refusal of the VFS carries: a write, a copy or a rename refused so cannot
-be told apart by its code, and a rename names neither the call nor its
-ends.
-
-**Cause.** The SAB sink refuses where the allocator finds no room, and
-knows neither the operation nor its paths: the refusals of the pipeline
-take their operation's `fail` (the compile refusal of a rename), these
-do not.
-
-**Done when.** They are node:fs-shaped — a code decided (`ENOSPC`, as a
-full disk answers), the operation's `syscall` and `path`, and `dest` for
-a rename or a copy — for main-thread and worker mutations alike, with
-tests.
-
 ## After the next Node.js 26.x release — `doc/alternatives.md`
 
 **Problem.** The comparison describes Node v26.10.0; `main` already removes

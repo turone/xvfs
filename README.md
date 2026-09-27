@@ -235,9 +235,10 @@ file with independent companions, both built from the one canonical
   `scriptOptions`. `require.compile` builds `\0require:bytecode` —
   cached data of `Module.wrap(source)`. Neither substitutes for the
   other. A script-compile failure invalidates the whole publication
-  (previous version kept) with `ENOTSUP`, named by the source (`syscall`
-  `open`); a require-compile failure is best-effort (only its own
-  companion is dropped).
+  (previous version kept) with `ENOTSUP`, and so does a script flavor the
+  pool has no room for, with `ENOSPC` — named by the operation: `open` of
+  the source, or a rename with its source and `dest`; a require-compile
+  failure is best-effort (only its own companion is dropped).
 - `kernel.fs(name).script(key)` →
   `{ source, cachedData, scriptOptions, meta } | null`; `ENOTSUP` when the
   place has no `fs.script`. It never prepares or compiles anything itself.
@@ -590,7 +591,9 @@ booleans.
 `memory.maxFileSize` keeps large disk files out of the pool: they stay
 disk entries, read from disk. Content without a disk file of its own —
 prepared, virtual or SEA — cannot fall back to disk: if it does not fit,
-its publication is refused, and at startup `initialize()` fails.
+its publication is refused with `ENOSPC`, as a full disk refuses a write,
+named by the operation (see [Errors](#errors)); the previous version
+stays, and at startup `initialize()` fails.
 
 `watch` starts the kernel's own watcher: it republishes disk changes of
 the disk-origin cached places — `sab` + `disk` and `map` + `disk` alike;
@@ -1024,6 +1027,7 @@ not a raw-preserving copy.
 | `EEXIST`        | `mkdir` of a virtual file, or of a directory without `recursive` (the place's own included); a write with an `x` flag, or a `COPYFILE_EXCL` copy, onto an existing virtual entry                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                        |
 | `ENOTDIR`       | `readdir` of a file; a virtual key under a file; a file the VFS serves or stores, named with a trailing separator (`force` ignores it in `rm`)                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                          |
 | `EXDEV`         | `rename` across a virtual place's boundary: between two places, or between one and the disk                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                             |
+| `ENOSPC`        | No room in the pool for content that cannot fall back to disk — a virtual write, copy or rename (a subtree move included), a prepared or SEA source, a `fs.script.compile` flavor; nothing is published. Named by the operation: `open` of the key (at startup too, where `initialize()` rejects with it), `rename` with `dest`, a copy's `copyfile` / `cp` with `dest` and the store's refusal as its `cause`                                                                                                                                                                                                                                                                                                                                                                                                                                          |
 | `EISDIR`        | `readFile` / `createReadStream` of an implicit directory; a virtual file written, copied or renamed where a directory is; a write or `unlink` of a place's own directory; `unlink` of a virtual directory; a virtual file write or copy to a path with a trailing separator                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                             |
 
 Errors carry the same `code`, `errno`, `syscall` and `path` fields as
