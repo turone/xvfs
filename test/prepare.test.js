@@ -228,27 +228,32 @@ describe('prepare config: errors', () => {
       off: { enabled: false, fs: { ext: ['js'], prepare: 'nope' } },
     });
     const k = new VfsKernel(cfg, { appRoot: root, console: quiet });
-    await assert.rejects(
-      k.initialize(),
-      /places\.a: preparer "missing" is not registered/,
-    );
-    assert.equal(k.state, 'closed');
-    assert.throws(
-      () => new VfsKernel(cfg, { preparers: { x: 'not a function' } }),
-      /preparers\.x is not a function/,
-    );
-    // A disabled place names a preparer nobody registered: it is not needed.
-    const ok = new VfsKernel(
-      config({
-        a: { fs: { ext: ['js'], prepare: 'id' } },
-        off: { enabled: false, fs: { ext: ['js'], prepare: 'nope' } },
-      }),
-      { appRoot: root, console: quiet, preparers: { id: (raw) => raw } },
-    );
-    await ok.initialize();
-    assert.equal(ok.state, 'ready');
-    ok.close();
-    rm(root);
+    let ok = null;
+    try {
+      await assert.rejects(
+        k.initialize(),
+        /places\.a: preparer "missing" is not registered/,
+      );
+      assert.equal(k.state, 'closed');
+      assert.throws(
+        () => new VfsKernel(cfg, { preparers: { x: 'not a function' } }),
+        /preparers\.x is not a function/,
+      );
+      // A disabled place names a preparer nobody registered: it is not needed.
+      ok = new VfsKernel(
+        config({
+          a: { fs: { ext: ['js'], prepare: 'id' } },
+          off: { enabled: false, fs: { ext: ['js'], prepare: 'nope' } },
+        }),
+        { appRoot: root, console: quiet, preparers: { id: (raw) => raw } },
+      );
+      await ok.initialize();
+      assert.equal(ok.state, 'ready');
+    } finally {
+      k.close();
+      ok?.close();
+      rm(root);
+    }
   });
 });
 
@@ -298,22 +303,25 @@ describe('prepare pipeline: every way content arrives', () => {
       { app: { fs: { ext: ['js', 'txt'], prepare: { code: ['js'] } } } },
       { code: prep.fn },
     );
-    const app = k.fs('app');
-    assert.equal(app.readFile('/a.js', 'utf8'), PREPARED);
-    assert.equal(app.readFile('/n.txt', 'utf8'), 'plain', 'no preparer');
-    assert.equal(fs.readFileSync(at('app', 'a.js'), 'utf8'), RAW, 'disk raw');
-    fs.writeFileSync(at('app', 'a.js'), RAW + ' // v2');
-    await epoch([[at('app', 'a.js'), 'change']]);
-    assert.equal(app.readFile('/a.js', 'utf8'), PREPARED + ' // v2');
-    fs.writeFileSync(at('app', 'b.js'), RAW);
-    await epoch([[at('app', 'b.js'), 'change']]);
-    assert.equal(app.readFile('/b.js', 'utf8'), PREPARED);
-    fs.mkdirSync(at('app', 'd', 'e'), { recursive: true });
-    fs.writeFileSync(at('app', 'd', 'e', 'c.js'), RAW);
-    await epoch([[at('app', 'd'), 'scan']]);
-    assert.equal(app.readFile('/d/e/c.js', 'utf8'), PREPARED);
-    assert.deepEqual(prep.calls, ['/a.js', '/a.js', '/b.js', '/d/e/c.js']);
-    done();
+    try {
+      const app = k.fs('app');
+      assert.equal(app.readFile('/a.js', 'utf8'), PREPARED);
+      assert.equal(app.readFile('/n.txt', 'utf8'), 'plain', 'no preparer');
+      assert.equal(fs.readFileSync(at('app', 'a.js'), 'utf8'), RAW, 'disk raw');
+      fs.writeFileSync(at('app', 'a.js'), RAW + ' // v2');
+      await epoch([[at('app', 'a.js'), 'change']]);
+      assert.equal(app.readFile('/a.js', 'utf8'), PREPARED + ' // v2');
+      fs.writeFileSync(at('app', 'b.js'), RAW);
+      await epoch([[at('app', 'b.js'), 'change']]);
+      assert.equal(app.readFile('/b.js', 'utf8'), PREPARED);
+      fs.mkdirSync(at('app', 'd', 'e'), { recursive: true });
+      fs.writeFileSync(at('app', 'd', 'e', 'c.js'), RAW);
+      await epoch([[at('app', 'd'), 'scan']]);
+      assert.equal(app.readFile('/d/e/c.js', 'utf8'), PREPARED);
+      assert.deepEqual(prep.calls, ['/a.js', '/a.js', '/b.js', '/d/e/c.js']);
+    } finally {
+      done();
+    }
   });
 
   it('sab + virtual: main thread and worker mutations', async () => {
@@ -330,18 +338,22 @@ describe('prepare pipeline: every way content arrives', () => {
       {},
       { preparers: { code: prep.fn } },
     );
-    await k.fs('v').writeFile('/a.js', RAW);
-    assert.equal(k.fs('v').readFile('/a.js', 'utf8'), PREPARED);
-    // The worker never prepares a shared place: the main kernel does, and
-    // the update reaches the worker before the mutation's response.
-    const w = worker(k);
-    await w.kernel.fs('v').writeFile('/b.js', RAW);
-    assert.equal(k.fs('v').readFile('/b.js', 'utf8'), PREPARED);
-    assert.equal(w.kernel.fs('v').readFile('/b.js', 'utf8'), PREPARED);
-    assert.deepEqual(prep.calls, ['/a.js', '/b.js']);
-    w.kernel.close();
-    k.close();
-    rm(root);
+    let w = null;
+    try {
+      await k.fs('v').writeFile('/a.js', RAW);
+      assert.equal(k.fs('v').readFile('/a.js', 'utf8'), PREPARED);
+      // The worker never prepares a shared place: the main kernel does, and
+      // the update reaches the worker before the mutation's response.
+      w = worker(k);
+      await w.kernel.fs('v').writeFile('/b.js', RAW);
+      assert.equal(k.fs('v').readFile('/b.js', 'utf8'), PREPARED);
+      assert.equal(w.kernel.fs('v').readFile('/b.js', 'utf8'), PREPARED);
+      assert.deepEqual(prep.calls, ['/a.js', '/b.js']);
+    } finally {
+      w?.kernel.close();
+      k.close();
+      rm(root);
+    }
   });
 
   it('map + disk: init and watcher; map + virtual: local writes', async () => {
@@ -357,13 +369,16 @@ describe('prepare pipeline: every way content arrives', () => {
       },
       { code },
     );
-    assert.equal(k.fs('m').readFile('/a.js', 'utf8'), PREPARED);
-    fs.writeFileSync(at('m', 'a.js'), RAW + ' // v2');
-    await epoch([[at('m', 'a.js'), 'change']]);
-    assert.equal(k.fs('m').readFile('/a.js', 'utf8'), PREPARED + ' // v2');
-    k.fs('mv').writeFile('/x.js', RAW);
-    assert.equal(k.fs('mv').readFile('/x.js', 'utf8'), PREPARED);
-    done();
+    try {
+      assert.equal(k.fs('m').readFile('/a.js', 'utf8'), PREPARED);
+      fs.writeFileSync(at('m', 'a.js'), RAW + ' // v2');
+      await epoch([[at('m', 'a.js'), 'change']]);
+      assert.equal(k.fs('m').readFile('/a.js', 'utf8'), PREPARED + ' // v2');
+      k.fs('mv').writeFile('/x.js', RAW);
+      assert.equal(k.fs('mv').readFile('/x.js', 'utf8'), PREPARED);
+    } finally {
+      done();
+    }
   });
 
   it('SEA assets are prepared once at init', async () => {
@@ -381,10 +396,13 @@ describe('prepare pipeline: every way content arrives', () => {
       }),
       { appRoot: root, console: quiet, seaModule, preparers: { code } },
     );
-    await k.initialize();
-    assert.equal(k.fs('pub').readFile('/a.js', 'utf8'), PREPARED);
-    k.close();
-    rm(root);
+    try {
+      await k.initialize();
+      assert.equal(k.fs('pub').readFile('/a.js', 'utf8'), PREPARED);
+    } finally {
+      k.close();
+      rm(root);
+    }
   });
 
   it('worker map + virtual prepares with attach({ preparers }) only', async () => {
@@ -397,34 +415,39 @@ describe('prepare pipeline: every way content arrives', () => {
       },
     };
     const k = await kernel(root, spec, {}, { preparers: { code } });
-    const given = worker(k, { preparers: { code } });
-    given.kernel.fs('m').writeFile('/a.js', RAW);
-    assert.equal(given.kernel.fs('m').readFile('/a.js', 'utf8'), PREPARED);
-    const bare = worker(k);
-    const m = bare.kernel.fs('m');
-    m.writeFile('/n.txt', 'plain');
-    assert.throws(() => m.writeFile('/a.js', RAW), {
-      code: 'ENOTSUP',
-      syscall: 'open',
-      path: m.pathOf('/a.js'),
-      message: /preparer "code" is not registered in this thread/,
-    });
-    assert.equal(m.exists('/a.js'), false);
-    // A rename onto the extension needs the preparer too: the rename
-    // refuses, naming its call, its source and its destination.
-    assert.throws(() => m.rename('/n.txt', '/n.js'), {
-      code: 'ENOTSUP',
-      syscall: 'rename',
-      path: m.pathOf('/n.txt'),
-      dest: m.pathOf('/n.js'),
-      message: /preparer "code" is not registered in this thread/,
-    });
-    assert.equal(m.readFile('/n.txt', 'utf8'), 'plain');
-    assert.equal(m.exists('/n.js'), false);
-    given.kernel.close();
-    bare.kernel.close();
-    k.close();
-    rm(root);
+    let given = null;
+    let bare = null;
+    try {
+      given = worker(k, { preparers: { code } });
+      given.kernel.fs('m').writeFile('/a.js', RAW);
+      assert.equal(given.kernel.fs('m').readFile('/a.js', 'utf8'), PREPARED);
+      bare = worker(k);
+      const m = bare.kernel.fs('m');
+      m.writeFile('/n.txt', 'plain');
+      assert.throws(() => m.writeFile('/a.js', RAW), {
+        code: 'ENOTSUP',
+        syscall: 'open',
+        path: m.pathOf('/a.js'),
+        message: /preparer "code" is not registered in this thread/,
+      });
+      assert.equal(m.exists('/a.js'), false);
+      // A rename onto the extension needs the preparer too: the rename
+      // refuses, naming its call, its source and its destination.
+      assert.throws(() => m.rename('/n.txt', '/n.js'), {
+        code: 'ENOTSUP',
+        syscall: 'rename',
+        path: m.pathOf('/n.txt'),
+        dest: m.pathOf('/n.js'),
+        message: /preparer "code" is not registered in this thread/,
+      });
+      assert.equal(m.readFile('/n.txt', 'utf8'), 'plain');
+      assert.equal(m.exists('/n.js'), false);
+    } finally {
+      given?.kernel.close();
+      bare?.kernel.close();
+      k.close();
+      rm(root);
+    }
   });
 });
 
@@ -459,28 +482,31 @@ describe('prepare pipeline: every consumer sees the canonical content', () => {
 
   it('reads, views, streams, compression and PlaceFs.script()', async () => {
     const { k, done } = await disk(files, spec, preparers);
-    const app = k.fs('app');
-    assert.equal(app.readFile('/a.js', 'utf8'), PREPARED);
-    assert.equal(app.readFile('/s.css', 'utf8'), '/*p*/a{}');
-    const lease = app.readFileView('/a.js');
-    assert.equal(lease.view.toString(), PREPARED);
-    lease.release();
-    const stream = app.createReadStream('/a.js');
-    assert.equal((await drain(stream)).toString(), PREPARED);
-    stream.release();
-    const zlib = require('node:zlib');
-    const gz = app.readFileCompressed('/a.js', 'gzip');
-    assert.equal(zlib.gunzipSync(gz).toString(), PREPARED);
-    const bundle = app.script('/a.js');
-    assert.equal(bundle.source, PREPARED);
-    assert.ok(Buffer.isBuffer(bundle.cachedData));
-    assert.deepEqual(bundle.scriptOptions, scriptOptions);
-    assert.deepEqual(bundle.meta, { key: '/a.js', nested: { ext: 'js' } });
-    assert.ok(Object.isFrozen(bundle.meta.nested), 'meta is deep-frozen');
-    assert.equal(app.meta('/a.js'), bundle.meta);
-    assert.equal(app.script('/s.css'), null, 'not a script source');
-    assert.deepEqual(app.readdir('/'), ['a.js', 's.css'], 'no companions');
-    done();
+    try {
+      const app = k.fs('app');
+      assert.equal(app.readFile('/a.js', 'utf8'), PREPARED);
+      assert.equal(app.readFile('/s.css', 'utf8'), '/*p*/a{}');
+      const lease = app.readFileView('/a.js');
+      assert.equal(lease.view.toString(), PREPARED);
+      lease.release();
+      const stream = app.createReadStream('/a.js');
+      assert.equal((await drain(stream)).toString(), PREPARED);
+      stream.release();
+      const zlib = require('node:zlib');
+      const gz = app.readFileCompressed('/a.js', 'gzip');
+      assert.equal(zlib.gunzipSync(gz).toString(), PREPARED);
+      const bundle = app.script('/a.js');
+      assert.equal(bundle.source, PREPARED);
+      assert.ok(Buffer.isBuffer(bundle.cachedData));
+      assert.deepEqual(bundle.scriptOptions, scriptOptions);
+      assert.deepEqual(bundle.meta, { key: '/a.js', nested: { ext: 'js' } });
+      assert.ok(Object.isFrozen(bundle.meta.nested), 'meta is deep-frozen');
+      assert.equal(app.meta('/a.js'), bundle.meta);
+      assert.equal(app.script('/s.css'), null, 'not a script source');
+      assert.deepEqual(app.readdir('/'), ['a.js', 's.css'], 'no companions');
+    } finally {
+      done();
+    }
   });
 
   it('patched node:fs, require and import', async () => {
@@ -502,30 +528,34 @@ describe('prepare pipeline: every consumer sees the canonical content', () => {
 
   it('require.compile cached data matches the prepared source (worker)', async () => {
     const { k, at, done } = await disk(files, spec, preparers);
-    const { vfs, transferList } = k.link();
-    const index = JSON.stringify(path.resolve(__dirname, '../index.js'));
-    const thread = new Worker(
-      `
-      const vm = require('node:vm');
-      const { parentPort } = require('node:worker_threads');
-      const seen = [];
-      const Real = vm.Script;
-      vm.Script = class extends Real {
-        constructor(code, options) {
-          super(code, options);
-          if (options?.cachedData) seen.push(this.cachedDataRejected);
-        }
-      };
-      require(${index}).attach();
-      const value = require(${JSON.stringify(at('app', 'a.js'))});
-      parentPort.postMessage({ value, seen });
-      `,
-      { eval: true, workerData: { vfs }, transferList },
-    );
-    const [message] = await once(thread, 'message');
-    assert.deepEqual(message, { value: 'PREPARED', seen: [false] });
-    await thread.terminate();
-    done();
+    let thread = null;
+    try {
+      const { vfs, transferList } = k.link();
+      const index = JSON.stringify(path.resolve(__dirname, '../index.js'));
+      thread = new Worker(
+        `
+        const vm = require('node:vm');
+        const { parentPort } = require('node:worker_threads');
+        const seen = [];
+        const Real = vm.Script;
+        vm.Script = class extends Real {
+          constructor(code, options) {
+            super(code, options);
+            if (options?.cachedData) seen.push(this.cachedDataRejected);
+          }
+        };
+        require(${index}).attach();
+        const value = require(${JSON.stringify(at('app', 'a.js'))});
+        parentPort.postMessage({ value, seen });
+        `,
+        { eval: true, workerData: { vfs }, transferList },
+      );
+      const [message] = await once(thread, 'message');
+      assert.deepEqual(message, { value: 'PREPARED', seen: [false] });
+    } finally {
+      await thread?.terminate();
+      done();
+    }
   });
 
   it('runs once per publication, never on read, for every domain', async () => {
@@ -541,17 +571,20 @@ describe('prepare pipeline: every consumer sees the canonical content', () => {
       },
       { code: prep.fn },
     );
-    assert.deepEqual(prep.calls, ['/a.js']);
-    const all = k.fs('all');
-    all.readFile('/a.js');
-    all.script('/a.js');
-    k.resolveModule(at('all', 'a.js'), 'require');
-    k.resolveModule(at('all', 'a.js'), 'import');
-    assert.deepEqual(prep.calls, ['/a.js'], 'reads never prepare');
-    const place = k.registry.get('all');
-    assert.ok(place.bytecode('/a.js', 'script'));
-    assert.ok(place.bytecode('/a.js', 'require'));
-    done();
+    try {
+      assert.deepEqual(prep.calls, ['/a.js']);
+      const all = k.fs('all');
+      all.readFile('/a.js');
+      all.script('/a.js');
+      k.resolveModule(at('all', 'a.js'), 'require');
+      k.resolveModule(at('all', 'a.js'), 'import');
+      assert.deepEqual(prep.calls, ['/a.js'], 'reads never prepare');
+      const place = k.registry.get('all');
+      assert.ok(place.bytecode('/a.js', 'script'));
+      assert.ok(place.bytecode('/a.js', 'require'));
+    } finally {
+      done();
+    }
   });
 
   it('a preparer declared in require prepares fs reads and fs.script', async () => {
@@ -570,13 +603,16 @@ describe('prepare pipeline: every consumer sees the canonical content', () => {
         }),
       },
     );
-    const lib = k.fs('lib');
-    assert.equal(lib.readFile('/a.js', 'utf8'), PREPARED);
-    const bundle = lib.script('/a.js');
-    assert.equal(bundle.source, PREPARED);
-    assert.deepEqual(bundle.scriptOptions, { lineOffset: 1 });
-    assert.ok(bundle.cachedData);
-    done();
+    try {
+      const lib = k.fs('lib');
+      assert.equal(lib.readFile('/a.js', 'utf8'), PREPARED);
+      const bundle = lib.script('/a.js');
+      assert.equal(bundle.source, PREPARED);
+      assert.deepEqual(bundle.scriptOptions, { lineOffset: 1 });
+      assert.ok(bundle.cachedData);
+    } finally {
+      done();
+    }
   });
 
   it('an unrestricted fs prepares only the listed extensions', async () => {
@@ -585,9 +621,12 @@ describe('prepare pipeline: every consumer sees the canonical content', () => {
       { u: { fs: { prepare: { code: ['js'] } } } },
       { code },
     );
-    assert.equal(k.fs('u').readFile('/a.js', 'utf8'), PREPARED);
-    assert.equal(k.fs('u').readFile('/b.txt', 'utf8'), 'RAW');
-    done();
+    try {
+      assert.equal(k.fs('u').readFile('/a.js', 'utf8'), PREPARED);
+      assert.equal(k.fs('u').readFile('/b.txt', 'utf8'), 'RAW');
+    } finally {
+      done();
+    }
   });
 });
 
@@ -619,43 +658,49 @@ describe('prepare pipeline: the preparer contract', () => {
       seen.push({ raw, file });
       return null;
     });
-    const before = Date.now();
-    await v.writeFile('/d/a.js', 'raw bytes');
-    const [{ raw, file }] = seen;
-    assert.ok(Buffer.isBuffer(raw));
-    assert.equal(raw.toString(), 'raw bytes');
-    assert.ok(Object.isFrozen(file) && Object.isFrozen(file.stat));
-    assert.equal(file.place, 'v');
-    assert.equal(file.key, '/d/a.js');
-    assert.equal(file.path, path.join(k.appRoot, 'v', 'd', 'a.js'));
-    assert.equal(file.ext, 'js');
-    assert.equal(file.stat.size, 9);
-    assert.ok(file.stat.mtimeMs >= before);
-    assert.equal(v.readFile('/d/a.js', 'utf8'), 'raw bytes', 'null → raw');
-    done();
+    try {
+      const before = Date.now();
+      await v.writeFile('/d/a.js', 'raw bytes');
+      const [{ raw, file }] = seen;
+      assert.ok(Buffer.isBuffer(raw));
+      assert.equal(raw.toString(), 'raw bytes');
+      assert.ok(Object.isFrozen(file) && Object.isFrozen(file.stat));
+      assert.equal(file.place, 'v');
+      assert.equal(file.key, '/d/a.js');
+      assert.equal(file.path, path.join(k.appRoot, 'v', 'd', 'a.js'));
+      assert.equal(file.ext, 'js');
+      assert.equal(file.stat.size, 9);
+      assert.ok(file.stat.mtimeMs >= before);
+      assert.equal(v.readFile('/d/a.js', 'utf8'), 'raw bytes', 'null → raw');
+    } finally {
+      done();
+    }
   });
 
   it('accepts strings, Buffers and Uint8Arrays, empty ones too, and copies bytes', async () => {
     let result = null;
     const { v, done } = await virtual(() => result);
-    result = 'text';
-    await v.writeFile('/a.js', 'x');
-    assert.equal(v.readFile('/a.js', 'utf8'), 'text');
-    const reused = Buffer.from('buffer');
-    result = reused;
-    await v.writeFile('/a.js', 'x');
-    reused.write('BUFFER');
-    assert.equal(v.readFile('/a.js', 'utf8'), 'buffer', 'published a copy');
-    result = { source: new Uint8Array([0x75, 0x38]) };
-    await v.writeFile('/a.js', 'x');
-    assert.equal(v.readFile('/a.js', 'utf8'), 'u8');
-    result = '';
-    await v.writeFile('/a.js', 'x');
-    assert.equal(v.readFile('/a.js').length, 0);
-    result = { source: Buffer.alloc(0) };
-    await v.writeFile('/a.js', 'x');
-    assert.equal(v.stat('/a.js').size, 0);
-    done();
+    try {
+      result = 'text';
+      await v.writeFile('/a.js', 'x');
+      assert.equal(v.readFile('/a.js', 'utf8'), 'text');
+      const reused = Buffer.from('buffer');
+      result = reused;
+      await v.writeFile('/a.js', 'x');
+      reused.write('BUFFER');
+      assert.equal(v.readFile('/a.js', 'utf8'), 'buffer', 'published a copy');
+      result = { source: new Uint8Array([0x75, 0x38]) };
+      await v.writeFile('/a.js', 'x');
+      assert.equal(v.readFile('/a.js', 'utf8'), 'u8');
+      result = '';
+      await v.writeFile('/a.js', 'x');
+      assert.equal(v.readFile('/a.js').length, 0);
+      result = { source: Buffer.alloc(0) };
+      await v.writeFile('/a.js', 'x');
+      assert.equal(v.stat('/a.js').size, 0);
+    } finally {
+      done();
+    }
   });
 
   // Bytes in use inside the pool's segments.
@@ -680,25 +725,31 @@ describe('prepare pipeline: the preparer contract', () => {
       scratch.set(Buffer.from(`${file.key}: ${raw}`));
       return scratch.subarray(0, file.key.length + 2 + raw.length);
     });
-    const used = poolUsed(k);
-    await Promise.all([v.writeFile('/a.js', 'AAA'), v.writeFile('/b.js', 'B')]);
-    assert.equal(v.readFile('/a.js', 'utf8'), '/a.js: AAA');
-    assert.equal(v.readFile('/b.js', 'utf8'), '/b.js: B');
-    assert.equal(poolUsed(k), used + 10 + 8, 'each version once in the pool');
-    // The result with its extras, from the same placement.
-    const meta = { built: 1 };
-    result = { source: new Uint8Array([0x6d]), meta };
-    await v.writeFile('/m.js', 'x');
-    assert.equal(v.readFile('/m.js', 'utf8'), 'm');
-    assert.deepEqual(v.meta('/m.js'), meta);
-    assert.ok(Object.isFrozen(v.meta('/m.js')));
-    // A result that cannot live in SAB is refused as before, nothing kept.
-    const before = poolUsed(k);
-    result = { source: new Uint8Array(256 * 1024) };
-    await assert.rejects(v.writeFile('/big.js', 'x'), /does not fit in SAB/);
-    assert.equal(v.readFile('/big.js'), null);
-    assert.equal(poolUsed(k), before);
-    done();
+    try {
+      const used = poolUsed(k);
+      await Promise.all([
+        v.writeFile('/a.js', 'AAA'),
+        v.writeFile('/b.js', 'B'),
+      ]);
+      assert.equal(v.readFile('/a.js', 'utf8'), '/a.js: AAA');
+      assert.equal(v.readFile('/b.js', 'utf8'), '/b.js: B');
+      assert.equal(poolUsed(k), used + 10 + 8, 'each version once in the pool');
+      // The result with its extras, from the same placement.
+      const meta = { built: 1 };
+      result = { source: new Uint8Array([0x6d]), meta };
+      await v.writeFile('/m.js', 'x');
+      assert.equal(v.readFile('/m.js', 'utf8'), 'm');
+      assert.deepEqual(v.meta('/m.js'), meta);
+      assert.ok(Object.isFrozen(v.meta('/m.js')));
+      // A result that cannot live in SAB is refused as before, nothing kept.
+      const before = poolUsed(k);
+      result = { source: new Uint8Array(256 * 1024) };
+      await assert.rejects(v.writeFile('/big.js', 'x'), /does not fit in SAB/);
+      assert.equal(v.readFile('/big.js'), null);
+      assert.equal(poolUsed(k), before);
+    } finally {
+      done();
+    }
   });
 
   it('the bytes are taken before meta and scriptOptions are cloned', async () => {
@@ -713,23 +764,26 @@ describe('prepare pipeline: the preparer contract', () => {
       },
     };
     const { k, v, done } = await virtual(() => result);
-    await v.writeFile('/a.js', 'x');
-    assert.equal(v.readFile('/a.js', 'utf8'), 'AAAA');
-    assert.deepEqual(v.meta('/a.js'), { seen: true });
-    // Extras that cannot be cloned fail the write after the placement,
-    // which goes back to the pool.
-    const used = poolUsed(k);
-    result = { source: new Uint8Array(3000), meta: { fn() {} } };
-    await assert.rejects(v.writeFile('/b.js', 'x'), /could not be cloned/);
-    assert.equal(v.readFile('/b.js'), null);
-    assert.equal(poolUsed(k), used, 'the placed bytes went back to the pool');
-    result = {
-      source: new Uint8Array(3000),
-      scriptOptions: { cachedData: 1 },
-    };
-    await assert.rejects(v.writeFile('/b.js', 'x'), /reserved/);
-    assert.equal(poolUsed(k), used);
-    done();
+    try {
+      await v.writeFile('/a.js', 'x');
+      assert.equal(v.readFile('/a.js', 'utf8'), 'AAAA');
+      assert.deepEqual(v.meta('/a.js'), { seen: true });
+      // Extras that cannot be cloned fail the write after the placement,
+      // which goes back to the pool.
+      const used = poolUsed(k);
+      result = { source: new Uint8Array(3000), meta: { fn() {} } };
+      await assert.rejects(v.writeFile('/b.js', 'x'), /could not be cloned/);
+      assert.equal(v.readFile('/b.js'), null);
+      assert.equal(poolUsed(k), used, 'the placed bytes went back to the pool');
+      result = {
+        source: new Uint8Array(3000),
+        scriptOptions: { cachedData: 1 },
+      };
+      await assert.rejects(v.writeFile('/b.js', 'x'), /reserved/);
+      assert.equal(poolUsed(k), used);
+    } finally {
+      done();
+    }
   });
 
   it('a copy that throws leaves nothing allocated', async () => {
@@ -751,16 +805,19 @@ describe('prepare pipeline: the preparer contract', () => {
     }
     let result = 'good';
     const { k, v, done } = await virtual(() => result);
-    await v.writeFile('/a.js', 'x');
-    const used = poolUsed(k);
-    for (const bad of [poisoned, new Short(4000), { source: poisoned }]) {
-      result = bad;
-      await assert.rejects(v.writeFile('/a.js', 'x'));
-      assert.equal(v.readFile('/a.js', 'utf8'), 'good');
-      assert.equal(poolUsed(k), used, 'nothing stayed allocated');
+    try {
+      await v.writeFile('/a.js', 'x');
+      const used = poolUsed(k);
+      for (const bad of [poisoned, new Short(4000), { source: poisoned }]) {
+        result = bad;
+        await assert.rejects(v.writeFile('/a.js', 'x'));
+        assert.equal(v.readFile('/a.js', 'utf8'), 'good');
+        assert.equal(poolUsed(k), used, 'nothing stayed allocated');
+      }
+      assert.equal(k.retired.size, 0);
+    } finally {
+      done();
     }
-    assert.equal(k.retired.size, 0);
-    done();
   });
 
   it('a preparer that closes the kernel: the write is refused as closed', async () => {
@@ -769,13 +826,16 @@ describe('prepare pipeline: the preparer contract', () => {
       kernel.close();
       return new Uint8Array([1, 2, 3]);
     });
-    kernel = k;
-    await assert.rejects(
-      v.writeFile('/a.js', 'x'),
-      /kernel closed before publication/,
-    );
-    assert.equal(k.state, 'closed');
-    done();
+    try {
+      kernel = k;
+      await assert.rejects(
+        v.writeFile('/a.js', 'x'),
+        /kernel closed before publication/,
+      );
+      assert.equal(k.state, 'closed');
+    } finally {
+      done();
+    }
   });
 
   it('a Uint8Array result placed before a failure is freed with it', async () => {
@@ -791,44 +851,50 @@ describe('prepare pipeline: the preparer contract', () => {
         },
       },
     );
-    await v.writeFile('/a.js', 'module.exports = 1;');
-    const used = poolUsed(k);
-    const source = v.script('/a.js');
-    bad = true;
-    await assert.rejects(v.writeFile('/a.js', 'x'), /does not compile/);
-    assert.equal(poolUsed(k), used, 'the placed bytes went back to the pool');
-    assert.equal(v.readFile('/a.js', 'utf8'), 'module.exports = 1;');
-    assert.deepEqual(v.script('/a.js'), source);
-    assert.equal(k.retired.size, 0);
-    done();
+    try {
+      await v.writeFile('/a.js', 'module.exports = 1;');
+      const used = poolUsed(k);
+      const source = v.script('/a.js');
+      bad = true;
+      await assert.rejects(v.writeFile('/a.js', 'x'), /does not compile/);
+      assert.equal(poolUsed(k), used, 'the placed bytes went back to the pool');
+      assert.equal(v.readFile('/a.js', 'utf8'), 'module.exports = 1;');
+      assert.deepEqual(v.script('/a.js'), source);
+      assert.equal(k.retired.size, 0);
+    } finally {
+      done();
+    }
   });
 
   it('rejects async preparers and malformed results, keeping the old version', async () => {
     let result = 'good';
     const { k, v, done } = await virtual(() => result);
-    await v.writeFile('/a.js', 'x');
-    const unhandled = [];
-    const onUnhandled = (err) => unhandled.push(err);
-    process.on('unhandledRejection', onUnhandled);
-    const bad = [
-      [Promise.reject(new Error('async')), /must be synchronous/],
-      [{ then() {} }, /must be synchronous/],
-      [42, /result must be a string, a Uint8Array or \{ source \}/],
-      [{ source: 42 }, /source must be a string or Uint8Array/],
-      [{}, /source must be a string or Uint8Array/],
-      [{ source: 'x', meta: 'm' }, /meta must be an object/],
-      [{ source: 'x', scriptOptions: { cachedData: 1 } }, /reserved/],
-    ];
-    for (const [value, re] of bad) {
-      result = value;
-      await assert.rejects(v.writeFile('/a.js', 'x'), re);
-      assert.equal(v.readFile('/a.js', 'utf8'), 'good');
+    try {
+      await v.writeFile('/a.js', 'x');
+      const unhandled = [];
+      const onUnhandled = (err) => unhandled.push(err);
+      process.on('unhandledRejection', onUnhandled);
+      const bad = [
+        [Promise.reject(new Error('async')), /must be synchronous/],
+        [{ then() {} }, /must be synchronous/],
+        [42, /result must be a string, a Uint8Array or \{ source \}/],
+        [{ source: 42 }, /source must be a string or Uint8Array/],
+        [{}, /source must be a string or Uint8Array/],
+        [{ source: 'x', meta: 'm' }, /meta must be an object/],
+        [{ source: 'x', scriptOptions: { cachedData: 1 } }, /reserved/],
+      ];
+      for (const [value, re] of bad) {
+        result = value;
+        await assert.rejects(v.writeFile('/a.js', 'x'), re);
+        assert.equal(v.readFile('/a.js', 'utf8'), 'good');
+      }
+      await new Promise((resolve) => setImmediate(resolve));
+      process.off('unhandledRejection', onUnhandled);
+      assert.deepEqual(unhandled, [], 'no unhandled rejection');
+      assert.equal(k.retired.size, 0);
+    } finally {
+      done();
     }
-    await new Promise((resolve) => setImmediate(resolve));
-    process.off('unhandledRejection', onUnhandled);
-    assert.deepEqual(unhandled, [], 'no unhandled rejection');
-    assert.equal(k.retired.size, 0);
-    done();
   });
 
   it('a throwing preparer keeps the previous version and its companions', async () => {
@@ -840,14 +906,17 @@ describe('prepare pipeline: the preparer contract', () => {
       },
       { require: { ext: ['js'], compile: true } },
     );
-    await v.writeFile('/a.js', 'module.exports = 1;');
-    const place = k.registry.get('v');
-    const bytecode = place.bytecode('/a.js');
-    fail = true;
-    await assert.rejects(v.writeFile('/a.js', 'module.exports = 2;'), /bad/);
-    assert.equal(v.readFile('/a.js', 'utf8'), 'module.exports = 1;');
-    assert.equal(place.bytecode('/a.js'), bytecode);
-    done();
+    try {
+      await v.writeFile('/a.js', 'module.exports = 1;');
+      const place = k.registry.get('v');
+      const bytecode = place.bytecode('/a.js');
+      fail = true;
+      await assert.rejects(v.writeFile('/a.js', 'module.exports = 2;'), /bad/);
+      assert.equal(v.readFile('/a.js', 'utf8'), 'module.exports = 1;');
+      assert.equal(place.bytecode('/a.js'), bytecode);
+    } finally {
+      done();
+    }
   });
 
   it('a watcher-side failure keeps the previous version', async () => {
@@ -865,16 +934,19 @@ describe('prepare pipeline: the preparer contract', () => {
       },
       { console: { ...quiet, warn: (m) => warnings.push(m) } },
     );
-    fail = true;
-    fs.writeFileSync(at('app', 'a.js'), RAW + ' // v2');
-    await epoch([[at('app', 'a.js'), 'change']]);
-    assert.equal(k.fs('app').readFile('/a.js', 'utf8'), PREPARED);
-    assert.equal(k.fs('app').script('/a.js').source, PREPARED);
-    const refusal =
-      'not published — ENOTSUP: operation not supported ' +
-      `(fs.script.compile: source does not compile), open '${at('app', 'a.js')}'`;
-    assert.ok(warnings.some((w) => w.endsWith(refusal)));
-    done();
+    try {
+      fail = true;
+      fs.writeFileSync(at('app', 'a.js'), RAW + ' // v2');
+      await epoch([[at('app', 'a.js'), 'change']]);
+      assert.equal(k.fs('app').readFile('/a.js', 'utf8'), PREPARED);
+      assert.equal(k.fs('app').script('/a.js').source, PREPARED);
+      const refusal =
+        'not published — ENOTSUP: operation not supported ' +
+        `(fs.script.compile: source does not compile), open '${at('app', 'a.js')}'`;
+      assert.ok(warnings.some((w) => w.endsWith(refusal)));
+    } finally {
+      done();
+    }
   });
 
   it('prepare and scriptOptions never turn fs.script on', async () => {
@@ -927,39 +999,42 @@ describe('prepare pipeline: publication', () => {
       },
       { code },
     );
-    // The pool holds exactly the published entries: no raw copy anywhere.
-    const pooled = () => {
-      let published = 0;
-      for (const entry of k.cache.index('app').entries.values()) {
-        published += entry.length;
-      }
-      let used = 0;
-      for (const id of k.cache.pool.segments.keys()) {
-        used += k.cache.registry.used(id);
-      }
-      return [used, published];
-    };
-    const [used, published] = pooled();
-    assert.equal(used, published);
-    const t = tap(k);
-    const acked = nextMessage(k.links.get(t.id));
-    fs.writeFileSync(at('app', 'a.js'), RAW + ' // v2');
-    await epoch([[at('app', 'a.js'), 'change']]);
-    await acked;
-    const [msg] = t.updates();
-    assert.deepEqual(
-      msg.places.app.entries.map(([key]) => key).sort(),
-      [
-        '/a.js',
-        bytecodeKey('/a.js', 'require'),
-        bytecodeKey('/a.js', 'script'),
-        compressedKey('/a.js', 'gzip'),
-      ].sort(),
-    );
-    assert.equal(k.retired.size, 0, 'the old version went with the ACK');
-    const [usedAfter, publishedAfter] = pooled();
-    assert.equal(usedAfter, publishedAfter);
-    done();
+    try {
+      // The pool holds exactly the published entries: no raw copy anywhere.
+      const pooled = () => {
+        let published = 0;
+        for (const entry of k.cache.index('app').entries.values()) {
+          published += entry.length;
+        }
+        let used = 0;
+        for (const id of k.cache.pool.segments.keys()) {
+          used += k.cache.registry.used(id);
+        }
+        return [used, published];
+      };
+      const [used, published] = pooled();
+      assert.equal(used, published);
+      const t = tap(k);
+      const acked = nextMessage(k.links.get(t.id));
+      fs.writeFileSync(at('app', 'a.js'), RAW + ' // v2');
+      await epoch([[at('app', 'a.js'), 'change']]);
+      await acked;
+      const [msg] = t.updates();
+      assert.deepEqual(
+        msg.places.app.entries.map(([key]) => key).sort(),
+        [
+          '/a.js',
+          bytecodeKey('/a.js', 'require'),
+          bytecodeKey('/a.js', 'script'),
+          compressedKey('/a.js', 'gzip'),
+        ].sort(),
+      );
+      assert.equal(k.retired.size, 0, 'the old version went with the ACK');
+      const [usedAfter, publishedAfter] = pooled();
+      assert.equal(usedAfter, publishedAfter);
+    } finally {
+      done();
+    }
   });
 
   it('appendFile and moves of prepared keys are refused; others re-prepare', async () => {
@@ -980,28 +1055,35 @@ describe('prepare pipeline: publication', () => {
       {},
       { preparers: { code } },
     );
-    for (const name of ['v', 'm']) {
-      const place = k.fs(name);
-      await place.writeFile('/a.js', RAW);
-      await assert.rejects(async () => place.appendFile('/a.js', 'x'), {
-        code: 'ENOTSUP',
-      });
-      await assert.rejects(async () => place.rename('/a.js', '/a.txt'), {
-        code: 'ENOTSUP',
-      });
-      await assert.rejects(async () => place.rename('/a.js', '/b.js'), {
-        code: 'ENOTSUP',
-      });
-      assert.equal(place.readFile('/a.js', 'utf8'), PREPARED, name);
-      await place.writeFile('/r.txt', RAW);
-      await place.rename('/r.txt', '/r.js');
-      assert.equal(place.readFile('/r.js', 'utf8'), PREPARED, 'new ext rules');
-      assert.equal(place.exists('/r.txt'), false);
-      await place.writeFile('/t.txt', 'plain');
-      await place.appendFile('/t.txt', '+');
-      assert.equal(place.readFile('/t.txt', 'utf8'), 'plain+');
+    try {
+      for (const name of ['v', 'm']) {
+        const place = k.fs(name);
+        await place.writeFile('/a.js', RAW);
+        await assert.rejects(async () => place.appendFile('/a.js', 'x'), {
+          code: 'ENOTSUP',
+        });
+        await assert.rejects(async () => place.rename('/a.js', '/a.txt'), {
+          code: 'ENOTSUP',
+        });
+        await assert.rejects(async () => place.rename('/a.js', '/b.js'), {
+          code: 'ENOTSUP',
+        });
+        assert.equal(place.readFile('/a.js', 'utf8'), PREPARED, name);
+        await place.writeFile('/r.txt', RAW);
+        await place.rename('/r.txt', '/r.js');
+        assert.equal(
+          place.readFile('/r.js', 'utf8'),
+          PREPARED,
+          'new ext rules',
+        );
+        assert.equal(place.exists('/r.txt'), false);
+        await place.writeFile('/t.txt', 'plain');
+        await place.appendFile('/t.txt', '+');
+        assert.equal(place.readFile('/t.txt', 'utf8'), 'plain+');
+      }
+    } finally {
+      k.close();
+      rm(root);
     }
-    k.close();
-    rm(root);
   });
 });

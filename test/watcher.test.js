@@ -732,32 +732,35 @@ describe('watcher: unstable source', () => {
       { site: { fs: true } },
       { watch: true, watchTimeout: 60 },
     );
-    const site = k.fs('site');
-    const realOpen = k.cache.reader;
-    k.cache.reader = async (file, view) => {
-      if (
-        file.path.endsWith(`${path.sep}a.txt`) ||
-        file.path.endsWith('/a.txt')
-      ) {
-        throw new Error('source changed during read');
-      }
-      return realOpen(file, view);
-    };
-    fs.writeFileSync(path.join(root, 'site', 'a.txt'), 'a2');
-    fs.writeFileSync(path.join(root, 'site', 'b.txt'), 'b2');
-    await until(() => site.readFile('/b.txt', 'utf8') === 'b2', 4000);
-    assert.equal(
-      site.readFile('/a.txt', 'utf8'),
-      'a1',
-      'failed source retained',
-    );
-    assert.equal(
-      site.readFile('/b.txt', 'utf8'),
-      'b2',
-      'stable sibling published',
-    );
-    k.close();
-    rm(root);
+    try {
+      const site = k.fs('site');
+      const realOpen = k.cache.reader;
+      k.cache.reader = async (file, view) => {
+        if (
+          file.path.endsWith(`${path.sep}a.txt`) ||
+          file.path.endsWith('/a.txt')
+        ) {
+          throw new Error('source changed during read');
+        }
+        return realOpen(file, view);
+      };
+      fs.writeFileSync(path.join(root, 'site', 'a.txt'), 'a2');
+      fs.writeFileSync(path.join(root, 'site', 'b.txt'), 'b2');
+      await until(() => site.readFile('/b.txt', 'utf8') === 'b2', 4000);
+      assert.equal(
+        site.readFile('/a.txt', 'utf8'),
+        'a1',
+        'failed source retained',
+      );
+      assert.equal(
+        site.readFile('/b.txt', 'utf8'),
+        'b2',
+        'stable sibling published',
+      );
+    } finally {
+      k.close();
+      rm(root);
+    }
   });
 });
 
@@ -772,35 +775,39 @@ describe('watcher: linux edge events', () => {
       { site: { fs: true, require: true } },
       { watch: true, watchTimeout: 60 },
     );
-    const site = k.fs('site');
-    const at = (...p) => path.join(root, 'site', ...p);
+    try {
+      const site = k.fs('site');
+      const at = (...p) => path.join(root, 'site', ...p);
 
-    const fd = fs.openSync(at('page.html'), 'w');
-    fs.writeSync(fd, '<p>');
-    fs.writeSync(fd, 'two');
-    fs.writeSync(fd, '</p>');
-    fs.closeSync(fd);
-    await until(
-      () => site.readFile('/page.html', 'utf8') === '<p>two</p>',
-      4000,
-    );
+      const fd = fs.openSync(at('page.html'), 'w');
+      fs.writeSync(fd, '<p>');
+      fs.writeSync(fd, 'two');
+      fs.writeSync(fd, '</p>');
+      fs.closeSync(fd);
+      await until(
+        () => site.readFile('/page.html', 'utf8') === '<p>two</p>',
+        4000,
+      );
 
-    fs.renameSync(at('a.js'), at('z.js'));
-    await until(() => site.exists('/z.js') && !site.exists('/a.js'), 4000);
-    assert.equal(site.readFile('/z.js', 'utf8'), 'module.exports = 1;');
+      fs.renameSync(at('a.js'), at('z.js'));
+      await until(() => site.exists('/z.js') && !site.exists('/a.js'), 4000);
+      assert.equal(site.readFile('/z.js', 'utf8'), 'module.exports = 1;');
 
-    fs.unlinkSync(at('page.html'));
-    fs.writeFileSync(at('page.html'), '<p>new</p>');
-    await until(
-      () => site.readFile('/page.html', 'utf8') === '<p>new</p>',
-      4000,
-    );
+      fs.unlinkSync(at('page.html'));
+      fs.writeFileSync(at('page.html'), '<p>new</p>');
+      await until(
+        () => site.readFile('/page.html', 'utf8') === '<p>new</p>',
+        4000,
+      );
 
-    const handles = k.watcher.watchers.size;
-    assert.ok(handles >= 1);
-    k.close();
-    assert.equal(k.watcher, null);
-    rm(root);
+      const handles = k.watcher.watchers.size;
+      assert.ok(handles >= 1);
+      k.close();
+      assert.equal(k.watcher, null);
+    } finally {
+      k.close();
+      rm(root);
+    }
   });
 });
 

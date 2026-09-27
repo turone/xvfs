@@ -240,20 +240,6 @@ full disk answers), the operation's `syscall` and `path`, and `dest` for
 a rename or a copy — for main-thread and worker mutations alike, with
 tests.
 
-## P3 — Tests that do not test what they say, or hang instead of failing
-
-**Problem.** `subtree-rename.test.js` «a move queued behind a write in
-flight when the kernel closes» never reaches its gate on
-`k.compressor.compress`: both mutations fail on the closed kernel before
-any write is in flight. `compression.test.js`, `prepare.test.js` and
-`mutation-order.test.js` close their kernels outside `try/finally`, so a
-failing assertion leaves a watcher or a worker open and `node --test`
-hangs instead of reporting the failure.
-
-**Done when.** The subtree-rename test holds a write in flight at
-`close()` (the compressor taken before it), and every test closes its
-kernel in `finally`.
-
 ## P3 — Coverage gaps found by mutation testing
 
 **Problem.** Mutants survive on `main` as on later revisions: a
