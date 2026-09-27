@@ -133,6 +133,9 @@ if (at === -1) {
     process.exitCode = 1;
   });
 } else {
+  // The parent is gone (killed on a timeout by bench/ab.js): nothing to
+  // report to.
+  process.on('disconnect', () => process.exit(1));
   const options = JSON.parse(argOf(process.argv, 'options', '{}'));
   child(process.argv[at + 1], options).then((result) => {
     process.send(result, () => process.exit(0));

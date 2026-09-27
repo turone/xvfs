@@ -1022,6 +1022,22 @@ scenario in its own process, and writes JSON to `.work/bench/`;
 `node bench/compare.js base.json new.json [--noise base2.json]` compares
 two runs.
 
+`npm run bench:ab -- <base> <new> [--only read,patch] [--pairs 4]`
+compares two revisions: both are exported with `git archive` into sibling
+directories of one temporary directory (where the code lies changes its
+timings) with the same dependencies, run alternately `pairs` times (the
+order flipping between pairs), and summarized per metric as the medians
+of both sides, the change and the change in every pair — a table on the
+console, `summary.md` and `summary.json` with every run's JSON under
+`.work/bench/ab/`. A change is significant (`+` / `−`) only when it
+exceeds max(5 %, 2 × the spread of the base runs) in every pair; `~`
+marks one every pair shows in the same direction below that. A run over
+`--timeout` seconds (900) is killed; a failed run or scenario makes the
+exit code 1. `worktree` names the uncommitted working tree;
+`--bench <rev>` runs that revision's `bench/` against both, so new
+scenarios can measure an old base; `--report <dir>` prints a saved
+summary again (`--md`, `--filter`).
+
 ## Support
 
 CI (`.github/workflows/ci.yml`) runs on pushes to `main` and on pull

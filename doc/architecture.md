@@ -1012,7 +1012,14 @@ stat        { size, mtimeMs } (+ sourceSize, encoding for compressed companions)
   as HTTPS tarball URLs with lockfile integrity.
 - Performance claims rest on `npm run bench` (`bench/`, outside `npm test`
   and CI): one process per scenario, a warm-up, then the median of several
-  rounds; latencies as p50 / p99, memory as RSS and pool usage. A change is
-  significant when it exceeds max(5 %, 2 × noise), the noise being the
-  difference between two baseline runs (`bench/compare.js --noise`). Every
-  reach into kernel internals is in `bench/lib.js`.
+  rounds; latencies as p50 / p99, memory as RSS and pool usage. Two
+  revisions are compared with `bench/ab.js`: both exported with
+  `git archive` into sibling directories of one temporary directory — where
+  the code lies changes its timings — with the same dependencies, run in
+  alternating pairs (the order flipping between pairs), the medians of
+  each side compared; a change is significant when it exceeds max(5 %,
+  2 × the spread of the base runs) in every pair, and one every pair
+  shows in the same direction below that is reported as such, not as
+  significant. `bench/compare.js` compares two single runs, with the noise
+  taken from a second baseline run (`--noise`). Every reach into kernel
+  internals is in `bench/lib.js`.
