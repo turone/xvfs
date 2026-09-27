@@ -317,8 +317,9 @@ Here `.js` goes through `api` once; that one prepared source is what
   form adds extensions to a domain or removes any.
 - **One declaration per extension per place.** Declaring the same
   extension in two domains — even with the same preparer — is a config
-  error naming the place, the extension and every declaration. No domain
-  priority, no merging.
+  error naming the place, the extension and every declaration; so is
+  assigning it to several preparers inside one domain, naming every one
+  of them. No domain priority, no merging.
 - **Providers.** `prepare` applies to `sab`, `map` and `sea` places;
   `disk` and `node-default` places pass files through untouched, so
   declaring it there is a config error, and so is combining it with

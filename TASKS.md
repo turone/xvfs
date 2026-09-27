@@ -151,15 +151,6 @@ Windows).
 **Done when.** Listings either use `path.sep` like native `node:fs` or
 document `/` as the contract, with a test pinning the choice on Windows.
 
-## P3 — Diagnostics of `prepare` conflicts inside one domain
-
-**Problem.** When one domain's object form assigns an extension to several
-preparers, the config error names only the first two; across domains it
-names every declaration.
-
-**Done when.** The error lists every declaration of the extension, with a
-test for three or more.
-
 ## P3 — `fs.fallback: 'disk'` on a place without `fs.ext`
 
 **Problem.** Without strict, a disk-origin place with no `fs.ext` resolves

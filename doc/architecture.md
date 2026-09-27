@@ -404,9 +404,12 @@ retired bytes are freed. Publishing into a closed segment reopens it.
 
 **`prepare` is declared by a domain but prepares the file: one declaration
 per extension per place; a second declaration — even of the same preparer —
-is a config error, with no domain priority and no merging.** _Why:_ a file
-has one canonical content shared by every domain; two declarations would be
-ambiguous, and silent priority rules hide configuration mistakes.
+is a config error, with no domain priority and no merging. The error names
+every declaration of the extension, across domains and inside one.** _Why:_
+a file has one canonical content shared by every domain; two declarations
+would be ambiguous, and silent priority rules hide configuration mistakes.
+An error that named the first two sent the user back once per extra
+declaration.
 
 **The short form `prepare: 'name'` covers the domain's own finite `ext`; an
 unrestricted fs takes only the object form; `fs.script.ext` is never its
