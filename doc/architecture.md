@@ -609,6 +609,28 @@ standing in for canonical (prepared) content or an unpublished version; a
 native listing of a disk-only directory showed such raw files. The
 non-strict default keeps its permissive reads.
 
+**A key keeps its case — in the index, in keys, in errors. Where the disk
+would answer a miss — the non-strict `'disk'` fallback, and Node's own
+loader behind the module hooks without strict — a path naming a published
+source held in memory in another case answers as that source's own
+spelling does. On Windows a disk-origin place keeps, as an index, the
+lower-casing of each source key that has capitals (`PlaceFiles.spelling`,
+`Place.spelling`); the exact key is looked up first. A disk-backed entry
+is read from disk by the name given, as before; a directory in another
+case is no published directory (`'disk'` lists its disk territory there,
+`'deny'` refuses it); V8 cached data is looked up by the key as spelled; a
+virtual place keeps exact keys. Strict refuses another case like any path
+the place does not publish, and `'deny'` always does.** _Why:_ the index
+compares keys exactly, a Windows disk does not: without strict, `A.TXT` of
+a published, prepared `a.txt` went to the disk — its raw content, a
+descriptor to it, a native watch — and `require` loaded the raw module.
+Lower-casing equates whatever NTFS does and a few characters more (the
+Kelvin sign), where published content then answers for another name —
+never raw bytes: a disk-backed entry, read by the caller's name, is never
+taken for another spelling. Under strict nothing is looked up: cached
+extensions never fall back there. A virtual place is a filesystem of its
+own: another case of a key is another key, as its mutations take it.
+
 ## Patched `node:fs`
 
 **One rule decides what a native `node:fs` operation may do: it runs only
@@ -915,6 +937,10 @@ workers call `attach()`.** _Why:_ preloads do not run in worker threads.
 | Manual worker transports (`broadcast`, `getWorkerIds`)                                                          | every one would have to re-implement retirement                   |
 | `startsWith('..')` containment, `realpath` in the router                                                        | misroutes `..private`; disk access on the hot path                |
 | Lower-casing a place's name on Windows to compare it                                                            | NTFS takes no Kelvin sign `K` for `k`: an unmanaged directory     |
+| Storing keys lower-cased on Windows                                                                             | keys and errors keep their spelling; an index finds other cases   |
+| Looking a key up in another case under strict, or for a disk-backed entry                                       | strict refuses it already; a wider match reads another file       |
+| Other spellings of a virtual place's keys                                                                       | its reads and mutations would disagree (`exists` against `wx`)    |
+| Refusing every miss of a cached extension without strict on Windows                                             | the permissive default's unpublished files; unlike on POSIX       |
 | Native `cp` with a routing `filter` for managed trees                                                           | raw disk bytes, no virtual entries, no canonical content          |
 | Copying canonical (prepared) content as a copy's input                                                          | the destination prepares it again; its bundle names the source    |
 | Feeding a prepared virtual entry's canonical content back in as raw                                             | stale `meta` / filename / bytecode, a silently different input    |
