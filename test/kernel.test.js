@@ -33,25 +33,29 @@ describe('VfsKernel: lifecycle', () => {
       appRoot: root,
       console: quiet,
     });
-    assert.equal(k.state, 'new');
-    assert.ok(!k.ready);
-    assert.throws(() => k.fs('site'), /requires a ready kernel/);
-    assert.throws(() => k.snapshot(), /requires a ready kernel/);
-    assert.throws(() => k.watch(), /requires a ready kernel/);
-    const init = k.initialize();
-    assert.equal(k.state, 'initializing');
-    await init;
-    assert.equal(k.state, 'ready');
-    await assert.rejects(k.initialize(), /state "ready"/);
-    k.close();
-    assert.equal(k.state, 'closed');
-    await assert.rejects(k.initialize(), /state "closed"/);
-    assert.throws(() => k.fs('site'), /closed/);
-    // The pool is unreachable after close, so its segments are collectable.
-    assert.equal(k.cache, null);
-    assert.equal(k.compressor, null);
-    k.handleAck(1, 'w');
-    k.handleWorkerExit('w');
+    try {
+      assert.equal(k.state, 'new');
+      assert.ok(!k.ready);
+      assert.throws(() => k.fs('site'), /requires a ready kernel/);
+      assert.throws(() => k.snapshot(), /requires a ready kernel/);
+      assert.throws(() => k.watch(), /requires a ready kernel/);
+      const init = k.initialize();
+      assert.equal(k.state, 'initializing');
+      await init;
+      assert.equal(k.state, 'ready');
+      await assert.rejects(k.initialize(), /state "ready"/);
+      k.close();
+      assert.equal(k.state, 'closed');
+      await assert.rejects(k.initialize(), /state "closed"/);
+      assert.throws(() => k.fs('site'), /closed/);
+      // The pool is unreachable after close, so its segments are collectable.
+      assert.equal(k.cache, null);
+      assert.equal(k.compressor, null);
+      k.handleAck(1, 'w');
+      k.handleWorkerExit('w');
+    } finally {
+      k.close();
+    }
   });
 
   it('a failing initialize closes the kernel', async () => {
@@ -65,8 +69,12 @@ describe('VfsKernel: lifecycle', () => {
       console: quiet,
       seaModule,
     });
-    await assert.rejects(k.initialize(), /boom/);
-    assert.equal(k.state, 'closed');
+    try {
+      await assert.rejects(k.initialize(), /boom/);
+      assert.equal(k.state, 'closed');
+    } finally {
+      k.close();
+    }
   });
 
   // Init publishes a few files at a time — initConcurrency() of kernel.js:
@@ -252,11 +260,14 @@ describe('VfsKernel: lifecycle', () => {
       disk: { provider: 'disk', fs: true },
       nd: { provider: 'node-default', fs: true },
     });
-    assert.throws(() => k.fs('nope'), /unknown place "nope"/);
-    assert.throws(() => k.fs('site'), /no fs domain/);
-    assert.throws(() => k.fs('disk'), /node:fs directly/);
-    assert.throws(() => k.fs('nd'), /node:fs directly/);
-    k.close();
+    try {
+      assert.throws(() => k.fs('nope'), /unknown place "nope"/);
+      assert.throws(() => k.fs('site'), /no fs domain/);
+      assert.throws(() => k.fs('disk'), /node:fs directly/);
+      assert.throws(() => k.fs('nd'), /node:fs directly/);
+    } finally {
+      k.close();
+    }
   });
 
   it('VfsKernel.current is the bootstrap slot', () => {
@@ -289,24 +300,27 @@ describe('VfsKernel: providers', () => {
       site: { fs: true, require: true },
       lib: { require: true },
     });
-    const site = k.fs('site');
-    assert.deepEqual(site.readdir('/'), ['app.js', 'big.bin', 'index.html']);
-    assert.equal(
-      site.readFile('/big.bin').length,
-      70 * 1024,
-      'disk-backed entry reads from disk',
-    );
-    assert.deepEqual(site.storedEncodings('/big.bin'), []);
-    assert.ok(k.bytecode(path.join(root, 'site', 'app.js')));
-    assert.equal(k.bytecode(path.join(root, 'site', 'index.html')), null);
-    const lib = k.registry.get('lib');
-    assert.deepEqual(
-      [...lib.files.keys()].filter((key) => !key.includes('\0')).sort(),
-      ['/data.json', '/util.js'],
-    );
-    assert.ok(lib.files.has(bytecodeKey('/util.js')));
-    assert.ok(!lib.files.has(bytecodeKey('/data.json')));
-    k.close();
+    try {
+      const site = k.fs('site');
+      assert.deepEqual(site.readdir('/'), ['app.js', 'big.bin', 'index.html']);
+      assert.equal(
+        site.readFile('/big.bin').length,
+        70 * 1024,
+        'disk-backed entry reads from disk',
+      );
+      assert.deepEqual(site.storedEncodings('/big.bin'), []);
+      assert.ok(k.bytecode(path.join(root, 'site', 'app.js')));
+      assert.equal(k.bytecode(path.join(root, 'site', 'index.html')), null);
+      const lib = k.registry.get('lib');
+      assert.deepEqual(
+        [...lib.files.keys()].filter((key) => !key.includes('\0')).sort(),
+        ['/data.json', '/util.js'],
+      );
+      assert.ok(lib.files.has(bytecodeKey('/util.js')));
+      assert.ok(!lib.files.has(bytecodeKey('/data.json')));
+    } finally {
+      k.close();
+    }
   });
 
   it('resolveModule applies domain, ext and provider rules', async () => {
@@ -316,31 +330,34 @@ describe('VfsKernel: providers', () => {
       d: { provider: 'disk', require: { compile: false } },
       n: { provider: 'node-default', fs: true },
     });
-    const at = (...p) => path.join(root, ...p);
-    assert.equal(
-      k.resolveModule(at('site', 'app.js'), 'import').key,
-      '/app.js',
-    );
-    assert.equal(
-      k.resolveModule(at('site', 'app.js'), 'require'),
-      null,
-      'domain off',
-    );
-    assert.equal(
-      k.resolveModule(at('site', 'index.html'), 'import'),
-      null,
-      'ext',
-    );
-    assert.equal(
-      k.resolveModule(at('lib', 'util.js'), 'require').file.data.toString(),
-      'exports.x = 1;',
-    );
-    assert.equal(k.resolveModule(at('lib', 'data.json'), 'require'), null);
-    assert.equal(k.resolveModule(at('d', 'x.js'), 'require'), null);
-    assert.equal(k.resolveModule(at('n', 'x.js'), 'require'), null);
-    assert.equal(k.resolveModule(at('elsewhere', 'x.js'), 'require'), null);
-    assert.equal(k.resolveModule('/outside/x.js', 'require'), null);
-    k.close();
+    try {
+      const at = (...p) => path.join(root, ...p);
+      assert.equal(
+        k.resolveModule(at('site', 'app.js'), 'import').key,
+        '/app.js',
+      );
+      assert.equal(
+        k.resolveModule(at('site', 'app.js'), 'require'),
+        null,
+        'domain off',
+      );
+      assert.equal(
+        k.resolveModule(at('site', 'index.html'), 'import'),
+        null,
+        'ext',
+      );
+      assert.equal(
+        k.resolveModule(at('lib', 'util.js'), 'require').file.data.toString(),
+        'exports.x = 1;',
+      );
+      assert.equal(k.resolveModule(at('lib', 'data.json'), 'require'), null);
+      assert.equal(k.resolveModule(at('d', 'x.js'), 'require'), null);
+      assert.equal(k.resolveModule(at('n', 'x.js'), 'require'), null);
+      assert.equal(k.resolveModule(at('elsewhere', 'x.js'), 'require'), null);
+      assert.equal(k.resolveModule('/outside/x.js', 'require'), null);
+    } finally {
+      k.close();
+    }
   });
 
   it('resolveModule denies under strict', async () => {
@@ -352,45 +369,52 @@ describe('VfsKernel: providers', () => {
       },
       { strict: true },
     );
-    const at = (...p) => path.join(root, ...p);
-    assert.deepEqual(k.resolveModule(at('lib', 'missing.js'), 'require'), {
-      denied: true,
-    });
-    assert.deepEqual(k.resolveModule(at('lib', 'notes.md'), 'require'), {
-      denied: true,
-    });
-    assert.deepEqual(
-      k.resolveModule(at('lib', 'util.js'), 'import'),
-      { denied: true },
-      'domain off',
-    );
-    assert.deepEqual(k.resolveModule(at('unknown', 'x.js'), 'require'), {
-      denied: true,
-    });
-    assert.equal(
-      k.resolveModule(at('d', 'x.js'), 'require'),
-      null,
-      'disk is managed passthrough',
-    );
-    assert.equal(
-      k.resolveModule(at('lib', 'util.js'), 'require').key,
-      '/util.js',
-    );
-    k.close();
+    try {
+      const at = (...p) => path.join(root, ...p);
+      assert.deepEqual(k.resolveModule(at('lib', 'missing.js'), 'require'), {
+        denied: true,
+      });
+      assert.deepEqual(k.resolveModule(at('lib', 'notes.md'), 'require'), {
+        denied: true,
+      });
+      assert.deepEqual(
+        k.resolveModule(at('lib', 'util.js'), 'import'),
+        { denied: true },
+        'domain off',
+      );
+      assert.deepEqual(k.resolveModule(at('unknown', 'x.js'), 'require'), {
+        denied: true,
+      });
+      assert.equal(
+        k.resolveModule(at('d', 'x.js'), 'require'),
+        null,
+        'disk is managed passthrough',
+      );
+      assert.equal(
+        k.resolveModule(at('lib', 'util.js'), 'require').key,
+        '/util.js',
+      );
+    } finally {
+      k.close();
+    }
   });
 
   it('memory places are empty, per-kernel and writable', async () => {
     const k1 = await kernel(root, {
       mem: { provider: 'map', origin: 'virtual', fs: { writable: true } },
     });
-    const k2 = await kernel(root, {
-      mem: { provider: 'map', origin: 'virtual', fs: { writable: true } },
-    });
-    k1.fs('mem').writeFile('/x', '1');
-    assert.equal(k2.fs('mem').exists('/x'), false);
-    assert.equal(k1.fs('mem').readFile('/x', 'utf8'), '1');
-    k1.close();
-    k2.close();
+    let k2 = null;
+    try {
+      k2 = await kernel(root, {
+        mem: { provider: 'map', origin: 'virtual', fs: { writable: true } },
+      });
+      k1.fs('mem').writeFile('/x', '1');
+      assert.equal(k2.fs('mem').exists('/x'), false);
+      assert.equal(k1.fs('mem').readFile('/x', 'utf8'), '1');
+    } finally {
+      k1.close();
+      k2?.close();
+    }
   });
 });
 
@@ -412,84 +436,97 @@ describe('VfsKernel: snapshot, workers, ACK', () => {
 
   it('snapshot is keyed by place and fromSnapshot projects it read-only', async () => {
     const k = await kernel(root, places);
-    const snap = k.snapshot();
-    assert.deepEqual(Object.keys(snap.places), ['site']);
-    assert.ok(snap.segments.length >= 1);
-    const w = VfsKernel.fromSnapshot(snap, config(places), { appRoot: root });
-    assert.equal(w.state, 'ready');
-    assert.equal(w.fs('site').readFile('/a.txt', 'utf8'), 'aaa');
-    assert.ok(w.bytecode(path.join(root, 'site', 'b.js')));
-    assert.throws(() => w.fs('site').readFileView('/a.txt'), {
-      code: 'ENOTSUP',
-    });
-    assert.throws(() => w.snapshot(), /main-thread only/);
-    assert.throws(() => w.fs('site').writeFile('/x', 'y'), { code: 'EROFS' });
-    w.fs('mem').writeFile('/m', 'm');
-    assert.equal(w.fs('mem').readFile('/m', 'utf8'), 'm');
-    assert.equal(k.fs('mem').exists('/m'), false);
-    const empty = VfsKernel.fromSnapshot(null, config(places), {
-      appRoot: root,
-    });
-    assert.equal(empty.fs('site').exists('/a.txt'), false);
-    k.close();
-    w.close();
+    let w = null;
+    let empty = null;
+    try {
+      const snap = k.snapshot();
+      assert.deepEqual(Object.keys(snap.places), ['site']);
+      assert.ok(snap.segments.length >= 1);
+      w = VfsKernel.fromSnapshot(snap, config(places), { appRoot: root });
+      assert.equal(w.state, 'ready');
+      assert.equal(w.fs('site').readFile('/a.txt', 'utf8'), 'aaa');
+      assert.ok(w.bytecode(path.join(root, 'site', 'b.js')));
+      assert.throws(() => w.fs('site').readFileView('/a.txt'), {
+        code: 'ENOTSUP',
+      });
+      assert.throws(() => w.snapshot(), /main-thread only/);
+      assert.throws(() => w.fs('site').writeFile('/x', 'y'), { code: 'EROFS' });
+      w.fs('mem').writeFile('/m', 'm');
+      assert.equal(w.fs('mem').readFile('/m', 'utf8'), 'm');
+      assert.equal(k.fs('mem').exists('/m'), false);
+      empty = VfsKernel.fromSnapshot(null, config(places), {
+        appRoot: root,
+      });
+      assert.equal(empty.fs('site').exists('/a.txt'), false);
+    } finally {
+      k.close();
+      w?.close();
+      empty?.close();
+    }
   });
 
   it('handleDelta applies vfs-update entries and removals', async () => {
     const k = await kernel(root, places);
-    const w = VfsKernel.fromSnapshot(k.snapshot(), config(places), {
-      appRoot: root,
-    });
-    const entry = await k.cache.allocate({
-      data: Buffer.from('new'),
-      stat: { size: 3, mtimeMs: 1 },
-    });
-    const { sab } = k.cache.getSegment(entry.segmentId);
-    w.handleDelta({
-      name: 'vfs-update',
-      updateId: 1,
-      places: {
-        site: { entries: [['/new.txt', entry]], removals: ['/a.txt'] },
-      },
-      newSegments: [{ id: entry.segmentId, sab }],
-    });
-    assert.equal(w.fs('site').readFile('/new.txt', 'utf8'), 'new');
-    assert.equal(w.fs('site').exists('/a.txt'), false);
-    assert.deepEqual(w.handleDelta({ name: 'other' }), []);
-    k.close();
-    w.close();
+    let w = null;
+    try {
+      w = VfsKernel.fromSnapshot(k.snapshot(), config(places), {
+        appRoot: root,
+      });
+      const entry = await k.cache.allocate({
+        data: Buffer.from('new'),
+        stat: { size: 3, mtimeMs: 1 },
+      });
+      const { sab } = k.cache.getSegment(entry.segmentId);
+      w.handleDelta({
+        name: 'vfs-update',
+        updateId: 1,
+        places: {
+          site: { entries: [['/new.txt', entry]], removals: ['/a.txt'] },
+        },
+        newSegments: [{ id: entry.segmentId, sab }],
+      });
+      assert.equal(w.fs('site').readFile('/new.txt', 'utf8'), 'new');
+      assert.equal(w.fs('site').exists('/a.txt'), false);
+      assert.deepEqual(w.handleDelta({ name: 'other' }), []);
+    } finally {
+      k.close();
+      w?.close();
+    }
   });
 
   it('frees only after every worker ACKed or exited; repeated ACKs are harmless', async () => {
     const k = await kernel(root, {
       v: { origin: 'virtual', fs: { writable: true } },
     });
-    const w1 = tap(k, { ack: false });
-    const w2 = tap(k, { ack: false });
-    let freed = 0;
-    const originalFree = k.cache.free.bind(k.cache);
-    k.cache.free = (entry) => {
-      freed++;
-      originalFree(entry);
-    };
-    const v = k.fs('v');
-    await v.writeFile('/a.txt', 'one');
-    await v.writeFile('/a.txt', 'two');
-    const updateId = k.nextUpdateId;
-    assert.deepEqual([...k.acks.get(updateId).pending], [w1.id, w2.id]);
-    assert.equal(k.retired.size, 1);
-    k.handleAck(updateId, w1.id);
-    assert.equal(freed, 0);
-    k.handleAck(updateId, w1.id);
-    assert.equal(freed, 0);
-    k.handleWorkerExit(w2.id);
-    assert.equal(freed, 1);
-    k.handleAck(updateId, w2.id);
-    k.handleAck(99, w1.id);
-    assert.equal(freed, 1, 'nothing is freed twice');
-    assert.equal(k.acks.size, 0);
-    assert.equal(k.retired.size, 0);
-    k.close();
+    try {
+      const w1 = tap(k, { ack: false });
+      const w2 = tap(k, { ack: false });
+      let freed = 0;
+      const originalFree = k.cache.free.bind(k.cache);
+      k.cache.free = (entry) => {
+        freed++;
+        originalFree(entry);
+      };
+      const v = k.fs('v');
+      await v.writeFile('/a.txt', 'one');
+      await v.writeFile('/a.txt', 'two');
+      const updateId = k.nextUpdateId;
+      assert.deepEqual([...k.acks.get(updateId).pending], [w1.id, w2.id]);
+      assert.equal(k.retired.size, 1);
+      k.handleAck(updateId, w1.id);
+      assert.equal(freed, 0);
+      k.handleAck(updateId, w1.id);
+      assert.equal(freed, 0);
+      k.handleWorkerExit(w2.id);
+      assert.equal(freed, 1);
+      k.handleAck(updateId, w2.id);
+      k.handleAck(99, w1.id);
+      assert.equal(freed, 1, 'nothing is freed twice');
+      assert.equal(k.acks.size, 0);
+      assert.equal(k.retired.size, 0);
+    } finally {
+      k.close();
+    }
   });
 
   it('worker exit during compaction frees relocated bytes', async () => {
@@ -507,82 +544,93 @@ describe('VfsKernel: snapshot, workers, ACK', () => {
         compaction: { threshold: 0.5 },
       },
     );
-    const v = k.fs('v');
-    await v.writeFile('/a', Buffer.alloc(2 * KB, 'a'));
-    await v.writeFile('/b', Buffer.alloc(2 * KB, 'b'));
-    await v.writeFile('/c', Buffer.alloc(200, 'c'));
-    assert.equal(k.cache.entry('v', '/b').segmentId, 1);
-    assert.equal(k.cache.entry('v', '/c').segmentId, 2);
-    const w = tap(k, { ack: false });
-    await v.unlink('/a');
-    assert.equal(k.retired.size, 1, '/a waits for the ACK');
-    const port = k.links.get(w.id);
-    const closed = nextEvent(port, 'close');
-    w.port.close();
-    await closed;
-    assert.equal(k.cache.entry('v', '/c').segmentId, 1, '/c was relocated');
-    assert.equal(v.readFile('/c', 'utf8'), 'c'.repeat(200));
-    assert.equal(
-      k.acks.size,
-      0,
-      'the exited worker is not waited on for the compaction ACK',
-    );
-    assert.equal(k.retired.size, 0);
-    k.close();
-    rm(empty);
+    try {
+      const v = k.fs('v');
+      await v.writeFile('/a', Buffer.alloc(2 * KB, 'a'));
+      await v.writeFile('/b', Buffer.alloc(2 * KB, 'b'));
+      await v.writeFile('/c', Buffer.alloc(200, 'c'));
+      assert.equal(k.cache.entry('v', '/b').segmentId, 1);
+      assert.equal(k.cache.entry('v', '/c').segmentId, 2);
+      const w = tap(k, { ack: false });
+      await v.unlink('/a');
+      assert.equal(k.retired.size, 1, '/a waits for the ACK');
+      const port = k.links.get(w.id);
+      const closed = nextEvent(port, 'close');
+      w.port.close();
+      await closed;
+      assert.equal(k.cache.entry('v', '/c').segmentId, 1, '/c was relocated');
+      assert.equal(v.readFile('/c', 'utf8'), 'c'.repeat(200));
+      assert.equal(
+        k.acks.size,
+        0,
+        'the exited worker is not waited on for the compaction ACK',
+      );
+      assert.equal(k.retired.size, 0);
+    } finally {
+      k.close();
+      rm(empty);
+    }
   });
 
   it('link() + attach(): a worker gets the projection, deltas and ACKs them', async () => {
     const k = await kernel(root, places, { watchTimeout: 50, watch: true });
-    const { vfs, transferList } = k.link();
-    assert.equal(k.links.size, 1);
-    const script = `
-      const { parentPort } = require('node:worker_threads');
-      const { attach, kernel: before } = require(${JSON.stringify(path.resolve(__dirname, '..'))});
-      const kernel = attach();
-      const { kernel: after } = require(${JSON.stringify(path.resolve(__dirname, '..'))});
-      const site = kernel.fs('site');
-      parentPort.on('message', (m) => {
-        if (m === 'read') parentPort.postMessage(site.readFile('/a.txt', 'utf8'));
-        if (m === 'exit') process.exit(0);
+    let worker = null;
+    try {
+      const { vfs, transferList } = k.link();
+      assert.equal(k.links.size, 1);
+      const script = `
+        const { parentPort } = require('node:worker_threads');
+        const { attach, kernel: before } = require(${JSON.stringify(path.resolve(__dirname, '..'))});
+        const kernel = attach();
+        const { kernel: after } = require(${JSON.stringify(path.resolve(__dirname, '..'))});
+        const site = kernel.fs('site');
+        parentPort.on('message', (m) => {
+          if (m === 'read') parentPort.postMessage(site.readFile('/a.txt', 'utf8'));
+          if (m === 'exit') process.exit(0);
+        });
+        parentPort.postMessage([before, after === kernel, site.readFile('/a.txt', 'utf8')]);
+      `;
+      worker = new Worker(script, {
+        eval: true,
+        workerData: { vfs },
+        transferList,
       });
-      parentPort.postMessage([before, after === kernel, site.readFile('/a.txt', 'utf8')]);
-    `;
-    const worker = new Worker(script, {
-      eval: true,
-      workerData: { vfs },
-      transferList,
-    });
-    const messages = [];
-    worker.on('message', (m) => messages.push(m));
-    const acks = [];
-    const port = [...k.links.values()][0];
-    port.on('message', (m) => acks.push(m));
-    const errors = [];
-    worker.on('error', (e) => errors.push(e));
-    await until(() => messages.length === 1 || errors.length > 0);
-    assert.deepEqual(errors, []);
-    assert.deepEqual(messages, [[null, true, 'aaa']]);
-    // Anything that is not a delta must not produce an ACK. The port keeps
-    // order: the ping reaches the worker before the delta below, so an ACK
-    // for it would arrive first and break the "exactly one ACK" check.
-    port.postMessage({ name: 'ping' });
-    // Change the file: the delta must reach the worker and be ACKed.
-    require('node:fs').writeFileSync(path.join(root, 'site', 'a.txt'), 'AAAA');
-    await until(() => k.fs('site').readFile('/a.txt', 'utf8') === 'AAAA');
-    await until(() => k.acks.size === 0, 3000);
-    assert.equal(k.acks.size, 0, 'worker ACKed the update');
-    assert.deepEqual(
-      acks.map((m) => m.name),
-      ['vfs-ack'],
-      'exactly one ACK, only for the delta',
-    );
-    worker.postMessage('read');
-    await until(() => messages.length === 2);
-    assert.equal(messages[1], 'AAAA');
-    worker.postMessage('exit');
-    await until(() => k.links.size === 0);
-    assert.equal(k.links.size, 0, 'worker exit closed the link');
-    k.close();
+      const messages = [];
+      worker.on('message', (m) => messages.push(m));
+      const acks = [];
+      const port = [...k.links.values()][0];
+      port.on('message', (m) => acks.push(m));
+      const errors = [];
+      worker.on('error', (e) => errors.push(e));
+      await until(() => messages.length === 1 || errors.length > 0);
+      assert.deepEqual(errors, []);
+      assert.deepEqual(messages, [[null, true, 'aaa']]);
+      // Anything that is not a delta must not produce an ACK. The port keeps
+      // order: the ping reaches the worker before the delta below, so an ACK
+      // for it would arrive first and break the "exactly one ACK" check.
+      port.postMessage({ name: 'ping' });
+      // Change the file: the delta must reach the worker and be ACKed.
+      require('node:fs').writeFileSync(
+        path.join(root, 'site', 'a.txt'),
+        'AAAA',
+      );
+      await until(() => k.fs('site').readFile('/a.txt', 'utf8') === 'AAAA');
+      await until(() => k.acks.size === 0, 3000);
+      assert.equal(k.acks.size, 0, 'worker ACKed the update');
+      assert.deepEqual(
+        acks.map((m) => m.name),
+        ['vfs-ack'],
+        'exactly one ACK, only for the delta',
+      );
+      worker.postMessage('read');
+      await until(() => messages.length === 2);
+      assert.equal(messages[1], 'AAAA');
+      worker.postMessage('exit');
+      await until(() => k.links.size === 0);
+      assert.equal(k.links.size, 0, 'worker exit closed the link');
+    } finally {
+      await worker?.terminate();
+      k.close();
+    }
   });
 });

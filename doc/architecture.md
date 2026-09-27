@@ -1116,7 +1116,13 @@ stat        { size, mtimeMs } (+ sourceSize, encoding for compressed companions)
   simulated by the fs binding (`process.binding('fs').readdir` reporting
   each type unknown), so that `node:fs` does what it does on one.
 - Hooks are installed only inside a test and uninstalled in `after` /
-  `finally`; bootstrap tests run child processes.
+  `finally`; bootstrap tests run child processes. Every kernel a test
+  creates is closed in `finally` (or in `after`, when tests share it), and
+  every worker thread terminated there: a failed assertion must not leave a
+  watcher or a thread that holds the process, where `node --test` waits
+  instead of reporting the failure. A test that closes the kernel under an
+  operation holds that operation in flight first — at a gate it is seen to
+  reach.
 - glob captures the `node:fs` functions it walks with when it is loaded,
   and a `node --test` child loads it before any test runs: a glob that kept
   the patched functions is tested in a plain node process

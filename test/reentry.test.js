@@ -632,11 +632,15 @@ describe("Node's rimraf keeps the node:fs it first loads with", () => {
     const root = tmpDir('vfs-reentry-close');
     const places = { v: { origin: 'virtual', fs: { writable: true } } };
     const k = new VfsKernel(config(places), { appRoot: root, console: quiet });
-    const init = k.initialize();
-    k.close();
-    await assert.rejects(init, /kernel closed before publication/);
-    assert.equal(k.state, 'closed');
-    assert.equal(k.cache, null);
-    rm(root);
+    try {
+      const init = k.initialize();
+      k.close();
+      await assert.rejects(init, /kernel closed before publication/);
+      assert.equal(k.state, 'closed');
+      assert.equal(k.cache, null);
+    } finally {
+      k.close();
+      rm(root);
+    }
   });
 });

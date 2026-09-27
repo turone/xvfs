@@ -266,17 +266,20 @@ describe('PlaceFs: reads', () => {
   it('createReadStream: copies when zeroCopy is off and supports AbortSignal', async () => {
     writeTree(root, { 'plain/p.txt': 'plain' });
     const k2 = await kernel(root, { plain: { fs: true } });
-    const chunks = [];
-    for await (const c of k2.fs('plain').createReadStream('/p.txt'))
-      chunks.push(c);
-    assert.ok(!(chunks[0].buffer instanceof SharedArrayBuffer));
-    const ac = new AbortController();
-    const stream = k2
-      .fs('plain')
-      .createReadStream('/p.txt', { signal: ac.signal });
-    ac.abort();
-    await assert.rejects(drain(stream), { name: 'AbortError' });
-    k2.close();
+    try {
+      const chunks = [];
+      for await (const c of k2.fs('plain').createReadStream('/p.txt'))
+        chunks.push(c);
+      assert.ok(!(chunks[0].buffer instanceof SharedArrayBuffer));
+      const ac = new AbortController();
+      const stream = k2
+        .fs('plain')
+        .createReadStream('/p.txt', { signal: ac.signal });
+      ac.abort();
+      await assert.rejects(drain(stream), { name: 'AbortError' });
+    } finally {
+      k2.close();
+    }
   });
 
   it('mutations fail with EROFS on read-only places', () => {
@@ -455,13 +458,16 @@ describe('PlaceFs: memory mutations', () => {
         fs: { writable: true, zeroCopy: true },
       },
     });
-    const m2 = k2.fs('mem');
-    m2.writeFile('/v.txt', 'view');
-    const lease = m2.readFileView('/v.txt');
-    lease.view[0] = 0x56;
-    assert.equal(m2.readFile('/v.txt', 'utf8'), 'View');
-    lease.release();
-    k2.close();
+    try {
+      const m2 = k2.fs('mem');
+      m2.writeFile('/v.txt', 'view');
+      const lease = m2.readFileView('/v.txt');
+      lease.view[0] = 0x56;
+      assert.equal(m2.readFile('/v.txt', 'utf8'), 'View');
+      lease.release();
+    } finally {
+      k2.close();
+    }
   });
 });
 
@@ -531,27 +537,30 @@ describe('PlaceFs: writable sab place writes to disk', () => {
       { data: { fs: { writable: true } } },
       { watchTimeout: 50 },
     );
-    const data = k.fs('data');
-    assert.equal(data.writable, true);
-    assert.ok(k.watcher, 'writable sab place starts the watcher');
-    data.writeFile('/b.txt', 'b');
-    assert.equal(
-      fs.readFileSync(path.join(root, 'data', 'b.txt'), 'utf8'),
-      'b',
-    );
-    data.appendFile('/b.txt', 'b');
-    data.mkdir('/d');
-    assert.ok(fs.statSync(path.join(root, 'data', 'd')).isDirectory());
-    data.mkdir('/nested/deep', { recursive: true });
-    assert.ok(
-      fs.statSync(path.join(root, 'data', 'nested', 'deep')).isDirectory(),
-    );
-    data.rename('/b.txt', '/d/c.txt');
-    data.unlink('/a.txt');
-    data.rm('/d', { recursive: true });
-    data.rm('/nested', { recursive: true });
-    assert.deepEqual(fs.readdirSync(path.join(root, 'data')), []);
-    k.close();
-    rm(root);
+    try {
+      const data = k.fs('data');
+      assert.equal(data.writable, true);
+      assert.ok(k.watcher, 'writable sab place starts the watcher');
+      data.writeFile('/b.txt', 'b');
+      assert.equal(
+        fs.readFileSync(path.join(root, 'data', 'b.txt'), 'utf8'),
+        'b',
+      );
+      data.appendFile('/b.txt', 'b');
+      data.mkdir('/d');
+      assert.ok(fs.statSync(path.join(root, 'data', 'd')).isDirectory());
+      data.mkdir('/nested/deep', { recursive: true });
+      assert.ok(
+        fs.statSync(path.join(root, 'data', 'nested', 'deep')).isDirectory(),
+      );
+      data.rename('/b.txt', '/d/c.txt');
+      data.unlink('/a.txt');
+      data.rm('/d', { recursive: true });
+      data.rm('/nested', { recursive: true });
+      assert.deepEqual(fs.readdirSync(path.join(root, 'data')), []);
+    } finally {
+      k.close();
+      rm(root);
+    }
   });
 });

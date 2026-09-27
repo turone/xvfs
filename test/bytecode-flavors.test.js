@@ -53,13 +53,16 @@ describe('bytecode flavors: coexistence', () => {
       {},
       { preparers: wrap },
     );
-    await k.fs('v').writeFile('/h.js', '({ user }) => `hi ${user}`');
-    const place = k.registry.get('v');
-    assert.notEqual(place.bytecode('/h.js', 'script'), null);
-    assert.equal(place.bytecode('/h.js', 'require'), null);
-    assert.equal(place.files.has(bytecodeKey('/h.js', 'require')), false);
-    k.close();
-    rm(root);
+    try {
+      await k.fs('v').writeFile('/h.js', '({ user }) => `hi ${user}`');
+      const place = k.registry.get('v');
+      assert.notEqual(place.bytecode('/h.js', 'script'), null);
+      assert.equal(place.bytecode('/h.js', 'require'), null);
+      assert.equal(place.files.has(bytecodeKey('/h.js', 'require')), false);
+    } finally {
+      k.close();
+      rm(root);
+    }
   });
 
   it('only require.compile is configured: only the require companion exists', async () => {
@@ -71,13 +74,16 @@ describe('bytecode flavors: coexistence', () => {
         require: { compile: true },
       },
     });
-    await k.fs('v').writeFile('/h.js', 'module.exports = 1;');
-    const place = k.registry.get('v');
-    assert.equal(place.bytecode('/h.js', 'script'), null);
-    assert.notEqual(place.bytecode('/h.js', 'require'), null);
-    assert.equal(place.files.has(bytecodeKey('/h.js', 'script')), false);
-    k.close();
-    rm(root);
+    try {
+      await k.fs('v').writeFile('/h.js', 'module.exports = 1;');
+      const place = k.registry.get('v');
+      assert.equal(place.bytecode('/h.js', 'script'), null);
+      assert.notEqual(place.bytecode('/h.js', 'require'), null);
+      assert.equal(place.files.has(bytecodeKey('/h.js', 'script')), false);
+    } finally {
+      k.close();
+      rm(root);
+    }
   });
 
   it('both flags on one prepared source: two distinct companions, one canonical entry', async () => {
@@ -99,62 +105,66 @@ describe('bytecode flavors: coexistence', () => {
       {},
       { preparers: wrap },
     );
-    await k.fs('v').writeFile('/h.js', '({ user }) => `hi ${user}`');
-    const place = k.registry.get('v');
-    const scriptCode = place.bytecode('/h.js', 'script');
-    const requireCode = place.bytecode('/h.js', 'require');
-    assert.notEqual(scriptCode, null);
-    assert.notEqual(requireCode, null);
-    assert.equal(
-      Buffer.from(scriptCode).equals(Buffer.from(requireCode)),
-      false,
-      'script and require bytecode are different bytes',
-    );
-    const sourceKeys = [...place.files.keys()].filter((key) => key === '/h.js');
-    assert.equal(sourceKeys.length, 1, 'canonical source stored once');
+    try {
+      await k.fs('v').writeFile('/h.js', '({ user }) => `hi ${user}`');
+      const place = k.registry.get('v');
+      const scriptCode = place.bytecode('/h.js', 'script');
+      const requireCode = place.bytecode('/h.js', 'require');
+      assert.notEqual(scriptCode, null);
+      assert.notEqual(requireCode, null);
+      assert.equal(
+        Buffer.from(scriptCode).equals(Buffer.from(requireCode)),
+        false,
+        'script and require bytecode are different bytes',
+      );
+      const sourceKeys = [...place.files.keys()].filter(
+        (key) => key === '/h.js',
+      );
+      assert.equal(sourceKeys.length, 1, 'canonical source stored once');
 
-    // Both cached data are accepted by their own consumer in another isolate.
-    const bundle = k.fs('v').script('/h.js');
-    const scriptResult = await runInWorker(
-      `
-      const vm = require('node:vm');
-      const { parentPort, workerData } = require('node:worker_threads');
-      const s = new vm.Script(workerData.source, { ...workerData.scriptOptions, cachedData: workerData.cachedData });
-      parentPort.postMessage({ rejected: s.cachedDataRejected, result: s.runInThisContext()({ user: 'ann' }) });
-      `,
-      {
-        source: bundle.source,
-        scriptOptions: bundle.scriptOptions,
-        cachedData: bundle.cachedData,
-      },
-    );
-    assert.equal(scriptResult.rejected, false);
-    assert.equal(scriptResult.result, 'hi ann');
+      // Both cached data are accepted by their own consumer in another isolate.
+      const bundle = k.fs('v').script('/h.js');
+      const scriptResult = await runInWorker(
+        `
+        const vm = require('node:vm');
+        const { parentPort, workerData } = require('node:worker_threads');
+        const s = new vm.Script(workerData.source, { ...workerData.scriptOptions, cachedData: workerData.cachedData });
+        parentPort.postMessage({ rejected: s.cachedDataRejected, result: s.runInThisContext()({ user: 'ann' }) });
+        `,
+        {
+          source: bundle.source,
+          scriptOptions: bundle.scriptOptions,
+          cachedData: bundle.cachedData,
+        },
+      );
+      assert.equal(scriptResult.rejected, false);
+      assert.equal(scriptResult.result, 'hi ann');
 
-    const { vfs, transferList } = k.link();
-    const requireResult = await runInWorker(
-      `
-      const { parentPort, workerData } = require('node:worker_threads');
-      const { attach } = require(${JSON.stringify(path.resolve(__dirname, '../index.js'))});
-      const kern = attach();
-      const Module = require('node:module');
-      const vm = require('node:vm');
-      const filePath = kern.fs('v').pathOf('/h.js');
-      const src = kern.fs('v').readFile('/h.js', 'utf8');
-      const s = new vm.Script(Module.wrap(src), { filename: filePath, cachedData: kern.bytecode(filePath) });
-      parentPort.postMessage({ rejected: s.cachedDataRejected });
-      `,
-      { vfs },
-      transferList,
-    );
-    assert.equal(
-      requireResult.rejected,
-      false,
-      'cachedDataRejected === false for the require flavor',
-    );
-
-    k.close();
-    rm(root);
+      const { vfs, transferList } = k.link();
+      const requireResult = await runInWorker(
+        `
+        const { parentPort, workerData } = require('node:worker_threads');
+        const { attach } = require(${JSON.stringify(path.resolve(__dirname, '../index.js'))});
+        const kern = attach();
+        const Module = require('node:module');
+        const vm = require('node:vm');
+        const filePath = kern.fs('v').pathOf('/h.js');
+        const src = kern.fs('v').readFile('/h.js', 'utf8');
+        const s = new vm.Script(Module.wrap(src), { filename: filePath, cachedData: kern.bytecode(filePath) });
+        parentPort.postMessage({ rejected: s.cachedDataRejected });
+        `,
+        { vfs },
+        transferList,
+      );
+      assert.equal(
+        requireResult.rejected,
+        false,
+        'cachedDataRejected === false for the require flavor',
+      );
+    } finally {
+      k.close();
+      rm(root);
+    }
   });
 
   // No cross-feed assertion on purpose. In a clean isolate V8 *does* reject
@@ -197,13 +207,16 @@ describe('bytecode flavors: failure and rollback', () => {
         },
       },
     );
-    await k.fs('v').writeFile('/h.js', 'anything');
-    const place = k.registry.get('v');
-    assert.notEqual(place.bytecode('/h.js', 'script'), null);
-    assert.equal(place.bytecode('/h.js', 'require'), null);
-    assert.equal(k.fs('v').readFile('/h.js', 'utf8'), 'let exports = 1;');
-    k.close();
-    rm(root);
+    try {
+      await k.fs('v').writeFile('/h.js', 'anything');
+      const place = k.registry.get('v');
+      assert.notEqual(place.bytecode('/h.js', 'script'), null);
+      assert.equal(place.bytecode('/h.js', 'require'), null);
+      assert.equal(k.fs('v').readFile('/h.js', 'utf8'), 'let exports = 1;');
+    } finally {
+      k.close();
+      rm(root);
+    }
   });
 
   it('fs.script.compile failure rejects the whole publication and keeps the previous version', async () => {
@@ -230,24 +243,31 @@ describe('bytecode flavors: failure and rollback', () => {
         },
       },
     );
-    const v = k.fs('v');
-    await v.writeFile('/h.js', '({ user }) => `hi ${user}`');
-    const before = k.cache.stats().totalUsed;
-    broken = true;
-    await assert.rejects(v.writeFile('/h.js', 'x => x'));
-    const after = k.cache.stats().totalUsed;
-    assert.equal(after, before, 'no leaked allocation from the failed attempt');
-    assert.equal(
-      v.readFile('/h.js', 'utf8'),
-      '(({ user }) => `hi ${user}`)',
-      'previous version still served',
-    );
-    // The queue recovers: a following good write succeeds.
-    broken = false;
-    await v.writeFile('/h.js', 'x => x * 2');
-    assert.equal(v.readFile('/h.js', 'utf8'), '(x => x * 2)');
-    k.close();
-    rm(root);
+    try {
+      const v = k.fs('v');
+      await v.writeFile('/h.js', '({ user }) => `hi ${user}`');
+      const before = k.cache.stats().totalUsed;
+      broken = true;
+      await assert.rejects(v.writeFile('/h.js', 'x => x'));
+      const after = k.cache.stats().totalUsed;
+      assert.equal(
+        after,
+        before,
+        'no leaked allocation from the failed attempt',
+      );
+      assert.equal(
+        v.readFile('/h.js', 'utf8'),
+        '(({ user }) => `hi ${user}`)',
+        'previous version still served',
+      );
+      // The queue recovers: a following good write succeeds.
+      broken = false;
+      await v.writeFile('/h.js', 'x => x * 2');
+      assert.equal(v.readFile('/h.js', 'utf8'), '(x => x * 2)');
+    } finally {
+      k.close();
+      rm(root);
+    }
   });
 
   // The fields of a refusal, and its message.
