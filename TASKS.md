@@ -151,28 +151,6 @@ Windows).
 **Done when.** Listings either use `path.sep` like native `node:fs` or
 document `/` as the contract, with a test pinning the choice on Windows.
 
-## P3 — `readFile()` out of shared memory runs slower than out of owned Buffers
-
-**Problem.** `readFile()` of a `sab` place — `Buffer.from(view)` over a
-SAB segment — ran 1.3–1.6× slower than the same copy out of a `map`
-place's own Buffer (`read.sab.8m.readFile` 1.32 ms against
-`read.map.8m.readFile` 0.84 ms, `doc/benchmarks.md`), while reads through
-a view (`Buffer.equals`, a JS loop) cost the same over both. The
-asymmetry depends on the size and on the destination: at 1 MiB a copy
-into a ready buffer is 16 µs/MiB from SAB against 14 from a Buffer; at
-8 MiB it is the other way round (20 against 46 µs/MiB); what is slower
-from SAB at 8 MiB is `Buffer.from` — a fresh allocation plus the copy —
-169–179 against 104–109 µs/MiB.
-
-**Cause.** Unknown; the difference sits in the allocation and the first
-touch of the destination Buffer when the source is a SAB view, not in
-reading the segment itself.
-
-**Done when.** The cause is found — in V8's allocation of the destination,
-or in the copy `Buffer.from` chooses for a view of a SharedArrayBuffer —
-and either avoided in `readFile()` or documented as a platform cost, with
-a measurement on Linux too.
-
 ## P3 — Public diagnostics
 
 **Problem.** Only the internal `retirements()` shows what the kernel holds.
