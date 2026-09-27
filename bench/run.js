@@ -24,6 +24,7 @@ const SCENARIOS = [
   'publish',
   'ack',
   'retain',
+  'memory',
   'watch',
   'compact',
   'require',

@@ -73,12 +73,49 @@ const muteWatcher = (k) => k.watcher.close();
 // Retired versions not freed yet.
 const retiredCount = (k) => k.retirements().length;
 
+// Bytes of the retired versions not freed yet.
+const retiredBytes = (k) =>
+  k.retirements().reduce((sum, record) => sum + record.bytes, 0);
+
 const MIB = 2 ** 20;
 
-const memory = (b, id, k) => {
+const pause = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
+// Process memory right after a collection, in MiB.
+const usage = () => {
   if (global.gc) global.gc();
-  const { rss } = process.memoryUsage();
-  b.value(`mem.${id}.rss`, 'MiB', 'lower', rss / MIB);
+  const { rss, heapUsed, external, arrayBuffers } = process.memoryUsage();
+  return {
+    rss: rss / MIB,
+    heapUsed: heapUsed / MIB,
+    external: external / MIB,
+    arrayBuffers: arrayBuffers / MIB,
+  };
+};
+
+// The same once it has settled: right after gc() the figures still count
+// the Buffers and segments the collection found dead — their backing
+// stores reach the OS later, and a segment can take one more cycle than
+// the views over it. Sampled again after a pause and a collection, at
+// least three times, until two samples agree (RSS within 1 MiB,
+// arrayBuffers within 0.5 MiB); twelve cycles at most.
+const settledUsage = async () => {
+  let last = usage();
+  for (let i = 0; i < 12; i++) {
+    await pause(100);
+    const next = usage();
+    const stable =
+      Math.abs(next.rss - last.rss) < 1 &&
+      Math.abs(next.arrayBuffers - last.arrayBuffers) < 0.5;
+    last = next;
+    if (stable && i >= 2) break;
+  }
+  return last;
+};
+
+const memory = (b, id, k) => {
+  const { rss } = usage();
+  b.value(`mem.${id}.rss`, 'MiB', 'lower', rss);
   if (k) b.value(`mem.${id}.pool`, 'MiB', 'lower', poolUsage(k).used / MIB);
 };
 
@@ -90,11 +127,15 @@ module.exports = {
   kernelOf,
   kernel,
   immediate,
+  pause,
   poolUsage,
   emptySegments,
   epoch,
   muteWatcher,
   retiredCount,
+  retiredBytes,
+  usage,
+  settledUsage,
   memory,
   MIB,
 };
