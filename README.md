@@ -22,7 +22,8 @@ is unsupported.
 [Patched `node:fs`](#patched-nodefs) · [Errors](#errors) ·
 [Protocol](#protocol) · [Examples](#examples) ·
 [Architecture](#architecture) · [Support](#support) ·
-[Design decisions](doc/architecture.md) · [Alternatives](doc/alternatives.md)
+[Design decisions](doc/architecture.md) · [Alternatives](doc/alternatives.md) ·
+[Benchmarks](doc/benchmarks.md)
 
 ## Features
 
@@ -1015,12 +1016,15 @@ compression, SEA, watcher, bootstrap, workers and strict routing
 behavior. The symlink test may be skipped on platforms where test
 symlinks are unavailable.
 
-`npm run bench [-- --only read,patch]` measures the hot paths — reads,
-streams, the patched `node:fs`, routing, publication, update → ACK →
-free, watcher epochs, compaction, `require` and `initialize()` — each
+`npm run bench [-- --only read,patch]` measures the hot paths — reads by
+size, leases (`views`), streams by size and `highWaterMark`, the patched
+`node:fs`, routing, publication, preparer results, update → ACK → free,
+updates under active leases (`retain`), the memory lifecycle of shared
+bytes, watcher epochs, compaction, `require`, `initialize()` and worker
+pools against `node:fs` and a per-worker Buffer cache (`pool`) — each
 scenario in its own process, and writes JSON to `.work/bench/`;
 `node bench/compare.js base.json new.json [--noise base2.json]` compares
-two runs.
+two runs. Results and method: [doc/benchmarks.md](doc/benchmarks.md).
 
 `npm run bench:ab -- <base> <new> [--only read,patch] [--pairs 4]`
 compares two revisions: both are exported with `git archive` into sibling

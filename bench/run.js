@@ -22,6 +22,7 @@ const SCENARIOS = [
   'patch',
   'router',
   'publish',
+  'preparer',
   'ack',
   'retain',
   'memory',
@@ -29,6 +30,7 @@ const SCENARIOS = [
   'compact',
   'require',
   'init',
+  'pool',
 ];
 
 const ROOT = path.join(__dirname, '..');
