@@ -762,6 +762,113 @@ describe('watcher: unstable source', () => {
       rm(root);
     }
   });
+
+  // A read that fails is rechecked once, after the debounce; when the file
+  // reads consistently then, the recheck publishes it, in one update. The
+  // fs.watch handles are closed: the epoch comes by hand, the recheck from
+  // its own timer.
+  it('a recheck that reads the file publishes it', async () => {
+    const root = writeTree(tmpDir('watch-recheck'), { 'site/a.txt': 'v1' });
+    const k = await kernel(
+      root,
+      { site: { fs: true } },
+      { watch: true, watchTimeout: 30 },
+    );
+    try {
+      k.watcher.close();
+      const site = k.fs('site');
+      const abs = path.join(root, 'site', 'a.txt');
+      fs.writeFileSync(abs, 'v2');
+      const real = k.cache.reader;
+      let attempts = 0;
+      k.cache.reader = async (file, view) => {
+        if (++attempts === 1) throw new Error('source changed during read');
+        return real(file, view);
+      };
+      const first = k.nextUpdateId;
+      k.watcher.emit('epoch', new Map([[abs, 'change']]));
+      await k.watchQueue.idle;
+      assert.equal(site.readFile('/a.txt', 'utf8'), 'v1', 'kept');
+      assert.equal(k.rechecks.size, 1, 'one deferred recheck');
+      const read = () => site.readFile('/a.txt', 'utf8') === 'v2';
+      assert.ok(await until(read, 4000), 'the recheck published it');
+      await k.watchQueue.idle;
+      assert.equal(attempts, 2);
+      assert.equal(k.rechecks.size, 0);
+      assert.equal(k.nextUpdateId - first, 1, 'one update');
+    } finally {
+      k.close();
+      rm(root);
+    }
+  });
+
+  // close() drops a pending recheck along with the kernel.
+  it('close() drops a pending recheck', async () => {
+    const root = writeTree(tmpDir('watch-recheck-close'), {
+      'site/a.txt': 'v1',
+    });
+    const k = await kernel(
+      root,
+      { site: { fs: true } },
+      { watch: true, watchTimeout: 60000 },
+    );
+    try {
+      k.watcher.close();
+      k.cache.reader = async () => {
+        throw new Error('source changed during read');
+      };
+      const abs = path.join(root, 'site', 'a.txt');
+      k.watcher.emit('epoch', new Map([[abs, 'change']]));
+      await k.watchQueue.idle;
+      assert.equal(k.rechecks.size, 1, 'one deferred recheck');
+      k.close();
+      assert.equal(k.rechecks.size, 0, 'none left to run');
+    } finally {
+      k.close();
+      rm(root);
+    }
+  });
+});
+
+// A map place of a disk origin keeps a copy of each file of its own, in
+// this thread: read at init through the kernel's reader, replaced by a
+// change and dropped by a delete, the watcher publishing into the place's
+// Map. Epochs by hand; the fs.watch handles are closed.
+describe('watcher: a map + disk place', () => {
+  it('reads its files at init, takes a change and a delete', async () => {
+    const root = writeTree(tmpDir('watch-map'), {
+      'm/a.txt': 'a1',
+      'm/sub/b.txt': 'b1',
+    });
+    const k = await kernel(
+      root,
+      { m: { provider: 'map', fs: true } },
+      { watch: true, watchTimeout: 60000 },
+    );
+    try {
+      k.watcher.close();
+      const m = k.fs('m');
+      const at = (...p) => path.join(root, 'm', ...p);
+      assert.equal(m.readFile('/a.txt', 'utf8'), 'a1');
+      assert.equal(m.readFile('/sub/b.txt', 'utf8'), 'b1');
+      fs.writeFileSync(at('a.txt'), 'a2');
+      fs.unlinkSync(at('sub', 'b.txt'));
+      k.watcher.emit(
+        'epoch',
+        new Map([
+          [at('a.txt'), 'change'],
+          [at('sub', 'b.txt'), 'delete'],
+        ]),
+      );
+      await k.watchQueue.idle;
+      assert.equal(m.readFile('/a.txt', 'utf8'), 'a2');
+      assert.equal(m.exists('/sub/b.txt'), false);
+      assert.deepEqual([...k.registry.get('m').files.keys()], ['/a.txt']);
+    } finally {
+      k.close();
+      rm(root);
+    }
+  });
 });
 
 describe('watcher: linux edge events', () => {

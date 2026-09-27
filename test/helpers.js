@@ -112,14 +112,21 @@ const nextEvent = (emitter, event) =>
 
 const nextMessage = (port) => nextEvent(port, 'message');
 
-// The bytes of a main kernel's pool in allocations — published, retired or
-// being published — whatever the segments they lie in: a leak of one
-// allocation shows here, where the count of segments hides it.
-const usedBytes = (k) => {
+// The bytes of a main kernel's pool in allocations that neither a published
+// entry nor a retired version accounts for: what a failed publication left
+// behind. 0 whenever no publication is in flight, whatever the ACKs still
+// pending; the count of segments hides such a leak inside a segment.
+const leakedBytes = (k) => {
   let used = 0;
   for (const id of k.cache.pool.segments.keys()) {
     used += k.cache.registry.used(id);
   }
+  for (const { entries } of k.cache.indexes.values()) {
+    for (const entry of entries.values()) {
+      if (entry.kind === 'shared') used -= entry.length;
+    }
+  }
+  for (const record of k.retired.values()) used -= record.entry.length;
   return used;
 };
 
@@ -176,6 +183,6 @@ module.exports = {
   nextEvent,
   nextMessage,
   diskCalls,
-  usedBytes,
+  leakedBytes,
   SMALL_MEMORY,
 };

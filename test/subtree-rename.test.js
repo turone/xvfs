@@ -11,6 +11,7 @@ const {
   worker,
   nextMessage,
   until,
+  leakedBytes,
 } = require('./helpers.js');
 
 // A directory rename inside one virtual place moves a subtree of raw
@@ -44,9 +45,9 @@ const outcome = async (fn) => {
 
 // Runs `fn` with a kernel over one place `v` (plus `other` of the same
 // config), then closes it.
-const withPlace = async (config, fn, options = {}) => {
+const withPlace = async (config, fn, options = {}, defaults = {}) => {
   const root = tmpDir('vfs-subtree');
-  const k = await kernel(root, { v: config, other: config }, {}, options);
+  const k = await kernel(root, { v: config, other: config }, defaults, options);
   try {
     await fn(k, k.fs('v'), (key) => path.join(root, 'v', key));
   } finally {
@@ -216,6 +217,43 @@ describe('virtual subtree rename', () => {
       assert.deepEqual(v.storedEncodings('/e/a.txt'), ['raw'], 'mixed tree');
       assert.deepEqual(keysUnder(k, 'v', '/d'), [], 'no companion stays');
     });
+  });
+
+  // A subtree moves in one publication or not at all. Each source is
+  // copied while the old versions are still published, so a pool without
+  // room for a copy of each refuses the move: the copies it made are freed,
+  // nothing moves and nothing is published.
+  it('sab: a pool too full for the whole subtree moves none of it', async () => {
+    const config = { origin: 'virtual', fs: { writable: true } };
+    const memory = {
+      limit: '8 kib',
+      segmentSize: '4 kib',
+      maxFileSize: '4 kib',
+    };
+    const tree = {
+      '/d/a': 'a'.repeat(2000),
+      '/d/b': 'b'.repeat(2000),
+      '/d/c': 'c'.repeat(2000),
+    };
+    await withPlace(
+      config,
+      async (k, v) => {
+        await write(v, tree);
+        const keys = keysUnder(k, 'v', '/');
+        const updates = k.nextUpdateId;
+        // Room for the copy of /d/a only.
+        const err = await outcome(() => v.rename('/d', '/e'));
+        assert.match(String(err?.message), /"\/d\/b" does not fit in SAB/);
+        assert.deepEqual(keysUnder(k, 'v', '/'), keys, 'nothing moved');
+        for (const [key, text] of Object.entries(tree)) {
+          assert.equal(v.readFile(key, 'utf8'), text, key);
+        }
+        assert.equal(k.nextUpdateId, updates, 'nothing published');
+        assert.equal(leakedBytes(k), 0, 'the copy made is freed');
+      },
+      {},
+      { memory },
+    );
   });
 
   it('sab: an old version still read retires until it is released', async () => {
