@@ -127,11 +127,17 @@ fits or its publication is refused. → README
 **One set of path rules on every platform.** Place keys are `/`-separated;
 a trailing separator names a directory, as on POSIX, on Windows too;
 routing is lexical — a path as `path.resolve` gives it, only a real `..`
-leaves `appRoot` — and never touches the disk. The watcher works around a
-Windows abort on 8.3 aliases in watched paths (nodejs/node#63638). A place
-segment spelled in another case, or a namespace form of a managed path
-(`\\?\C:\…`), is not recognized as the place's in this revision — an open
-item in `TASKS.md`. → README [Patched `node:fs`](../README.md#patched-nodefs),
+leaves `appRoot` — and never touches the disk. Names compare as the file
+system compares them: on Windows `appRoot` and a place's name in any case
+(`appRoot\RO\x` is place `ro`, prepared and read-only as ever), while a key
+keeps its case — and a key in another case never gets the raw file where
+the disk would answer. Under strict, UNC and namespace forms
+(`\\?\C:\…`, `\\localhost\C$\…`) are refused before any native I/O; 8.3
+names and NTFS stream suffixes are not recognized yet — an open item in
+`TASKS.md`. The watcher works around a Windows abort on 8.3 aliases in
+watched paths (nodejs/node#63638). → README
+[Strict routing](../README.md#strict-routing),
+[Patched `node:fs`](../README.md#patched-nodefs),
 [Support](../README.md#support).
 
 ## What it does not do
