@@ -233,12 +233,15 @@ stages nothing twice.
 
 **Disk work is bounded (`pool()`, `lib/pool.js`). An epoch runs its jobs
 `IO_LIMIT` (16) at a time: each logs its own failure and stops none of the
-others; a job the pool reaches after `close()` does not start, one in
-flight finishes as before; a rescan among them publishes its new files one
-at a time. A scan walks the tree one directory at a time, then stats the
-files it found 16 at a time, each result landing at its index: the result
-keeps the order of the walk. Init publishes `initConcurrency()` files at a
-time; the first failure stops the rest.**
+others; a job the pool reaches after `close()` does not start, and one in
+flight stops at its next step — the disk call it waits for finishes (a
+read of a file it began, to its end), no other starts, no preparer runs, a
+scan stops its walk and its stats (`stopped`), and nothing is logged; a
+rescan among them publishes its new files one at a time. A
+scan walks the tree one directory at a time, then stats the files it found
+16 at a time, each result landing at its index: the result keeps the order
+of the walk. Init publishes `initConcurrency()` files at a time; the first
+failure stops the rest.**
 _Why:_ a read holds a file descriptor from open to close — an unbounded
 epoch of 2000 changed files failed half of them with `EMFILE` at
 `ulimit -n 1024` — and 16 keeps the libuv threadpool busy: 4 was slower,
@@ -1011,8 +1014,9 @@ workers call `attach()`.** _Why:_ preloads do not run in worker threads.
   reused, never returned to the OS.
 - Source and companions of a file are published in one `vfs-update`.
 - Watcher epochs never overlap; the jobs of one run at most `IO_LIMIT` at a
-  time, one that fails holds up nothing else, and none starts after
-  `close()`.
+  time, one that fails holds up nothing else, none starts after `close()`,
+  and one in flight at `close()` starts no disk call after it beyond the
+  rest of a read it began, and runs no preparer.
 - A closed kernel publishes nothing and arms no timer: a watcher event
   whose `stat` lands after `close()` is dropped.
 - Companions never appear in `readdir`, `exists`, routing or the patched fs;
@@ -1090,7 +1094,9 @@ stat        { size, mtimeMs } (+ sourceSize, encoding for compressed companions)
   in-thread links (`test/helpers.js`: `tap`, `worker`, `nextMessage`)
   instead of timers. Tests over real `fs.watch` events or real workers wait
   only for a condition to become true (`until`); nothing sleeps to prove
-  that something did not happen.
+  that something did not happen. The disk calls a closed kernel starts are
+  counted with async_hooks (`diskCalls()`), which sees the functions the
+  library captured as well.
 - Hooks are installed only inside a test and uninstalled in `after` /
   `finally`; bootstrap tests run child processes.
 - glob captures the `node:fs` functions it walks with when it is loaded,

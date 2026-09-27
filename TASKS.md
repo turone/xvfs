@@ -230,17 +230,6 @@ source and `dest`.
 **Done when.** The refusal carries the operation's `syscall`, `path` and
 `dest`, with a test.
 
-## P3 — A watcher job in flight at `close()` logs a `TypeError`
-
-**Problem.** A job of an epoch still running when `close()` is called
-goes on over the cleared kernel: the delete of a file reaches its
-unpublish over the cleared sources, a directory rescan finds no source,
-and the closed kernel logs `[vfs] update: Cannot read properties of
-undefined (reading 'has')`. Jobs the pool has not started do not start.
-
-**Done when.** A job that resumes after `close()` returns without work or
-log, with a test that counts the disk calls after `close()`.
-
 ## P3 — `close()` during `initialize()` of a map place with files
 
 **Problem.** `initialize()` rejects with `TypeError: Cannot read properties

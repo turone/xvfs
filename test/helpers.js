@@ -3,6 +3,7 @@
 const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
+const { createHook } = require('node:async_hooks');
 const { VfsConfig } = require('../lib/config.js');
 const { VfsKernel } = require('../lib/kernel.js');
 
@@ -111,6 +112,45 @@ const nextEvent = (emitter, event) =>
 
 const nextMessage = (port) => nextEvent(port, 'message');
 
+// The asynchronous disk calls this process starts from now on — node:fs
+// requests of every form, a file handle's close included: async_hooks sees
+// each one, whatever function made it, captured at load (lib/disk.js) or
+// public. `started(n)` settles once n have started, in the turn the n-th
+// starts — before any of them can complete — or fails after `ms`; stop()
+// ends the count.
+const DISK_CALL = /^(?:FSREQ|FILEHANDLECLOSEREQ)/;
+
+const diskCalls = (ms = 4000) => {
+  let count = 0;
+  const waits = [];
+  const hook = createHook({
+    init(asyncId, type) {
+      if (!DISK_CALL.test(type)) return;
+      count++;
+      for (const wait of waits) if (count >= wait.n) wait.done();
+    },
+  }).enable();
+  return {
+    get count() {
+      return count;
+    },
+    started(n) {
+      if (count >= n) return Promise.resolve();
+      return new Promise((resolve, reject) => {
+        const late = setTimeout(() => {
+          reject(new Error(`${count} of ${n} disk calls started`));
+        }, ms);
+        const done = () => {
+          clearTimeout(late);
+          resolve();
+        };
+        waits.push({ n, done });
+      });
+    },
+    stop: () => hook.disable(),
+  };
+};
+
 module.exports = {
   quiet,
   tmpDir,
@@ -124,5 +164,6 @@ module.exports = {
   worker,
   nextEvent,
   nextMessage,
+  diskCalls,
   SMALL_MEMORY,
 };
