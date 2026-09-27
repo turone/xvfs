@@ -670,9 +670,13 @@ into listings (the facade serves the same territory). Cached extensions stay
 VFS-only under strict; module hooks never fall back. `fs.fallback` governs
 reads only: mutations follow `fs.writable`, and a disk write reaches the VFS
 only through the watcher — a file outside the cache filters never enters
-SAB. An explicit `'disk'` needs a finite `fs.ext`: without one every file is
-cached and no disk territory is left (the non-strict default still resolves
-to `'disk'`, which then means its permissive reads). Its disk territory is a
+SAB. A place without a finite `fs.ext` caches every file and has no disk
+territory of files: there `'disk'` means the permissive reads of the
+non-strict default and is accepted as input — a resolved config is valid
+input — while under strict it is a config error, since nothing would be
+served from disk and `'deny'` is what the place would do; resolving it to
+`'deny'` silently was rejected, as was accepting it (it would list disk
+directories the routing then refuses). Its disk territory is a
 route of its own (`'disk'`): native for reads, but a listing (`readdir`,
 `opendir`) is always the place's — disk directories and uncached files
 only, cached extensions from the published collection — even for a
