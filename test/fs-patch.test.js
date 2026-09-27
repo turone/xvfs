@@ -15,6 +15,7 @@ const {
   existsSync: onDisk,
   readFileSync: readDisk,
   readdirSync: listDisk,
+  writeFileSync: writeDisk,
 } = fs;
 
 // fs-patch executes router decisions; these tests exercise node:fs itself
@@ -943,5 +944,126 @@ describe('fs-patch under strict: open with a flag that writes', () => {
     for (const args of READS) {
       assert.deepEqual(await openEach(file, args), ['ok', 'ok', 'ok']);
     }
+  });
+});
+
+// fs.openAsBlob reads through a native binding, past every node:fs function
+// the patch replaces. Unrouted, it read what the places hide and the raw file
+// behind a prepared entry. It is routed as readFile is.
+
+describe('fs-patch: openAsBlob', () => {
+  let root;
+  let outside;
+  let k;
+  const at = (...p) => path.join(root, ...p);
+  const upper = (raw) => raw.toString().toUpperCase();
+
+  before(async () => {
+    root = writeTree(tmpDir('fspatch-blob'), {
+      'pub/a.txt': 'prepared',
+      'pub/raw.bin': 'territory',
+      'stray/s.txt': 'unmanaged',
+    });
+    outside = writeTree(tmpDir('fspatch-blob-out'), { 'o.txt': 'outside' });
+    k = await kernel(
+      root,
+      {
+        pub: { fs: { ext: ['txt'], fallback: 'disk', prepare: 'upper' } },
+        mem: { provider: 'map', origin: 'virtual', fs: { writable: true } },
+      },
+      { strict: true },
+      { preparers: { upper } },
+    );
+    // A cached extension written after the scan: hidden under strict.
+    writeDisk(at('pub', 'late.txt'), 'late');
+    k.fs('mem').writeFile('/m.txt', 'virtual');
+    fsPatch.install(k);
+  });
+
+  after(() => {
+    fsPatch.uninstall();
+    k.close();
+    rm(root);
+    rm(outside);
+  });
+
+  // The error of a call, whether it rejects or — as node:fs does for its
+  // own refusals of this call today — throws before the promise.
+  const failure = async (fn) => {
+    try {
+      await fn();
+      return null;
+    } catch (err) {
+      return err;
+    }
+  };
+
+  it('a hidden path is refused before anything is read', async () => {
+    for (const file of [
+      at('pub', 'late.txt'),
+      at('stray', 's.txt'),
+      at('mem', 'nope.txt'),
+    ]) {
+      await assert.rejects(fs.openAsBlob(file), (err) => {
+        refused(err, { code: 'EACCES', file, args: [] });
+        return true;
+      });
+    }
+  });
+
+  it('a published entry is a Blob over its canonical content', async () => {
+    const blob = await fs.openAsBlob(at('pub', 'a.txt'), {
+      type: 'text/plain',
+    });
+    assert.equal(await blob.text(), 'PREPARED', 'prepared, not the raw file');
+    assert.equal(blob.size, 8);
+    assert.equal(blob.type, 'text/plain');
+    assert.equal((await fs.openAsBlob(at('pub', 'a.txt'))).type, '');
+    const virtual = await fs.openAsBlob(at('mem', 'm.txt'));
+    assert.equal(await virtual.text(), 'virtual');
+    // A Blob is a copy: a later write does not change it.
+    k.fs('mem').writeFile('/m.txt', 'changed');
+    assert.equal(await virtual.text(), 'virtual');
+    assert.equal(
+      await (await fs.openAsBlob(Buffer.from(at('mem', 'm.txt')))).text(),
+      'changed',
+    );
+  });
+
+  it('a directory is EISDIR; the disk territory and the outside stay native', async () => {
+    for (const dir of [at('pub'), at('mem'), root]) {
+      await assert.rejects(fs.openAsBlob(dir), {
+        code: 'EISDIR',
+        syscall: 'read',
+      });
+    }
+    assert.equal(
+      await (await fs.openAsBlob(at('pub', 'raw.bin'))).text(),
+      'territory',
+    );
+    assert.equal(
+      await (await fs.openAsBlob(path.join(outside, 'o.txt'))).text(),
+      'outside',
+    );
+    // node:fs's own refusal of a missing file, in its own form.
+    const missing = await failure(() =>
+      fs.openAsBlob(path.join(outside, 'missing.txt')),
+    );
+    assert.equal(missing?.code, 'ERR_INVALID_ARG_VALUE');
+  });
+
+  it('options are checked as node:fs checks them', async () => {
+    for (const file of [at('pub', 'a.txt'), at('mem', 'm.txt')]) {
+      await assert.rejects(fs.openAsBlob(file, 'text/plain'), {
+        code: 'ERR_INVALID_ARG_TYPE',
+      });
+      await assert.rejects(fs.openAsBlob(file, { type: 5 }), {
+        code: 'ERR_INVALID_ARG_TYPE',
+      });
+    }
+    const native = await failure(() =>
+      fs.openAsBlob(path.join(outside, 'o.txt'), 'text/plain'),
+    );
+    assert.equal(native?.code, 'ERR_INVALID_ARG_TYPE');
   });
 });
