@@ -872,7 +872,8 @@ routing every compound native operation stays within these limits; strict
 is a routing and access boundary, not an OS sandbox.
 
 **1. Implemented** — served by the places; sync, callback and promises
-forms: `readFile`, `stat`, `lstat`, `access`, `realpath`, `readdir`,
+forms: `readFile`, `stat`, `lstat`, `access`, `realpath` (its `.native`
+variants too), `readdir`,
 `opendir`, `existsSync`, `createReadStream`, `openAsBlob`, `writeFile`,
 `appendFile`, `unlink`, `mkdir`, `rm`, `rename`, `copyFile` and a
 non-recursive `cp` (see [Copies and renames](#copies-and-renames)).
