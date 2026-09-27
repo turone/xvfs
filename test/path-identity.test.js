@@ -4,9 +4,10 @@ const { describe, it, before, after } = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
+const { pathToFileURL } = require('node:url');
 const fsPatch = require('../lib/adapters/fs-patch.js');
 const moduleHook = require('../lib/adapters/module-hook.js');
-const { tmpDir, writeTree, rm, kernel } = require('./helpers.js');
+const { tmpDir, writeTree, rm, kernel, drain } = require('./helpers.js');
 
 // The disk as it is, behind the patch: captured before any install.
 const { existsSync: onDisk, readFileSync: readDisk } = fs;
@@ -21,6 +22,7 @@ const WINDOWS_ONLY = WIN ? false : 'Windows: file names compare without case';
 
 const PREPARERS = {
   up: (raw) => raw.toString().toUpperCase(),
+  mark: (raw) => `<${raw}>`,
   mod: (raw) => raw.toString().replace("'raw'", "'prepared'"),
 };
 
@@ -211,6 +213,151 @@ for (const strict of [false, true]) {
         assert.equal(fs.existsSync(here), true);
         const parent = path.dirname(root).toUpperCase();
         assert.ok(fs.readdirSync(parent).includes(path.basename(root)));
+      });
+    },
+  );
+}
+
+// A key keeps its case in the index, while the disk takes it in any. Where
+// the disk would answer a miss — the non-strict `fs.fallback: 'disk'`,
+// Node's own module loader without strict — a published source held in
+// memory, named in another case, answers as its own spelling does: never
+// its raw file. Strict refuses it as any unpublished path; 'deny' refuses
+// it always. A directory in another case is no published directory, and a
+// virtual place keeps exact keys.
+
+const KEY_PLACES = {
+  pub: { fs: { ext: ['txt'], fallback: 'disk', prepare: { mark: ['txt'] } } },
+  lock: { fs: { ext: ['txt'], fallback: 'deny', prepare: { mark: ['txt'] } } },
+  mods: {
+    require: { ext: ['js'], prepare: 'mod' },
+    import: { ext: ['mjs'], prepare: 'mod' },
+  },
+  vmod: {
+    provider: 'map',
+    origin: 'virtual',
+    fs: { writable: true },
+    require: true,
+  },
+};
+
+const KEY_TREE = {
+  'pub/a.txt': 'raw',
+  'pub/Sub/Mixed.TXT': 'raw',
+  'pub/Sub/pic.png': 'pic',
+  'pub/m.bin': 'media',
+  'lock/a.txt': 'raw',
+  'lock/Sub/b.txt': 'raw',
+  'mods/m.js': "module.exports = 'raw';",
+  'mods/e.mjs': "export default 'raw';",
+};
+
+for (const strict of [false, true]) {
+  describe(
+    `Windows: a key in another case (strict: ${strict})`,
+    { skip: WINDOWS_ONLY },
+    () => {
+      let root;
+      let k;
+      const at = (...p) => path.join(root, ...p);
+
+      before(async () => {
+        root = writeTree(tmpDir('case-keys'), KEY_TREE);
+        const options = { preparers: PREPARERS };
+        k = await kernel(root, KEY_PLACES, { strict }, options);
+        fsPatch.install(k);
+        moduleHook.install(k);
+      });
+
+      after(() => {
+        moduleHook.uninstall();
+        fsPatch.uninstall();
+        k.close();
+        rm(root);
+      });
+
+      it("fs.fallback: 'disk' serves the published source, or refuses it", async () => {
+        const variants = [
+          at('pub', 'A.TXT'),
+          at('pub', 'a.Txt'),
+          at('pub', 'sub', 'mixed.txt'),
+          at('PUB', 'SUB', 'MIXED.TXT'),
+        ];
+        for (const file of variants) {
+          if (strict) {
+            assert.throws(
+              () => fs.readFileSync(file),
+              refused('EACCES', 'open', file),
+            );
+            assert.throws(() => fs.statSync(file), { code: 'EACCES' });
+            assert.equal(fs.existsSync(file), false, file);
+            continue;
+          }
+          assert.equal(fs.readFileSync(file, 'utf8'), '<raw>', file);
+          assert.equal(fs.statSync(file).size, 5, file);
+          assert.equal(fs.existsSync(file), true, file);
+          assert.equal(String(await drain(fs.createReadStream(file))), '<raw>');
+          // No descriptor to the raw file: as its own spelling, ENOTSUP.
+          assert.throws(() => fs.openSync(file), {
+            code: 'ENOTSUP',
+            syscall: 'open',
+            path: file,
+          });
+        }
+        // Its own spelling; the disk territory in any case.
+        assert.equal(fs.readFileSync(at('pub', 'a.txt'), 'utf8'), '<raw>');
+        assert.equal(fs.readFileSync(at('pub', 'M.BIN'), 'utf8'), 'media');
+      });
+
+      it("fs.fallback: 'deny' refuses it", () => {
+        const file = at('lock', 'A.TXT');
+        assert.throws(
+          () => fs.readFileSync(file),
+          refused('EACCES', 'open', file),
+        );
+        assert.equal(fs.readFileSync(at('lock', 'a.txt'), 'utf8'), '<raw>');
+      });
+
+      // As before: 'disk' lists what its disk territory holds there — the
+      // published files only under their own spelling — and 'deny' refuses.
+      it('a directory in another case is no published directory', () => {
+        assert.deepEqual(fs.readdirSync(at('pub', 'Sub')), [
+          'Mixed.TXT',
+          'pic.png',
+        ]);
+        assert.deepEqual(fs.readdirSync(at('pub', 'SUB')), ['pic.png']);
+        const locked = at('lock', 'SUB');
+        assert.throws(
+          () => fs.readdirSync(locked),
+          refused('EACCES', 'scandir', locked),
+        );
+        assert.deepEqual(fs.readdirSync(at('lock', 'Sub')), ['b.txt']);
+      });
+
+      it('require and import load the published module, or none', async () => {
+        const cjs = at('mods', 'M.JS');
+        const esm = pathToFileURL(at('mods', 'E.MJS')).href;
+        if (strict) {
+          assert.throws(() => require(cjs), { code: 'MODULE_NOT_FOUND' });
+          await assert.rejects(import(esm), { code: 'ERR_MODULE_NOT_FOUND' });
+        } else {
+          assert.equal(require(cjs), 'prepared');
+          assert.equal((await import(esm)).default, 'prepared');
+        }
+        assert.equal(require(at('mods', 'm.js')), 'prepared');
+        // V8 cached data is looked up by the key as spelled.
+        assert.ok(k.bytecode(at('mods', 'm.js')));
+        assert.equal(k.bytecode(cjs), null);
+      });
+
+      it('a virtual place keeps exact keys', () => {
+        k.fs('vmod').writeFile('/a.js', "module.exports = 'virtual';");
+        assert.equal(require(at('vmod', 'a.js')), 'virtual');
+        const other = at('vmod', 'A.JS');
+        assert.throws(() => require(other), { code: 'MODULE_NOT_FOUND' });
+        assert.equal(fs.existsSync(other), false);
+        const code = strict ? 'EACCES' : 'ENOENT';
+        assert.throws(() => fs.readFileSync(other), { code, path: other });
       });
     },
   );

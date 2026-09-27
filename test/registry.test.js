@@ -9,6 +9,10 @@ const {
   resolvedFor,
   listedNames,
 } = require('../lib/registry.js');
+const { Place } = require('../lib/place.js');
+const { VfsConfig } = require('../lib/config.js');
+const { VfsKernel } = require('../lib/kernel.js');
+const { quiet } = require('./helpers.js');
 
 // Lexical containment: only a real `..` component leaves appRoot. Names that
 // merely start with dots are ordinary names routed by the usual Place rules.
@@ -204,6 +208,130 @@ describe('PlaceRegistry.route: a place named as the platform compares names', ()
       key: '',
     });
     assert.equal(registry.route('/SRV/app/api/x'), null);
+  });
+});
+
+// Where the disk would answer a path the index misses — the non-strict
+// `fs.fallback: 'disk'` and Node's own module loader — a published source
+// held in memory, named in another case, is served as that source, never
+// raw from a case-insensitive disk (Place.spelling); strict refuses it as
+// any unpublished path, and 'deny' always does. A disk-backed entry is
+// read from disk by the name given, and a virtual place keeps exact keys.
+// The places are built for a case-insensitive platform, so this holds on
+// any host; path-identity.test.js runs it through node:fs on Windows.
+describe('a published source named in another case, where the disk would answer', () => {
+  const root = path.resolve('/srv/app');
+  const at = (...parts) => path.join(root, ...parts);
+  const file = (text) => ({
+    data: Buffer.from(text),
+    stat: { size: text.length, mtimeMs: 0 },
+  });
+  // A kernel never initialized, its places projected by hand, each as a
+  // case-insensitive platform builds it.
+  const kernelOf = (strict) => {
+    const config = new VfsConfig({
+      defaults: { strict },
+      places: {
+        site: { fs: { ext: ['txt'], fallback: 'disk', prepare: 'up' } },
+        locked: { fs: { ext: ['txt'], fallback: 'deny' } },
+        v: { origin: 'virtual', fs: { writable: true }, require: true },
+        lib: { require: true },
+      },
+    });
+    const k = new VfsKernel(config, { appRoot: root, console: quiet });
+    for (const pc of config.places) {
+      k.registry.register(new Place(pc, root, true));
+    }
+    const files = (name) => k.registry.get(name).files;
+    files('site').set('/a.txt', file('A'));
+    files('site').set('/Sub/B.txt', file('B'));
+    const big = { size: 1, mtimeMs: 0 };
+    files('site').set('/big.txt', { data: null, path: at('big'), stat: big });
+    files('locked').set('/a.txt', file('A'));
+    files('v').set('/a.txt', file('A'));
+    files('v').set('/a.js', file('module.exports = 1;'));
+    files('lib').set('/m.js', file('module.exports = 1;'));
+    return k;
+  };
+
+  it('without strict: the source, never the raw file', () => {
+    const k = kernelOf(false);
+    const site = k.registry.get('site');
+    const lib = k.registry.get('lib');
+    try {
+      const routes = [
+        [at('site', 'A.TXT'), { kind: 'file', place: site, key: '/a.txt' }],
+        [at('site', 'a.Txt'), { kind: 'file', place: site, key: '/a.txt' }],
+        [
+          at('site', 'sub', 'b.TXT'),
+          { kind: 'file', place: site, key: '/Sub/B.txt' },
+        ],
+        [at('site', 'A.TXT') + '/', { kind: 'deny', code: 'ENOTDIR' }],
+        // Disk-backed: the disk answers for the name given, as before.
+        [at('site', 'BIG.txt'), { kind: 'disk', place: site, key: '/BIG.txt' }],
+        [at('site', 'big.txt'), { kind: 'passthrough' }],
+        // What the place does not publish is its disk's to answer.
+        [
+          at('site', 'none.txt'),
+          { kind: 'disk', place: site, key: '/none.txt' },
+        ],
+        [at('site', 'm.BIN'), { kind: 'disk', place: site, key: '/m.BIN' }],
+        // A directory in another case is no published directory.
+        [at('site', 'SUB'), { kind: 'disk', place: site, key: '/SUB' }],
+        // No disk answers: 'deny' refuses, a virtual place keeps exact keys.
+        [at('locked', 'A.TXT'), { kind: 'deny', code: 'EACCES' }],
+        [at('v', 'A.TXT'), { kind: 'passthrough' }],
+      ];
+      for (const [p, route] of routes) {
+        assert.deepEqual(k.routeRead(p), route, p);
+      }
+      const found = k.resolveModule(at('lib', 'M.JS'), 'require');
+      assert.deepEqual([found.place, found.key], [lib, '/m.js']);
+      assert.equal(k.resolveModule(at('lib', 'n.js'), 'require'), null);
+      assert.equal(k.resolveModule(at('v', 'A.JS'), 'require'), null);
+      assert.equal(k.resolveModule(at('v', 'a.js'), 'require').key, '/a.js');
+    } finally {
+      k.close();
+    }
+  });
+
+  it('under strict: refused as any unpublished path', () => {
+    const k = kernelOf(true);
+    const site = k.registry.get('site');
+    try {
+      const refused = { kind: 'deny', code: 'EACCES' };
+      assert.deepEqual(k.routeRead(at('site', 'A.TXT')), refused);
+      assert.deepEqual(k.routeRead(at('site', 'sub', 'b.txt')), refused);
+      assert.deepEqual(k.routeRead(at('site', 'a.txt')), {
+        kind: 'file',
+        place: site,
+        key: '/a.txt',
+      });
+      assert.deepEqual(k.resolveModule(at('lib', 'M.JS'), 'require'), {
+        denied: true,
+      });
+    } finally {
+      k.close();
+    }
+  });
+
+  it('a disk-origin place knows other spellings; a virtual one exact keys', () => {
+    const config = new VfsConfig({
+      places: {
+        site: { fs: true },
+        v: { origin: 'virtual', fs: { writable: true } },
+      },
+    });
+    const places = (caseless) =>
+      config.places.map((pc) => new Place(pc, root, caseless));
+    const [site, v] = places(true);
+    site.files.set('/a.txt', file('A'));
+    v.files.set('/a.txt', file('A'));
+    assert.equal(site.spelling('/A.TXT'), '/a.txt');
+    assert.equal(v.spelling('/A.TXT'), null);
+    const [exact] = places(false);
+    exact.files.set('/a.txt', file('A'));
+    assert.equal(exact.spelling('/A.TXT'), null);
   });
 });
 

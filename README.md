@@ -484,6 +484,16 @@ places: {
   territory.
 - The fallback never reaches another place or an unmanaged sibling;
   `fs.writable` stays independent; `require` / `import` never fall back.
+- A key keeps its case, while a Windows disk takes a name in any. Without
+  strict, a path naming a published file held in memory in another case
+  (`A.TXT` for `a.txt`) is that file — its canonical, prepared content,
+  never the raw one — for `node:fs` and for `require` / `import` (a module
+  so loaded runs without V8 cached data, which is looked up by the key as
+  spelled); a disk-backed file is read from disk by the name given, as
+  before. Under strict another case is refused like any unpublished path,
+  and `'deny'` always refuses it. A directory named in another case is no
+  published directory: `'disk'` lists what its disk territory holds there,
+  `'deny'` refuses it. A virtual place keeps exact keys on every platform.
 - Virtual, `sea`, `disk` and `node-default` places have no directory to
   fall back to: `fs.fallback` is `null` there and setting it is a config
   error.
