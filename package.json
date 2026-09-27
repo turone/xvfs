@@ -21,19 +21,34 @@
   },
   "homepage": "https://github.com/turone/shared-memory-fs",
   "main": "index.js",
+  "types": "index.d.ts",
   "exports": {
-    ".": "./index.js",
-    "./register": "./lib/bootstrap/register.mjs",
-    "./adapters/fs-patch": "./lib/adapters/fs-patch.js",
-    "./adapters/module-hook": "./lib/adapters/module-hook.js"
+    ".": {
+      "types": "./index.d.ts",
+      "default": "./index.js"
+    },
+    "./register": {
+      "types": "./lib/bootstrap/register.d.mts",
+      "default": "./lib/bootstrap/register.mjs"
+    },
+    "./adapters/fs-patch": {
+      "types": "./lib/adapters/fs-patch.d.ts",
+      "default": "./lib/adapters/fs-patch.js"
+    },
+    "./adapters/module-hook": {
+      "types": "./lib/adapters/module-hook.d.ts",
+      "default": "./lib/adapters/module-hook.js"
+    }
   },
   "files": [
     "lib/",
-    "index.js"
+    "index.js",
+    "index.d.ts"
   ],
   "scripts": {
     "test": "node --test \"test/*.test.js\"",
     "test:examples": "node --test \"test-examples/examples-smoke.test.js\"",
+    "test:types": "tsc -p test-types --noEmit",
     "bench": "node bench/run.js",
     "bench:ab": "node bench/ab.js",
     "lint": "eslint . && prettier -c .",
@@ -51,6 +66,7 @@
     "eslint-config-metarhia": "^8.2.2",
     "eslint-config-prettier": "^9.1.0",
     "eslint-plugin-prettier": "^5.0.0",
-    "prettier": "^3.3.3"
+    "prettier": "^3.3.3",
+    "typescript": "^7.0.2"
   }
 }
