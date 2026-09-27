@@ -510,6 +510,11 @@ places: {
   and `'deny'` always refuses it. A directory named in another case is no
   published directory: `'disk'` lists what its disk territory holds there,
   `'deny'` refuses it. A virtual place keeps exact keys on every platform.
+- A place without a finite `fs.ext` caches every file and has no disk
+  territory of files: `'disk'` is accepted there without strict — it means
+  the permissive reads of the default, so a resolved config is valid input
+  — and is a config error under strict, where nothing would be served from
+  disk.
 - Virtual, `sea`, `disk` and `node-default` places have no directory to
   fall back to: `fs.fallback` is `null` there and setting it is a config
   error.

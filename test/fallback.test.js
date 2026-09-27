@@ -11,7 +11,11 @@ const moduleHook = require('../lib/adapters/module-hook.js');
 const { tmpDir, writeTree, rm, kernel } = require('./helpers.js');
 
 // Disk edits behind the VFS's back: captured before any patch is installed.
-const { writeFileSync: writeDisk, readdirSync: listDisk } = fs;
+const {
+  writeFileSync: writeDisk,
+  readdirSync: listDisk,
+  mkdirSync: mkdirDisk,
+} = fs;
 
 // Strict appRoot as a managed root, and `fs.fallback` — what a disk-origin
 // place does with a path it does not serve: 'deny' (published canonical
@@ -60,6 +64,13 @@ describe('fs.fallback: config', () => {
       resolved({ a: { fs: { ext: ['html'], fallback: 'deny' } } }),
       ['deny'],
     );
+    // The value the non-strict default resolves to is valid input: on a
+    // place without a finite ext it means the same permissive reads.
+    assert.deepEqual(resolved({ a: { fs: { fallback: 'disk' } } }), ['disk']);
+    assert.deepEqual(
+      resolved({ a: { fs: { fallback: 'disk' }, require: true } }),
+      ['disk'],
+    );
     const cli = VfsConfig.fromArgv(
       ['node', 'app', '--', '--vfs.defaults.strict=true'],
       { places: { a: { fs: { ext: ['html'] } } } },
@@ -90,9 +101,25 @@ describe('fs.fallback: config', () => {
       { a: { provider: 'node-default', fs: { fallback: 'disk' } } },
       /not applicable to provider "node-default"/,
     );
-    fails(
+    // Under strict an unrestricted place would serve nothing from disk.
+    for (const places of [
       { a: { fs: { fallback: 'disk' } } },
-      /"disk" needs a finite ext list/,
+      { a: { provider: 'map', fs: { fallback: 'disk' }, import: true } },
+    ]) {
+      assert.throws(
+        () => new VfsConfig({ places, defaults: { strict: true } }),
+        /places\.a\.fs\.fallback: "disk" needs a finite ext list under strict/,
+      );
+    }
+    assert.throws(
+      () =>
+        VfsConfig.fromArgv(
+          ['node', 'app', '--', '--vfs.defaults.strict=true'],
+          {
+            places: { a: { fs: { fallback: 'disk' } } },
+          },
+        ),
+      /needs a finite ext list under strict/,
     );
   });
 
@@ -598,6 +625,44 @@ describe("fs.fallback: 'disk' — the non-strict default", () => {
       fsPatch.uninstall();
       k.close();
       rm(root);
+    }
+  });
+
+  // An unrestricted place caches every file: 'disk' leaves it no disk
+  // territory of files, and set explicitly it means what the default means.
+  it('an unrestricted place: the explicit value behaves as the default', async () => {
+    for (const site of [{ fs: true }, { fs: { fallback: 'disk' } }]) {
+      const root = writeTree(tmpDir('vfs-loose-all'), {
+        'site/index.html': '<h1>',
+        'site/media/clip.mp4': 'MP4',
+      });
+      const k = await kernel(root, { site });
+      fsPatch.install(k);
+      try {
+        const at = (...p) => path.join(root, 'site', ...p);
+        assert.equal(k.registry.get('site').config.fs.fallback, 'disk');
+        // Every extension is cached: written after the scan, a file is
+        // readable (permissive) but listed only once published.
+        writeDisk(at('media', 'late.html'), 'late');
+        mkdirDisk(at('later'));
+        writeDisk(at('later', 'x.bin'), 'x');
+        assert.equal(fs.readFileSync(at('media', 'late.html'), 'utf8'), 'late');
+        assert.equal(fs.readFileSync(at('later', 'x.bin'), 'utf8'), 'x');
+        assert.deepEqual(fs.readdirSync(at('media')), ['clip.mp4']);
+        assert.deepEqual(fs.readdirSync(at('later')), []);
+        assert.deepEqual(fs.readdirSync(at(), { recursive: true }), [
+          'index.html',
+          'later',
+          'media',
+          'media/clip.mp4',
+        ]);
+        assert.deepEqual(k.fs('site').readdir('/later'), []);
+        assert.equal(k.fs('site').readFile('/later/x.bin'), null, 'cached ext');
+      } finally {
+        fsPatch.uninstall();
+        k.close();
+        rm(root);
+      }
     }
   });
 });

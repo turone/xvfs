@@ -151,16 +151,6 @@ Windows).
 **Done when.** Listings either use `path.sep` like native `node:fs` or
 document `/` as the contract, with a test pinning the choice on Windows.
 
-## P3 — `fs.fallback: 'disk'` on a place without `fs.ext`
-
-**Problem.** Without strict, a disk-origin place with no `fs.ext` resolves
-`fs.fallback` to `'disk'` (its permissive reads), yet the same value set
-explicitly is a config error ("needs a finite ext list"). A resolved config
-should be valid input.
-
-**Done when.** Either the explicit value is accepted with that meaning, or
-the default resolves to another value — decided, documented and tested.
-
 ## P3 — glob and virtual entries
 
 **Problem.** glob captures the `node:fs` functions it walks with when it is
