@@ -5,13 +5,17 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
-const { pathToFileURL } = require('node:url');
+const { pathToFileURL, fileURLToPath } = require('node:url');
 const fsPatch = require('../lib/adapters/fs-patch.js');
 const moduleHook = require('../lib/adapters/module-hook.js');
 const { tmpDir, writeTree, rm, kernel, drain } = require('./helpers.js');
 
 // The disk as it is, behind the patch: captured before any install.
-const { existsSync: onDisk, readFileSync: readDisk } = fs;
+const {
+  existsSync: onDisk,
+  readFileSync: readDisk,
+  readdirSync: listDisk,
+} = fs;
 
 // Windows file systems take one name in any case: appRoot and a place's
 // name in another case route as their own spelling does — prepared
@@ -379,44 +383,69 @@ const NAMESPACES = !WIN
 // The admin share of a path on a drive: `\\localhost\C$\…`.
 const adminShare = (abs) => `\\\\localhost\\${abs[0]}$${abs.slice(2)}`;
 
-// A path on a drive, spelled through a namespace or a share — the last
-// through a server that does not exist.
+// A server that does not exist: strict asks no network about it.
+const NO_HOST = 'smfs-no-such-host.invalid';
+
+// A path on a drive in the UNC and namespace spellings Windows takes for
+// it: the NT prefix and the device namespace, with `\` or `/`; the root of
+// the object namespace; an admin share by name and by address, with `\`
+// or `/`, and behind either prefix; a server that does not exist.
 const namespaceForms = (abs) => {
-  const slashed = abs.replace(/\\/g, '/');
-  const share = adminShare(abs).slice('\\\\localhost\\'.length);
+  const slashed = (s) => s.replace(/\\/g, '/');
+  const share = `${abs[0]}$${abs.slice(2)}`;
   return [
     `\\\\?\\${abs}`,
-    `//?/${slashed}`,
+    `//?/${slashed(abs)}`,
     `\\\\.\\${abs}`,
+    `//./${slashed(abs)}`,
     `\\??\\${abs}`,
-    `/??/${slashed}`,
-    adminShare(abs),
-    `//127.0.0.1/${share.replace(/\\/g, '/')}`,
+    `/??/${slashed(abs)}`,
+    `\\\\?\\GLOBALROOT\\??\\${abs}`,
+    `\\\\localhost\\${share}`,
+    `//localhost/${slashed(share)}`,
+    `\\\\127.0.0.1\\${share}`,
+    `//127.0.0.1/${slashed(share)}`,
     `\\\\?\\UNC\\localhost\\${share}`,
-    `\\\\smfs-no-such-host.invalid\\share${abs.slice(2)}`,
+    `\\\\.\\UNC\\localhost\\${share}`,
+    `\\\\${NO_HOST}\\share${abs.slice(2)}`,
   ];
 };
 
 // node:fs itself, counted: set before the patch is installed, these are
-// the originals it passes a call through to.
-const NATIVE = [
-  ...['readFileSync', 'readFile', 'statSync', 'lstatSync', 'accessSync'],
-  ...['existsSync', 'realpathSync', 'readdirSync', 'opendirSync'],
-  ...['openSync', 'createReadStream', 'watch', 'writeFileSync', 'mkdirSync'],
-  ...['appendFileSync', 'unlinkSync', 'rmSync', 'renameSync', 'linkSync'],
-  ...['copyFileSync', 'cpSync'],
+// the originals it passes a call through to — for every family the tests
+// below call, in its sync, callback and promise forms.
+const FS_CALLS = [
+  ...['readFile', 'stat', 'lstat', 'access', 'realpath', 'open', 'readlink'],
+  ...['statfs', 'readdir', 'opendir', 'writeFile', 'appendFile', 'truncate'],
+  ...['unlink', 'rm', 'rmdir', 'mkdir', 'utimes', 'lutimes', 'chmod'],
+  ...['chown', 'lchown', 'symlink', 'rename', 'copyFile', 'cp', 'link'],
 ];
 const countNative = () => {
   const calls = [];
-  const saved = NATIVE.map((name) => [fs, name, fs[name]]);
-  saved.push([fs.promises, 'readFile', fs.promises.readFile]);
-  for (const [target, name, original] of saved) {
+  const targets = [
+    ...FS_CALLS.flatMap((name) => [
+      [fs, name, name],
+      [fs, `${name}Sync`, `${name}Sync`],
+      [fs.promises, name, `promises.${name}`],
+    ]),
+    ...['watch', 'watchFile', 'existsSync', 'createReadStream'].map((name) => [
+      fs,
+      name,
+      name,
+    ]),
+    [fs.promises, 'watch', 'promises.watch'],
+  ];
+  const saved = [];
+  for (const [target, name, label] of targets) {
+    const original = target[name];
+    if (typeof original !== 'function') continue;
     const counted = (...args) => {
-      calls.push(name);
+      calls.push(label);
       return original.apply(target, args);
     };
     if (original.native) counted.native = original.native;
     target[name] = counted;
+    saved.push([target, name, original]);
   }
   const restore = () => {
     for (const [target, name, original] of saved) target[name] = original;
@@ -424,9 +453,145 @@ const countNative = () => {
   return { calls, restore };
 };
 
+// A callback call, settled as a promise.
+const called = (call) =>
+  new Promise((resolve, reject) => {
+    call((err) => (err ? reject(err) : resolve()));
+  });
+
+// A watch not refused is stopped at once: a regression fails, it does not
+// keep the process alive.
+const watchOnce = (p, options) => fs.watch(p, options).close();
+const watchFileOnce = (p) => {
+  const listener = () => {};
+  fs.watchFile(p, listener);
+  fs.unwatchFile(p, listener);
+};
+const watchNext = (p) => {
+  const aborted = new AbortController();
+  const watcher = fs.promises.watch(p, { signal: aborted.signal });
+  const next = watcher[Symbol.asyncIterator]().next();
+  aborted.abort();
+  return next;
+};
+
+// A write stream, ended: its error, or its finish.
+const written = (stream) =>
+  new Promise((resolve, reject) => {
+    stream.once('error', reject);
+    stream.end('x', (err) => (err ? reject(err) : resolve()));
+  });
+
+// The families of node:fs over one path: [call, syscall, run].
+const FILE_READS = [
+  ['readFileSync', 'open', (p) => fs.readFileSync(p)],
+  ['readFile', 'open', (p) => called((cb) => fs.readFile(p, cb))],
+  ['promises.readFile', 'open', (p) => fs.promises.readFile(p)],
+  ['statSync', 'stat', (p) => fs.statSync(p)],
+  ['stat', 'stat', (p) => called((cb) => fs.stat(p, cb))],
+  ['promises.stat', 'stat', (p) => fs.promises.stat(p)],
+  ['lstatSync', 'lstat', (p) => fs.lstatSync(p)],
+  ['promises.lstat', 'lstat', (p) => fs.promises.lstat(p)],
+  ['accessSync', 'access', (p) => fs.accessSync(p)],
+  ['promises.access', 'access', (p) => fs.promises.access(p)],
+  ['realpathSync', 'lstat', (p) => fs.realpathSync(p)],
+  ['realpath', 'lstat', (p) => called((cb) => fs.realpath(p, cb))],
+  ['promises.realpath', 'lstat', (p) => fs.promises.realpath(p)],
+  ['openSync', 'open', (p) => fs.openSync(p)],
+  ['open', 'open', (p) => called((cb) => fs.open(p, cb))],
+  ['promises.open', 'open', (p) => fs.promises.open(p)],
+  ['createReadStream', 'open', (p) => drain(fs.createReadStream(p))],
+  ['readlinkSync', 'readlink', (p) => fs.readlinkSync(p)],
+  ['promises.readlink', 'readlink', (p) => fs.promises.readlink(p)],
+  ['statfsSync', 'statfs', (p) => fs.statfsSync(p)],
+  ['watch', 'watch', (p) => watchOnce(p)],
+  ['watchFile', 'watch', (p) => watchFileOnce(p)],
+  ['promises.watch', 'watch', (p) => watchNext(p)],
+];
+const DIR_READS = [
+  ['readdirSync', 'scandir', (p) => fs.readdirSync(p)],
+  [
+    'readdirSync recursive',
+    'scandir',
+    (p) => fs.readdirSync(p, { recursive: true }),
+  ],
+  ['readdir', 'scandir', (p) => called((cb) => fs.readdir(p, cb))],
+  ['promises.readdir', 'scandir', (p) => fs.promises.readdir(p)],
+  ['opendirSync', 'opendir', (p) => fs.opendirSync(p)],
+  ['promises.opendir', 'opendir', (p) => fs.promises.opendir(p)],
+  ['watch recursive', 'watch', (p) => watchOnce(p, { recursive: true })],
+];
+const FILE_MUTATIONS = [
+  ['writeFileSync', 'open', (p) => fs.writeFileSync(p, 'x')],
+  ['writeFile', 'open', (p) => called((cb) => fs.writeFile(p, 'x', cb))],
+  ['promises.writeFile', 'open', (p) => fs.promises.writeFile(p, 'x')],
+  ['appendFileSync', 'open', (p) => fs.appendFileSync(p, 'x')],
+  ['promises.appendFile', 'open', (p) => fs.promises.appendFile(p, 'x')],
+  ['openSync w', 'open', (p) => fs.openSync(p, 'w')],
+  ['promises.open w', 'open', (p) => fs.promises.open(p, 'w')],
+  ['createWriteStream', 'open', (p) => written(fs.createWriteStream(p))],
+  ['truncateSync', 'open', (p) => fs.truncateSync(p)],
+  ['promises.truncate', 'open', (p) => fs.promises.truncate(p)],
+  ['unlinkSync', 'unlink', (p) => fs.unlinkSync(p)],
+  ['unlink', 'unlink', (p) => called((cb) => fs.unlink(p, cb))],
+  ['promises.unlink', 'unlink', (p) => fs.promises.unlink(p)],
+  ['rmSync', 'rm', (p) => fs.rmSync(p)],
+  ['promises.rm', 'rm', (p) => fs.promises.rm(p)],
+  ['utimesSync', 'utime', (p) => fs.utimesSync(p, 1, 1)],
+  ['lutimesSync', 'lutime', (p) => fs.lutimesSync(p, 1, 1)],
+  ['promises.utimes', 'utime', (p) => fs.promises.utimes(p, 1, 1)],
+  ['chmodSync', 'chmod', (p) => fs.chmodSync(p, 0o644)],
+  ['promises.chmod', 'chmod', (p) => fs.promises.chmod(p, 0o644)],
+  ['chownSync', 'chown', (p) => fs.chownSync(p, 0, 0)],
+  ['lchownSync', 'chown', (p) => fs.lchownSync(p, 0, 0)],
+  ['symlinkSync', 'symlink', (p) => fs.symlinkSync(__filename, p)],
+];
+const DIR_MUTATIONS = [
+  ['mkdirSync', 'mkdir', (p) => fs.mkdirSync(p)],
+  ['mkdirSync recursive', 'mkdir', (p) => fs.mkdirSync(p, { recursive: true })],
+  ['promises.mkdir', 'mkdir', (p) => fs.promises.mkdir(p)],
+  ['rmdirSync', 'rmdir', (p) => fs.rmdirSync(p)],
+  ['promises.rmdir', 'rmdir', (p) => fs.promises.rmdir(p)],
+  [
+    'rmSync recursive',
+    'rm',
+    (p) => fs.rmSync(p, { recursive: true, force: true }),
+  ],
+];
+// Over two paths: [call, syscall, run(from, to)].
+const PAIRS = [
+  ['renameSync', 'rename', (a, b) => fs.renameSync(a, b)],
+  ['rename', 'rename', (a, b) => called((cb) => fs.rename(a, b, cb))],
+  ['promises.rename', 'rename', (a, b) => fs.promises.rename(a, b)],
+  ['copyFileSync', 'copyfile', (a, b) => fs.copyFileSync(a, b)],
+  ['promises.copyFile', 'copyfile', (a, b) => fs.promises.copyFile(a, b)],
+  ['cpSync', 'cp', (a, b) => fs.cpSync(a, b)],
+  ['cpSync recursive', 'cp', (a, b) => fs.cpSync(a, b, { recursive: true })],
+  ['promises.cp', 'cp', (a, b) => fs.promises.cp(a, b)],
+  ['linkSync', 'link', (a, b) => fs.linkSync(a, b)],
+  ['promises.link', 'link', (a, b) => fs.promises.link(a, b)],
+];
+
+// Every family over every spelling of the targets: EACCES, the path and
+// the destination as given.
+const refusesAll = async (families, targets) => {
+  for (const target of targets) {
+    for (const p of namespaceForms(target)) {
+      for (const [call, syscall, run] of families) {
+        await assert.rejects(
+          async () => run(p),
+          refused('EACCES', syscall, p),
+          `${call} ${p}`,
+        );
+      }
+    }
+  }
+};
+
 const NS_PLACES = {
   ro: PLACES.ro,
   rw: PLACES.rw,
+  v: PLACES.v,
   lib: { require: { prepare: 'mod' }, import: { ext: ['mjs'] } },
 };
 
@@ -444,12 +609,14 @@ describe(
   { skip: NAMESPACES },
   () => {
     let root;
+    let outside;
     let k;
     let native;
     const at = (...p) => path.join(root, ...p);
 
     before(async () => {
       root = writeTree(tmpDir('ns'), NS_TREE);
+      outside = tmpDir('ns-outside');
       const options = { preparers: PREPARERS };
       k = await kernel(root, NS_PLACES, { strict: true }, options);
       native = countNative();
@@ -463,95 +630,167 @@ describe(
       native.restore();
       k.close();
       rm(root);
+      rm(outside);
+      delete globalThis.__smfsSide;
     });
 
-    it('reads and listings: EACCES, the path as given, nothing reaches node:fs', async () => {
+    it('reads, listings and watches in every form: EACCES, nothing reaches node:fs', async () => {
       native.calls.length = 0;
-      const outside = namespaceForms(path.resolve(__filename));
-      for (const file of [
-        ...namespaceForms(at('ro', 'h.bin')),
-        ...namespaceForms(at('ro', 'a.txt')),
-        ...outside,
-      ]) {
-        const eacces = (syscall) => refused('EACCES', syscall, file);
-        assert.throws(() => fs.readFileSync(file), eacces('open'));
-        assert.throws(() => fs.statSync(file), eacces('stat'));
-        assert.throws(() => fs.lstatSync(file), eacces('lstat'));
-        assert.throws(() => fs.accessSync(file), eacces('access'));
-        assert.throws(() => fs.realpathSync(file), eacces('lstat'));
-        assert.throws(() => fs.openSync(file), eacces('open'));
-        assert.equal(fs.existsSync(file), false, file);
-        await assert.rejects(fs.promises.readFile(file), eacces('open'));
-        await assert.rejects(
-          new Promise((resolve, reject) =>
-            fs.readFile(file, (err) => (err ? reject(err) : resolve())),
-          ),
-          eacces('open'),
-        );
-        await assert.rejects(drain(fs.createReadStream(file)), eacces('open'));
-      }
-      for (const dir of namespaceForms(at('ro'))) {
-        const eacces = (syscall) => refused('EACCES', syscall, dir);
-        assert.throws(() => fs.readdirSync(dir), eacces('scandir'));
-        assert.throws(() => fs.opendirSync(dir), eacces('opendir'));
-        assert.throws(() => fs.watch(dir), eacces('watch'));
+      const files = [
+        at('ro', 'h.bin'),
+        at('ro', 'a.txt'),
+        at('lib', 'side.js'),
+      ];
+      // What lies outside appRoot is refused in such a form too.
+      await refusesAll(FILE_READS, [...files, path.resolve(__filename)]);
+      const dirs = [at('ro'), at('rw'), root, path.dirname(root)];
+      await refusesAll(DIR_READS, dirs);
+      for (const file of [...files, path.resolve(__filename)]) {
+        for (const p of namespaceForms(file)) {
+          assert.equal(fs.existsSync(p), false, p);
+        }
       }
       assert.deepEqual(native.calls, []);
     });
 
-    it('writes: EACCES, nothing reaches node:fs, nothing changes', () => {
+    it('writes, removals and metadata in every form: EACCES, nothing changes', async () => {
       native.calls.length = 0;
-      const plain = (name) => at('rw', name);
-      for (const [i, form] of namespaceForms(at('rw', 'new.txt')).entries()) {
-        const eacces = (syscall) => refused('EACCES', syscall, form);
-        assert.throws(() => fs.writeFileSync(form, 'x'), eacces('open'));
-        assert.throws(() => fs.openSync(form, 'w'), eacces('open'));
-        const w = namespaceForms(plain('w.txt'))[i];
-        const wEacces = (syscall) => refused('EACCES', syscall, w);
-        assert.throws(() => fs.appendFileSync(w, 'x'), wEacces('open'));
-        assert.throws(() => fs.unlinkSync(w), wEacces('unlink'));
-        assert.throws(() => fs.rmSync(w), wEacces('rm'));
-        const d = namespaceForms(plain('d'))[i];
-        assert.throws(() => fs.mkdirSync(d), refused('EACCES', 'mkdir', d));
-        const pairs = [
-          ['renameSync', 'rename', w, plain('z.txt')],
-          ['renameSync', 'rename', plain('w.txt'), form],
-          ['copyFileSync', 'copyfile', at('ro', 'a.txt'), form],
-          ['copyFileSync', 'copyfile', w, plain('c.txt')],
-          ['cpSync', 'cp', w, plain('c.txt')],
-          ['linkSync', 'link', w, plain('l.txt')],
-        ];
-        for (const [call, syscall, from, to] of pairs) {
-          assert.throws(
-            () => fs[call](from, to),
-            refused('EACCES', syscall, from, to),
+      const files = [at('rw', 'w.txt'), at('rw', 'new.txt'), at('ro', 'a.txt')];
+      await refusesAll(FILE_MUTATIONS, [...files, at('v', 'x.txt')]);
+      await refusesAll(DIR_MUTATIONS, [at('rw', 'd'), at('rw'), root]);
+      assert.deepEqual(native.calls, []);
+      assert.equal(readDisk(at('rw', 'w.txt'), 'utf8'), 'w');
+      assert.equal(readDisk(at('ro', 'a.txt'), 'utf8'), 'raw');
+      assert.equal(onDisk(at('rw', 'new.txt')), false);
+      assert.equal(onDisk(at('rw', 'd')), false);
+      assert.deepEqual(k.fs('v').readdir('/'), []);
+    });
+
+    it('copies, renames and links from or to such a form: EACCES, nothing moves', async () => {
+      native.calls.length = 0;
+      const w = at('rw', 'w.txt');
+      const plain = [
+        [w, at('rw', 'z.txt')],
+        [at('ro', 'a.txt'), path.join(outside, 'a.txt')],
+        [__filename, path.join(outside, 'here.js')],
+      ];
+      for (const [from, to] of plain) {
+        for (const form of namespaceForms(from)) {
+          for (const [call, syscall, run] of PAIRS) {
+            await assert.rejects(
+              async () => run(form, to),
+              refused('EACCES', syscall, form, to),
+              `${call} ${form}`,
+            );
+          }
+        }
+      }
+      for (const into of namespaceForms(at('rw', 'into.txt'))) {
+        for (const [call, syscall, run] of PAIRS) {
+          await assert.rejects(
+            async () => run(w, into),
+            refused('EACCES', syscall, w, into),
+            `${call} to ${into}`,
           );
         }
       }
       assert.deepEqual(native.calls, []);
-      assert.equal(readDisk(at('rw', 'w.txt'), 'utf8'), 'w');
-      for (const name of ['new.txt', 'd', 'z.txt', 'c.txt', 'l.txt']) {
+      assert.equal(readDisk(w, 'utf8'), 'w');
+      for (const name of ['z.txt', 'into.txt']) {
         assert.equal(onDisk(at('rw', name)), false, name);
       }
+      assert.deepEqual(fs.readdirSync(outside), []);
     });
 
     it('require and import: not found, never loaded', async () => {
       const side = at('lib', 'side.js');
       for (const form of namespaceForms(side)) {
-        assert.throws(() => require(form), { code: 'MODULE_NOT_FOUND' });
+        assert.throws(() => require(form), {
+          code: 'MODULE_NOT_FOUND',
+          message: /\(vfs: not published\)/,
+        });
       }
-      const url = `file://127.0.0.1/${root[0]}$${at('lib', 'e.mjs')
-        .slice(2)
-        .replace(/\\/g, '/')}`;
-      await assert.rejects(import(url), { code: 'ERR_MODULE_NOT_FOUND' });
+      // An import names a form where a file: URL keeps it: an address, a
+      // server that does not exist.
+      let imported = 0;
+      for (const form of namespaceForms(at('lib', 'e.mjs'))) {
+        let url = null;
+        try {
+          url = pathToFileURL(form).href;
+          if (fileURLToPath(url) !== form) continue;
+        } catch {
+          continue;
+        }
+        imported++;
+        await assert.rejects(import(url), {
+          code: 'ERR_MODULE_NOT_FOUND',
+          message: /\(vfs: not published\)/,
+        });
+      }
+      assert.ok(imported >= 2, `${imported} forms kept by a file: URL`);
       assert.equal(globalThis.__smfsSide, undefined);
       assert.equal(globalThis.__smfsEsm, undefined);
       assert.equal(require(side), 'prepared');
     });
 
+    // The path in an error is the caller's, verbatim: not lower-cased, not
+    // resolved, not the key of the entry it names.
+    it('an error names the path as the caller spelled it', () => {
+      const upper = path.join(root.toUpperCase(), 'RO');
+      const read = (p) => fs.readFileSync(p);
+      const cases = [
+        ['EACCES', 'open', `\\\\?\\${path.join(upper, 'H.bin')}`, read],
+        ['EACCES', 'open', adminShare(path.join(upper, 'a.TXT')), read],
+        ['EACCES', 'open', `//?/${upper.replace(/\\/g, '/')}/a.TXT`, read],
+        // A key in another case: strict and 'deny' refuse it.
+        ['EACCES', 'open', at('ro', 'A.TXT'), read],
+        [
+          'EROFS',
+          'open',
+          path.join(upper, 'X.txt'),
+          (p) => fs.writeFileSync(p, 'x'),
+        ],
+      ];
+      const reason = {
+        EACCES: 'permission denied',
+        EROFS: 'read-only file system',
+      };
+      for (const [code, syscall, given, run] of cases) {
+        assert.notEqual(given, given.toLowerCase());
+        assert.throws(
+          () => run(given),
+          (err) => {
+            assert.equal(err.code, code, given);
+            assert.equal(err.path, given);
+            const message = `${code}: ${reason[code]}, ${syscall} '${given}'`;
+            assert.equal(err.message, message);
+            return true;
+          },
+        );
+      }
+      const from = path.join(upper, 'a.TXT');
+      const to = path.join(upper, 'B.txt');
+      assert.throws(() => fs.renameSync(from, to), {
+        code: 'EROFS',
+        path: from,
+        dest: to,
+        message: `EROFS: read-only file system, rename '${from}' -> '${to}'`,
+      });
+      const spec = `\\\\?\\${path.join(root.toUpperCase(), 'LIB', 'Side.js')}`;
+      assert.throws(
+        () => require(spec),
+        (err) => {
+          assert.equal(err.code, 'MODULE_NOT_FOUND');
+          const named = `Cannot find module '${spec}' imported from `;
+          assert.ok(err.message.startsWith(named), err.message);
+          assert.ok(err.message.endsWith(' (vfs: not published)'));
+          return true;
+        },
+      );
+    });
+
     it('a path on a drive outside appRoot is node:fs as before', () => {
       native.calls.length = 0;
-      const outside = tmpDir('ns-outside');
       const file = path.join(outside, 'o.txt');
       try {
         fs.writeFileSync(file, 'o');
@@ -564,7 +803,7 @@ describe(
         assert.ok(native.calls.includes('writeFileSync'));
         assert.ok(native.calls.includes('readFileSync'));
       } finally {
-        rm(outside);
+        fs.rmSync(file, { force: true });
       }
     });
 
@@ -600,6 +839,17 @@ describe(
     let root;
     let k;
     const at = (...p) => path.join(root, ...p);
+    // The disk as it answers without the patch, for any spelling but of a
+    // server that does not exist.
+    const reachable = (abs) =>
+      namespaceForms(abs).filter((p) => !p.includes(NO_HOST));
+    const outcome = (run) => {
+      try {
+        return { value: String(run()) };
+      } catch (err) {
+        return { code: err.code };
+      }
+    };
 
     before(async () => {
       root = writeTree(tmpDir('ns-open'), NS_TREE);
@@ -613,6 +863,7 @@ describe(
       fsPatch.uninstall();
       k.close();
       rm(root);
+      delete globalThis.__smfsSide;
     });
 
     it('node:fs reads what the path names: a namespace is no routing boundary', () => {
@@ -621,9 +872,40 @@ describe(
       for (const form of [
         `\\\\?\\${hidden}`,
         `//?/${hidden.replace(/\\/g, '/')}`,
+        `\\\\?\\GLOBALROOT\\??\\${hidden}`,
       ]) {
         assert.equal(fs.readFileSync(form, 'utf8'), 'hidden', form);
       }
+      assert.deepEqual(fs.readdirSync(`\\\\?\\${at('ro')}`), [
+        'a.txt',
+        'h.bin',
+      ]);
+    });
+
+    it('every form answers as node:fs answers it without the patch', () => {
+      for (const file of [at('ro', 'h.bin'), at('ro', 'a.txt')]) {
+        for (const p of reachable(file)) {
+          const read = (f) => f(p, 'utf8');
+          assert.deepEqual(
+            outcome(() => read(fs.readFileSync)),
+            outcome(() => read(readDisk)),
+            p,
+          );
+          assert.equal(fs.existsSync(p), onDisk(p), p);
+        }
+      }
+      for (const p of reachable(at('ro'))) {
+        assert.deepEqual(
+          outcome(() => fs.readdirSync(p).join()),
+          outcome(() => listDisk(p).join()),
+          p,
+        );
+      }
+    });
+
+    it('a write in such a form lands where node:fs puts it', () => {
+      fs.writeFileSync(`\\\\?\\${at('ro', 'stray.bin')}`, 'x');
+      assert.equal(readDisk(at('ro', 'stray.bin'), 'utf8'), 'x');
     });
 
     it('through an admin share too', (t) => {
@@ -646,7 +928,6 @@ describe(
       }
       assert.equal(require(share), 'raw');
       assert.equal(require(side), 'prepared');
-      delete globalThis.__smfsSide;
     });
   },
 );
@@ -654,7 +935,8 @@ describe(
 describe('Windows, strict: an appRoot on a share', { skip: NAMESPACES }, () => {
   it('routes the paths below it in any case, refuses its other UNC spellings', async (t) => {
     const local = writeTree(tmpDir('ns-share'), NS_TREE);
-    const share = adminShare(local);
+    // By address: a file: URL keeps it, which the module hooks need.
+    const share = adminShare(local).replace('localhost', '127.0.0.1');
     if (!onDisk(share)) {
       rm(local);
       t.skip('the admin share is not available');
@@ -663,6 +945,7 @@ describe('Windows, strict: an appRoot on a share', { skip: NAMESPACES }, () => {
     const options = { preparers: PREPARERS };
     const k = await kernel(share, NS_PLACES, { strict: true }, options);
     fsPatch.install(k);
+    moduleHook.install(k);
     try {
       const a = path.join(share, 'ro', 'a.txt');
       const upper = path.join(share.toUpperCase(), 'RO', 'a.txt');
@@ -670,15 +953,23 @@ describe('Windows, strict: an appRoot on a share', { skip: NAMESPACES }, () => {
       for (const file of spellings) {
         assert.equal(fs.readFileSync(file, 'utf8'), 'RAW', file);
       }
+      assert.deepEqual(fs.readdirSync(share), ['lib', 'ro', 'rw', 'v']);
       const hidden = path.join(share, 'ro', 'h.bin');
       assert.throws(
         () => fs.readFileSync(hidden),
         refused('EACCES', 'open', hidden),
       );
+      const fresh = path.join(share, 'RO', 'x.txt');
+      assert.throws(
+        () => fs.writeFileSync(fresh, 'x'),
+        refused('EROFS', 'open', fresh),
+      );
+      assert.equal(require(path.join(share, 'LIB', 'side.js')), 'prepared');
       const others = [
         `\\\\?\\UNC${hidden.slice(1)}`,
-        hidden.replace('\\\\localhost\\', '\\\\127.0.0.1\\'),
+        hidden.replace('\\\\127.0.0.1\\', '\\\\localhost\\'),
         `\\\\?\\${path.join(local, 'ro', 'a.txt')}`,
+        path.join(share, '..', 'other', 'x'),
       ];
       for (const other of others) {
         assert.throws(
@@ -686,10 +977,14 @@ describe('Windows, strict: an appRoot on a share', { skip: NAMESPACES }, () => {
           refused('EACCES', 'open', other),
         );
       }
+      const module = adminShare(path.join(local, 'lib', 'side.js'));
+      assert.throws(() => require(module), { code: 'MODULE_NOT_FOUND' });
     } finally {
+      moduleHook.uninstall();
       fsPatch.uninstall();
       k.close();
       rm(local);
+      delete globalThis.__smfsSide;
     }
   });
 });

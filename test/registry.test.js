@@ -256,6 +256,7 @@ describe('PlaceRegistry: UNC and namespace paths', () => {
       ...['\\\\?\\UNC\\localhost\\C$\\app\\ro\\x', '\\/127.0.0.1/C$/app'],
       ...['\\\\.\\UNC\\localhost\\C$\\app', '\\\\?\\GLOBALROOT\\Device\\x'],
       ...['\\\\srv\\share\\x', '\\\\srv\\share', '\\\\?\\D:\\x', '//C:/app'],
+      ...['\\\\?\\GLOBALROOT\\??\\C:\\app\\ro\\x', '//./C:/app/ro/x'],
       // What the module hooks make of `\??\C:\…`: no name holds a `?`.
       ...['D:\\??\\C:\\app\\ro\\x', 'C:/??/x'],
       // A server named like a drive, below appRoot to path.relative.
