@@ -3,6 +3,7 @@
 const { describe, it, before, after } = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
+const os = require('node:os');
 const path = require('node:path');
 const { pathToFileURL } = require('node:url');
 const fsPatch = require('../lib/adapters/fs-patch.js');
@@ -362,3 +363,333 @@ for (const strict of [false, true]) {
     },
   );
 }
+
+// Under strict a UNC or namespace path — `\\?\…`, `\\.\…`, `\??\…`,
+// `\\server\share\…`, an admin share `\\localhost\C$\…`, with `/` or `\` —
+// may name a file below appRoot in a spelling appRoot does not share: it
+// is refused before any native I/O, whatever it names and whether the
+// share exists. Without strict it passes through, as before. The paths
+// are spelled from the test's own root, on its drive.
+
+const ON_DRIVE = /^[A-Za-z]:\\/.test(os.tmpdir());
+const NAMESPACES = !WIN
+  ? 'Windows: UNC and namespace paths'
+  : !ON_DRIVE && 'the temporary directory is not on a drive';
+
+// The admin share of a path on a drive: `\\localhost\C$\…`.
+const adminShare = (abs) => `\\\\localhost\\${abs[0]}$${abs.slice(2)}`;
+
+// A path on a drive, spelled through a namespace or a share — the last
+// through a server that does not exist.
+const namespaceForms = (abs) => {
+  const slashed = abs.replace(/\\/g, '/');
+  const share = adminShare(abs).slice('\\\\localhost\\'.length);
+  return [
+    `\\\\?\\${abs}`,
+    `//?/${slashed}`,
+    `\\\\.\\${abs}`,
+    `\\??\\${abs}`,
+    `/??/${slashed}`,
+    adminShare(abs),
+    `//127.0.0.1/${share.replace(/\\/g, '/')}`,
+    `\\\\?\\UNC\\localhost\\${share}`,
+    `\\\\smfs-no-such-host.invalid\\share${abs.slice(2)}`,
+  ];
+};
+
+// node:fs itself, counted: set before the patch is installed, these are
+// the originals it passes a call through to.
+const NATIVE = [
+  ...['readFileSync', 'readFile', 'statSync', 'lstatSync', 'accessSync'],
+  ...['existsSync', 'realpathSync', 'readdirSync', 'opendirSync'],
+  ...['openSync', 'createReadStream', 'watch', 'writeFileSync', 'mkdirSync'],
+  ...['appendFileSync', 'unlinkSync', 'rmSync', 'renameSync', 'linkSync'],
+  ...['copyFileSync', 'cpSync'],
+];
+const countNative = () => {
+  const calls = [];
+  const saved = NATIVE.map((name) => [fs, name, fs[name]]);
+  saved.push([fs.promises, 'readFile', fs.promises.readFile]);
+  for (const [target, name, original] of saved) {
+    const counted = (...args) => {
+      calls.push(name);
+      return original.apply(target, args);
+    };
+    if (original.native) counted.native = original.native;
+    target[name] = counted;
+  }
+  const restore = () => {
+    for (const [target, name, original] of saved) target[name] = original;
+  };
+  return { calls, restore };
+};
+
+const NS_PLACES = {
+  ro: PLACES.ro,
+  rw: PLACES.rw,
+  lib: { require: { prepare: 'mod' }, import: { ext: ['mjs'] } },
+};
+
+const NS_TREE = {
+  'ro/a.txt': 'raw',
+  'ro/h.bin': 'hidden',
+  'rw/w.txt': 'w',
+  'lib/side.js':
+    "globalThis.__smfsSide = (globalThis.__smfsSide ?? 0) + 1; module.exports = 'raw';",
+  'lib/e.mjs': "globalThis.__smfsEsm = true; export default 'e';",
+};
+
+describe(
+  'Windows, strict: UNC and namespace paths',
+  { skip: NAMESPACES },
+  () => {
+    let root;
+    let k;
+    let native;
+    const at = (...p) => path.join(root, ...p);
+
+    before(async () => {
+      root = writeTree(tmpDir('ns'), NS_TREE);
+      const options = { preparers: PREPARERS };
+      k = await kernel(root, NS_PLACES, { strict: true }, options);
+      native = countNative();
+      fsPatch.install(k);
+      moduleHook.install(k);
+    });
+
+    after(() => {
+      moduleHook.uninstall();
+      fsPatch.uninstall();
+      native.restore();
+      k.close();
+      rm(root);
+    });
+
+    it('reads and listings: EACCES, the path as given, nothing reaches node:fs', async () => {
+      native.calls.length = 0;
+      const outside = namespaceForms(path.resolve(__filename));
+      for (const file of [
+        ...namespaceForms(at('ro', 'h.bin')),
+        ...namespaceForms(at('ro', 'a.txt')),
+        ...outside,
+      ]) {
+        const eacces = (syscall) => refused('EACCES', syscall, file);
+        assert.throws(() => fs.readFileSync(file), eacces('open'));
+        assert.throws(() => fs.statSync(file), eacces('stat'));
+        assert.throws(() => fs.lstatSync(file), eacces('lstat'));
+        assert.throws(() => fs.accessSync(file), eacces('access'));
+        assert.throws(() => fs.realpathSync(file), eacces('lstat'));
+        assert.throws(() => fs.openSync(file), eacces('open'));
+        assert.equal(fs.existsSync(file), false, file);
+        await assert.rejects(fs.promises.readFile(file), eacces('open'));
+        await assert.rejects(
+          new Promise((resolve, reject) =>
+            fs.readFile(file, (err) => (err ? reject(err) : resolve())),
+          ),
+          eacces('open'),
+        );
+        await assert.rejects(drain(fs.createReadStream(file)), eacces('open'));
+      }
+      for (const dir of namespaceForms(at('ro'))) {
+        const eacces = (syscall) => refused('EACCES', syscall, dir);
+        assert.throws(() => fs.readdirSync(dir), eacces('scandir'));
+        assert.throws(() => fs.opendirSync(dir), eacces('opendir'));
+        assert.throws(() => fs.watch(dir), eacces('watch'));
+      }
+      assert.deepEqual(native.calls, []);
+    });
+
+    it('writes: EACCES, nothing reaches node:fs, nothing changes', () => {
+      native.calls.length = 0;
+      const plain = (name) => at('rw', name);
+      for (const [i, form] of namespaceForms(at('rw', 'new.txt')).entries()) {
+        const eacces = (syscall) => refused('EACCES', syscall, form);
+        assert.throws(() => fs.writeFileSync(form, 'x'), eacces('open'));
+        assert.throws(() => fs.openSync(form, 'w'), eacces('open'));
+        const w = namespaceForms(plain('w.txt'))[i];
+        const wEacces = (syscall) => refused('EACCES', syscall, w);
+        assert.throws(() => fs.appendFileSync(w, 'x'), wEacces('open'));
+        assert.throws(() => fs.unlinkSync(w), wEacces('unlink'));
+        assert.throws(() => fs.rmSync(w), wEacces('rm'));
+        const d = namespaceForms(plain('d'))[i];
+        assert.throws(() => fs.mkdirSync(d), refused('EACCES', 'mkdir', d));
+        const pairs = [
+          ['renameSync', 'rename', w, plain('z.txt')],
+          ['renameSync', 'rename', plain('w.txt'), form],
+          ['copyFileSync', 'copyfile', at('ro', 'a.txt'), form],
+          ['copyFileSync', 'copyfile', w, plain('c.txt')],
+          ['cpSync', 'cp', w, plain('c.txt')],
+          ['linkSync', 'link', w, plain('l.txt')],
+        ];
+        for (const [call, syscall, from, to] of pairs) {
+          assert.throws(
+            () => fs[call](from, to),
+            refused('EACCES', syscall, from, to),
+          );
+        }
+      }
+      assert.deepEqual(native.calls, []);
+      assert.equal(readDisk(at('rw', 'w.txt'), 'utf8'), 'w');
+      for (const name of ['new.txt', 'd', 'z.txt', 'c.txt', 'l.txt']) {
+        assert.equal(onDisk(at('rw', name)), false, name);
+      }
+    });
+
+    it('require and import: not found, never loaded', async () => {
+      const side = at('lib', 'side.js');
+      for (const form of namespaceForms(side)) {
+        assert.throws(() => require(form), { code: 'MODULE_NOT_FOUND' });
+      }
+      const url = `file://127.0.0.1/${root[0]}$${at('lib', 'e.mjs')
+        .slice(2)
+        .replace(/\\/g, '/')}`;
+      await assert.rejects(import(url), { code: 'ERR_MODULE_NOT_FOUND' });
+      assert.equal(globalThis.__smfsSide, undefined);
+      assert.equal(globalThis.__smfsEsm, undefined);
+      assert.equal(require(side), 'prepared');
+    });
+
+    it('a path on a drive outside appRoot is node:fs as before', () => {
+      native.calls.length = 0;
+      const outside = tmpDir('ns-outside');
+      const file = path.join(outside, 'o.txt');
+      try {
+        fs.writeFileSync(file, 'o');
+        assert.equal(fs.readFileSync(file, 'utf8'), 'o');
+        assert.ok(fs.statSync(outside).isDirectory());
+        assert.deepEqual(fs.readdirSync(outside), ['o.txt']);
+        const relative = path.relative(process.cwd(), file);
+        assert.equal(fs.readFileSync(relative, 'utf8'), 'o');
+        assert.ok(fs.readFileSync(__filename).length > 0);
+        assert.ok(native.calls.includes('writeFileSync'));
+        assert.ok(native.calls.includes('readFileSync'));
+      } finally {
+        rm(outside);
+      }
+    });
+
+    it('a relative path, through a cwd on a share, is refused too', (t) => {
+      const share = adminShare(root);
+      if (!onDisk(share)) {
+        t.skip('the admin share is not available');
+        return;
+      }
+      const cwd = process.cwd();
+      process.chdir(share);
+      try {
+        const file = path.join('ro', 'a.txt');
+        assert.throws(
+          () => fs.readFileSync(file),
+          refused('EACCES', 'open', file),
+        );
+        assert.throws(() => fs.writeFileSync('x.txt', 'x'), { code: 'EACCES' });
+      } finally {
+        process.chdir(cwd);
+      }
+      assert.equal(onDisk(at('x.txt')), false);
+    });
+  },
+);
+
+describe(
+  'Windows, without strict: UNC and namespace paths pass through',
+  {
+    skip: NAMESPACES,
+  },
+  () => {
+    let root;
+    let k;
+    const at = (...p) => path.join(root, ...p);
+
+    before(async () => {
+      root = writeTree(tmpDir('ns-open'), NS_TREE);
+      k = await kernel(root, NS_PLACES, {}, { preparers: PREPARERS });
+      fsPatch.install(k);
+      moduleHook.install(k);
+    });
+
+    after(() => {
+      moduleHook.uninstall();
+      fsPatch.uninstall();
+      k.close();
+      rm(root);
+    });
+
+    it('node:fs reads what the path names: a namespace is no routing boundary', () => {
+      const hidden = at('ro', 'h.bin');
+      assert.throws(() => fs.readFileSync(hidden), { code: 'EACCES' });
+      for (const form of [
+        `\\\\?\\${hidden}`,
+        `//?/${hidden.replace(/\\/g, '/')}`,
+      ]) {
+        assert.equal(fs.readFileSync(form, 'utf8'), 'hidden', form);
+      }
+    });
+
+    it('through an admin share too', (t) => {
+      const form = adminShare(at('ro', 'h.bin'));
+      if (!onDisk(form)) {
+        t.skip('the admin share is not available');
+        return;
+      }
+      assert.equal(fs.readFileSync(form, 'utf8'), 'hidden');
+    });
+
+    // Node's loader takes a share by its address — not `\\?\`, which its
+    // realpath fails, nor `localhost`, which a file: URL drops.
+    it("require loads what Node's loader finds there", (t) => {
+      const side = at('lib', 'side.js');
+      const share = adminShare(side).replace('localhost', '127.0.0.1');
+      if (!onDisk(share)) {
+        t.skip('the admin share is not available');
+        return;
+      }
+      assert.equal(require(share), 'raw');
+      assert.equal(require(side), 'prepared');
+      delete globalThis.__smfsSide;
+    });
+  },
+);
+
+describe('Windows, strict: an appRoot on a share', { skip: NAMESPACES }, () => {
+  it('routes the paths below it in any case, refuses its other UNC spellings', async (t) => {
+    const local = writeTree(tmpDir('ns-share'), NS_TREE);
+    const share = adminShare(local);
+    if (!onDisk(share)) {
+      rm(local);
+      t.skip('the admin share is not available');
+      return;
+    }
+    const options = { preparers: PREPARERS };
+    const k = await kernel(share, NS_PLACES, { strict: true }, options);
+    fsPatch.install(k);
+    try {
+      const a = path.join(share, 'ro', 'a.txt');
+      const upper = path.join(share.toUpperCase(), 'RO', 'a.txt');
+      const spellings = [a, upper, a.replace(/\\/g, '/')];
+      for (const file of spellings) {
+        assert.equal(fs.readFileSync(file, 'utf8'), 'RAW', file);
+      }
+      const hidden = path.join(share, 'ro', 'h.bin');
+      assert.throws(
+        () => fs.readFileSync(hidden),
+        refused('EACCES', 'open', hidden),
+      );
+      const others = [
+        `\\\\?\\UNC${hidden.slice(1)}`,
+        hidden.replace('\\\\localhost\\', '\\\\127.0.0.1\\'),
+        `\\\\?\\${path.join(local, 'ro', 'a.txt')}`,
+      ];
+      for (const other of others) {
+        assert.throws(
+          () => fs.readFileSync(other),
+          refused('EACCES', 'open', other),
+        );
+      }
+    } finally {
+      fsPatch.uninstall();
+      k.close();
+      rm(local);
+    }
+  });
+});

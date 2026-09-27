@@ -3,23 +3,27 @@
 Future project work. Priority: **P1** — strict boundary or correctness,
 **P2** — policy gaps and missing implementations, **P3** — improvements.
 
-## P1 — Windows: case and namespace spellings of managed paths
+## P1 — Windows: 8.3 and stream spellings of managed paths
 
-**Problem.** Routing compares strings. On Windows a place segment in
-another case (`appRoot\RO\…` for place `ro`) routes as owned by nobody:
-without strict it passes through natively — the raw file instead of its
-prepared content, files that `fs.fallback: 'deny'` hides, writes into a
-read-only place. Under strict, `\\?\C:\…\place\hidden` and
-`\\localhost\C$\…` read files the place hides. 8.3 aliases are likely the
-same class.
+**Problem.** Under strict, spellings of a managed path in drive form that
+routing does not compare as the file system does still reach the disk: the
+8.3 short name of `appRoot` or of a directory above it
+(`…\SMFS-A~1\place\hidden`) and a stream suffix on it
+(`appRoot::$INDEX_ALLOCATION\place\hidden`) lie outside `appRoot` to the
+strings, and `appRoot\place\a.txt::$DATA` in a place with
+`fs.fallback: 'disk'` reads the raw file of a cached, prepared extension —
+its extension taken as `txt::$data`. Without strict the same spellings of
+a place's name or key pass through as unowned. A drive mapped to a UNC
+`appRoot`, or the drive form of a namespaced one, is the same class.
 
-**Cause.** Containment is lexical and the mount lookup is case-sensitive,
-while one file has several spellings on Windows: case, `\\?\`, UNC
-loopback, 8.3.
+**Cause.** Routing is lexical, and one file has spellings the strings do
+not show: 8.3 names, NTFS stream syntax, drive mappings. Case, UNC and
+namespace forms are handled (`doc/architecture.md`, Routing and strict
+mode).
 
-**Done when.** The router folds the place segment on case-insensitive
-platforms (names stay unique after lowercasing) and normalizes or refuses
-namespace spellings under strict, with tests on Windows.
+**Done when.** A decided policy — for instance, under strict, refusing a
+`:` past the drive and comparing `appRoot` by its long form — is
+implemented with tests on Windows.
 
 ## P2 — VFS-aware versions of the operations refused today
 

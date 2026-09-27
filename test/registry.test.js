@@ -5,7 +5,9 @@ const assert = require('node:assert/strict');
 const path = require('node:path');
 const {
   PlaceRegistry,
+  FsRouter,
   Containment,
+  namespaced,
   resolvedFor,
   listedNames,
 } = require('../lib/registry.js');
@@ -208,6 +210,184 @@ describe('PlaceRegistry.route: a place named as the platform compares names', ()
       key: '',
     });
     assert.equal(registry.route('/SRV/app/api/x'), null);
+  });
+});
+
+// On Windows a UNC or namespace path may name a file below appRoot in a
+// spelling appRoot does not share — `\\?\C:\app\…`, `\\localhost\C$\app\…`.
+// Below an appRoot in such a form itself it routes lexically; elsewhere a
+// registry built for strict owns it to nobody, which strict refuses, and
+// without strict nothing is asked: it passes through as before. Strings
+// only, for both flavors on any platform; path-identity.test.js runs it
+// through node:fs and the module hooks.
+describe('PlaceRegistry: UNC and namespace paths', () => {
+  const nobody = { place: null, key: null };
+  const registryOf = (P, root, strict = true) => {
+    const registry = new PlaceRegistry(root, P, strict);
+    const ro = { name: 'ro' };
+    registry.register(ro);
+    return { registry, ro };
+  };
+
+  // The forms as path.win32.resolve gives them — the NT prefix in both of
+  // its forms, where the cwd has a drive and where it has none.
+  it('namespaced: a resolved path with two backslashes first, or a rooted ??', () => {
+    const forms = [
+      ...['\\\\?\\C:\\app\\x', '\\\\.\\C:\\x', '\\\\?\\UNC\\srv\\share\\x'],
+      ...['\\\\.\\UNC\\srv\\share\\x', '\\\\?\\GLOBALROOT\\Device\\x'],
+      ...['\\\\?\\Volume{1}\\x', '\\\\srv\\share\\x', '\\\\localhost\\C$\\x'],
+      ...['\\\\127.0.0.1\\C$\\x', '\\\\.\\pipe\\x', '\\??\\C:\\x', '\\??'],
+      ...['D:\\??\\C:\\x', 'C:\\??'],
+    ];
+    for (const abs of forms) assert.equal(namespaced(abs), true, abs);
+    const plain = [
+      ...['C:\\app\\x', 'C:\\', '\\app\\x', 'C:\\?x', 'D:\\?\\x', '\\?\\x'],
+      ...['\\???\\x', 'C:\\???\\x', 'C:\\??x', 'D:\\a\\??\\x', '\\a\\??'],
+    ];
+    for (const abs of plain) assert.equal(namespaced(abs), false, abs);
+  });
+
+  it('win32 under strict, appRoot on a drive: every such path is owned by nobody', () => {
+    const { registry, ro } = registryOf(path.win32, 'C:\\app');
+    const forms = [
+      ...['\\\\?\\C:\\app\\ro\\x', '//?/C:/app/ro/x', '\\\\?\\c:\\APP\\RO\\x'],
+      ...['\\\\.\\C:\\app\\ro\\x', '\\??\\C:\\app\\ro\\x', '/??/C:/app/ro/x'],
+      ...['\\\\localhost\\C$\\app\\ro\\x', '//localhost/C$/app/ro/x'],
+      ...['\\\\?\\UNC\\localhost\\C$\\app\\ro\\x', '\\/127.0.0.1/C$/app'],
+      ...['\\\\.\\UNC\\localhost\\C$\\app', '\\\\?\\GLOBALROOT\\Device\\x'],
+      ...['\\\\srv\\share\\x', '\\\\srv\\share', '\\\\?\\D:\\x', '//C:/app'],
+      // What the module hooks make of `\??\C:\…`: no name holds a `?`.
+      ...['D:\\??\\C:\\app\\ro\\x', 'C:/??/x'],
+      // A server named like a drive, below appRoot to path.relative.
+      ...['\\\\C:\\app\\ro\\x', '//C:/app/x'],
+    ];
+    for (const p of forms) assert.deepEqual(registry.route(p), nobody, p);
+    assert.deepEqual(registry.route('C:\\app\\ro\\x'), {
+      place: ro,
+      key: '/x',
+    });
+    assert.deepEqual(registry.route('c:/APP/ro'), { place: ro, key: '' });
+    // What path.win32.resolve puts on a drive: outside appRoot, native.
+    const plain = [
+      ...['D:\\other\\x', 'C:\\other', 'C:\\?x', 'D:\\?\\x', 'x', '\\\\\\x'],
+      ...['\\\\srv', '\\\\?\\', '\\\\'],
+    ];
+    for (const p of plain) assert.equal(registry.route(p), null, p);
+  });
+
+  it('win32 without strict: nothing outside appRoot is classified', () => {
+    const { registry } = registryOf(path.win32, 'C:\\app', false);
+    const forms = [
+      ...['\\\\?\\C:\\app\\ro\\x', '\\??\\C:\\app\\ro\\x', 'D:\\??\\C:\\x'],
+      ...['\\\\localhost\\C$\\app\\ro\\x', '\\\\srv\\share\\x', '//C:/app'],
+    ];
+    for (const p of forms) assert.equal(registry.route(p), null, p);
+    // Below appRoot to path.relative, it is still no path there.
+    assert.deepEqual(registry.route('\\\\C:\\app\\ro\\x'), nobody);
+  });
+
+  it('win32, appRoot on a share: below it in any case, other UNC paths owned by nobody', () => {
+    const { registry, ro } = registryOf(path.win32, '\\\\srv\\share\\app');
+    const below = [
+      '\\\\srv\\share\\app\\ro\\x',
+      '\\\\SRV\\Share\\APP\\RO\\x',
+      '//srv/share/app/ro/x',
+    ];
+    for (const p of below) {
+      assert.deepEqual(registry.route(p), { place: ro, key: '/x' }, p);
+    }
+    assert.deepEqual(registry.route('\\\\srv\\share\\app\\x'), nobody);
+    assert.deepEqual(registry.route('\\\\srv\\share\\app'), {
+      place: null,
+      key: null,
+      root: true,
+    });
+    const others = [
+      ...['\\\\?\\UNC\\srv\\share\\app\\ro\\x', '\\\\srv\\share\\other\\x'],
+      ...['\\\\srv\\share', '\\\\srv2\\share\\app\\ro\\x'],
+      ...['\\\\.\\UNC\\srv\\share\\app\\ro\\x', '\\??\\UNC\\srv\\share\\app'],
+    ];
+    for (const p of others) assert.deepEqual(registry.route(p), nobody, p);
+    assert.equal(registry.route('C:\\app\\ro\\x'), null);
+  });
+
+  // path.win32 resolves a relative path against process.cwd() on any host.
+  it('win32 under strict: a relative path is what the cwd makes of it', () => {
+    const { registry, ro } = registryOf(path.win32, 'C:\\app');
+    const { cwd } = process;
+    const through = (at) => {
+      process.cwd = () => at;
+      try {
+        return ['x', '\\x', 'ro\\x'].map((p) => registry.route(p));
+      } finally {
+        process.cwd = cwd;
+      }
+    };
+    const all = (answer) => [answer, answer, answer];
+    assert.deepEqual(through('\\\\srv\\share\\dir'), all(nobody));
+    assert.deepEqual(through('\\\\?\\C:\\dir'), all(nobody));
+    assert.deepEqual(through('D:\\dir'), all(null));
+    assert.deepEqual(through('C:\\app'), [
+      nobody,
+      null,
+      { place: ro, key: '/x' },
+    ]);
+  });
+
+  it('win32, a namespaced appRoot: below it, lexically', () => {
+    const { registry, ro } = registryOf(path.win32, '\\\\?\\C:\\app');
+    assert.deepEqual(registry.route('\\\\?\\c:\\APP\\ro\\x'), {
+      place: ro,
+      key: '/x',
+    });
+    assert.deepEqual(registry.route('\\\\.\\C:\\app\\ro\\x'), nobody);
+  });
+
+  it('posix: no namespace, and `//` is the root', () => {
+    const { registry, ro } = registryOf(path.posix, '/app');
+    assert.deepEqual(registry.route('//app/ro/x'), { place: ro, key: '/x' });
+    assert.equal(registry.route('/??/x'), null);
+    assert.equal(registry.route('//srv/share/x'), null);
+  });
+
+  it('strict refuses such a path; without strict it passes', () => {
+    const p = '\\\\?\\C:\\app\\ro\\x';
+    const q = '\\\\localhost\\C$\\app\\ro\\y';
+    const strict = new FsRouter(
+      registryOf(path.win32, 'C:\\app').registry,
+      true,
+    );
+    const eacces = { kind: 'deny', code: 'EACCES' };
+    assert.deepEqual(strict.read(p), eacces);
+    assert.deepEqual(strict.mutate(p), eacces);
+    assert.deepEqual(strict.copy(p, false), eacces);
+    assert.deepEqual(strict.copy(p, true), eacces);
+    assert.deepEqual(strict.rename(p, q), eacces);
+    assert.deepEqual(strict.link(p, q), eacces);
+    assert.deepEqual(strict.read('D:\\x'), { kind: 'passthrough' });
+    const loose = registryOf(path.win32, 'C:\\app', false).registry;
+    const open = new FsRouter(loose, false);
+    assert.equal(open.read(p).kind, 'passthrough');
+    assert.equal(open.mutate(q).kind, 'passthrough');
+  });
+
+  // The module hooks' lookup, on a registry of the win32 flavor.
+  it('module lookup: strict refuses such a path, without strict Node takes it', () => {
+    for (const strict of [true, false]) {
+      const config = new VfsConfig({
+        defaults: { strict },
+        places: { lib: { require: true } },
+      });
+      const k = new VfsKernel(config, { appRoot: 'C:\\app', console: quiet });
+      k.registry = new PlaceRegistry('C:\\app', path.win32, strict);
+      try {
+        const found = k.resolveModule('\\\\?\\C:\\app\\lib\\m.js', 'require');
+        assert.deepEqual(found, strict ? { denied: true } : null);
+        assert.equal(k.resolveModule('D:\\lib\\m.js', 'require'), null);
+      } finally {
+        k.close();
+      }
+    }
   });
 });
 

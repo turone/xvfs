@@ -551,6 +551,30 @@ under `appRoot` into a place — under strict, native reads and writes
 there. The other platforms keep their case-sensitive routing; a
 case-insensitive volume there (macOS by default) is not recognized.
 
+**On Windows a UNC or namespace path — two separators first
+(`\\server\share\…`, `\\?\…`, `\\.\…`) or `\??\`, with `/` for `\`, or a
+relative path through a cwd on a share — lies below `appRoot` only when
+`appRoot` is itself given in such a form. Outside it, a registry built
+for strict owns it to nobody, which strict refuses like any path no
+place owns: `EACCES` before any native I/O, whatever it names. The check
+reads the first characters of the path as `path.resolve` gives it, which
+routing computes anyway (`namespaced`); without strict nothing asks, and
+such a path passes through as before. The module hooks get the same
+answer (`\??\` reaches them resolved, as `C:\??\…`, which no file name
+can hold); a UNC server named like a drive (`\\C:\app\x`), which
+`path.relative` puts below `C:\app`, is owned by no place.** _Why:_ one
+file has many Windows spellings, and containment compares strings:
+`\\?\C:\app\place\hidden` or `\\localhost\C$\app\place\hidden` lay outside
+`appRoot` and passed through natively under strict — a file the place
+hides, the raw file of a prepared one, a write into a read-only place, a
+module loaded through a share. Refusing the forms is what a lexical router
+can guarantee; which file a share or a namespace names is the operating
+system's to say, and no list of aliases is complete. Only strict asks,
+so without it the route outside costs nothing more. Spellings in drive
+form — an 8.3 short name, an NTFS stream suffix, a drive mapped to a
+share — stay unrecognized, so `appRoot` is given in the form the
+application uses.
+
 **A path already in the form `path.resolve` returns is taken as it is: a
 drive letter, `:` and `\` on Windows (UNC paths are resolved), `/` on
 POSIX, alone or then names none of which is empty, `.` or `..`, no
@@ -941,6 +965,7 @@ workers call `attach()`.** _Why:_ preloads do not run in worker threads.
 | Looking a key up in another case under strict, or for a disk-backed entry                                       | strict refuses it already; a wider match reads another file       |
 | Other spellings of a virtual place's keys                                                                       | its reads and mutations would disagree (`exists` against `wx`)    |
 | Refusing every miss of a cached extension without strict on Windows                                             | the permissive default's unpublished files; unlike on POSIX       |
+| Mapping UNC and namespace spellings (`\\?\C:\…`, `\\localhost\C$\…`) onto `appRoot`                             | no list of aliases is complete; the OS says what a share names    |
 | Native `cp` with a routing `filter` for managed trees                                                           | raw disk bytes, no virtual entries, no canonical content          |
 | Copying canonical (prepared) content as a copy's input                                                          | the destination prepares it again; its bundle names the source    |
 | Feeding a prepared virtual entry's canonical content back in as raw                                             | stale `meta` / filename / bytecode, a silently different input    |
@@ -1034,6 +1059,9 @@ workers call `attach()`.** _Why:_ preloads do not run in worker threads.
 - A projection's directory index says what a scan of its keys would say.
 - Disk territory never leaves its place (`PlaceFs.#within`) and, under
   strict, never serves or lists a cached extension.
+- On Windows under strict, the patch and the module hooks pass no UNC or
+  namespace path outside `appRoot` on to `node:fs` or Node's loader: the
+  router refuses it first.
 
 ## Protocol
 
