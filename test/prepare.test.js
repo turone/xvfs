@@ -169,6 +169,38 @@ describe('prepare config: errors', () => {
     );
   });
 
+  // The error names every preparer the extension is assigned to, in
+  // declaration order — not the first two — and the first such extension.
+  it('an extension assigned to three or more preparers names them all', () => {
+    rejects(
+      { fs: { ext: ['js'], prepare: { a: ['js'], b: ['js'], c: ['js'] } } },
+      /fs\.prepare: extension "js" is assigned to "a", "b" and "c"$/,
+    );
+    rejects(
+      {
+        require: {
+          ext: ['js', 'cjs'],
+          prepare: {
+            a: ['js', 'cjs'],
+            b: ['cjs'],
+            c: ['JS'],
+            d: ['cjs', 'js'],
+          },
+        },
+      },
+      /require\.prepare: extension "js" is assigned to "a", "c" and "d"$/,
+    );
+    rejects(
+      {
+        import: {
+          ext: ['mjs'],
+          prepare: { a: ['mjs'], b: ['mjs'], c: ['mjs'], d: ['mjs'] },
+        },
+      },
+      /import\.prepare: extension "mjs" is assigned to "a", "b", "c" and "d"$/,
+    );
+  });
+
   it('an extension has one declaration in the whole place', () => {
     rejects(
       {
