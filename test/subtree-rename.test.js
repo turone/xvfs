@@ -10,6 +10,7 @@ const {
   tap,
   worker,
   nextMessage,
+  until,
 } = require('./helpers.js');
 
 // A directory rename inside one virtual place moves a subtree of raw
@@ -261,20 +262,26 @@ describe('virtual subtree rename', () => {
     });
     await withPlace(config, async (k, v) => {
       await write(v, TREE);
-      // A move queued behind a write in flight when the kernel closes.
-      let open;
-      const gate = new Promise((resolve) => {
-        open = resolve;
-      });
-      const { compress } = k.compressor;
-      k.compressor.compress = async (...args) => {
-        await gate;
-        return compress.apply(k.compressor, args);
+      // A move queued behind a write in flight when the kernel closes: the
+      // write waits in its compression until then. The compressor is taken
+      // before close(), which drops the kernel's.
+      const gate = Promise.withResolvers();
+      let compressing = false;
+      const { compressor } = k;
+      const { compress } = compressor;
+      compressor.compress = async (...args) => {
+        compressing = true;
+        await gate.promise;
+        return compress.apply(compressor, args);
       };
       const slow = v.writeFile('/d/slow.css', 's{}');
       const move = v.rename('/d', '/e');
-      k.close();
-      open();
+      try {
+        assert.ok(await until(() => compressing), 'the write is in flight');
+        k.close();
+      } finally {
+        gate.resolve();
+      }
       assert.match((await outcome(() => slow)).message, /closed/);
       assert.match((await outcome(() => move)).message, /ready kernel/);
       assert.equal(k.mutations.size, 0);
