@@ -427,6 +427,12 @@ the patched `node:fs` replace the operating system's isolation.
   `..private`, `...data` or `file..js` are ordinary names — an unowned
   `appRoot/..private/x` is denied like any other unowned path, and
   `appRoot/api/..private/x` belongs to place `api`.
+- Names compare as the platform's file systems compare them: on Windows
+  `appRoot` in any case and a place's name without the case of ASCII
+  letters — `appRoot\RO\x` is place `ro`, with its prepared content,
+  read-only policy and fallback, in either mode; elsewhere exactly. A key
+  keeps the case it is given, and an error names the path as the caller
+  spelled it.
 - `appRoot` itself is a **managed root**: `readdir(appRoot)` and
   `opendir(appRoot)` list the enabled places and nothing else, and
   `stat(appRoot)` is a directory. `watch` of it — as of any managed

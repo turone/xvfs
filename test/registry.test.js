@@ -108,20 +108,102 @@ describe('PlaceRegistry.route: appRoot containment', () => {
     });
   });
 
-  it('appRoot matches as path.relative does, a place by its exact name', () => {
+  it('appRoot matches as path.relative does, a place as the platform compares names', () => {
     const win32 = process.platform === 'win32';
     const upper = path.join(appRoot.toUpperCase(), 'api', 'x.js');
     assert.deepEqual(
       registry.route(upper),
       win32 ? { place: api, key: '/x.js' } : null,
     );
-    assert.deepEqual(registry.route(at('API', 'x.js')), {
-      place: null,
-      key: null,
-    });
+    assert.deepEqual(
+      registry.route(at('API', 'x.js')),
+      win32 ? { place: api, key: '/x.js' } : { place: null, key: null },
+    );
     assert.equal(registry.encloses(appRoot.toUpperCase()), win32);
     assert.equal(registry.encloses(path.dirname(appRoot)), true);
     assert.equal(registry.encloses(at('api')), false);
+  });
+});
+
+// The mount names a place as the platform's file systems compare names, for
+// either flavor of node:path on any platform: on POSIX exactly; on Windows
+// without the case of ASCII letters — a place's name is ASCII, and NTFS
+// equates no other character with an ASCII letter (the Kelvin sign is no
+// `k` there, though lower-casing makes it one). The key keeps its case.
+describe('PlaceRegistry.route: a place named as the platform compares names', () => {
+  const nobody = { place: null, key: null };
+  const registryOf = (P, root) => {
+    const registry = new PlaceRegistry(root, P);
+    const places = ['api', 'Mixed', 'keys', 'a.b-c_1', 'x'].map((name) => {
+      const place = { name };
+      registry.register(place);
+      return place;
+    });
+    return { registry, places };
+  };
+
+  it('win32: any case of a place names it; the key keeps the case given', () => {
+    const root = 'C:\\srv\\app';
+    const { registry, places } = registryOf(path.win32, root);
+    const [api, mixed, keys, dotted, x] = places;
+    const at = (...parts) => path.win32.join(root, ...parts);
+    const routes = [
+      [at('API', 'Sub', 'X.js'), { place: api, key: '/Sub/X.js' }],
+      ['c:\\SRV\\APP\\Api', { place: api, key: '' }],
+      ['C:/srv/App/mIXED/a/', { place: mixed, key: '/a' }],
+      [at('mixed'), { place: mixed, key: '' }],
+      [at('Mixed', 'b'), { place: mixed, key: '/b' }],
+      [at('KEYS', 'k'), { place: keys, key: '/k' }],
+      [at('A.B-C_1', 'd'), { place: dotted, key: '/d' }],
+      [at('X', 'y'), { place: x, key: '/y' }],
+    ];
+    for (const [p, route] of routes)
+      assert.deepEqual(registry.route(p), route, p);
+  });
+
+  it('win32: no other character stands for an ASCII letter of a name', () => {
+    const { registry } = registryOf(path.win32, 'C:\\srv\\app');
+    const names = [
+      '\u212aeys', // the Kelvin sign: `k` once lower-cased
+      'ap\u0131', // the dotless i: `I` once upper-cased
+      'ap\u0130', // the dotted capital I
+      '\uff41pi', // a full-width `a`
+      'a.b-c\u007f1', // `_` with the case bit set
+      'a.b-c\u00df1',
+      'api ',
+      'ap',
+      'apix',
+      'other',
+    ];
+    for (const name of names) {
+      const p = path.win32.join('C:\\srv\\app', name, 'x');
+      assert.deepEqual(registry.route(p), nobody, name);
+    }
+  });
+
+  it('win32: a place registered again is found by its new entry', () => {
+    const { registry } = registryOf(path.win32, 'C:\\srv\\app');
+    const again = { name: 'api' };
+    registry.register(again);
+    const route = registry.route('C:\\srv\\app\\API\\x');
+    assert.equal(route.place, again, 'the entry itself, not the old one');
+    assert.equal(route.key, '/x');
+  });
+
+  it('posix: a place by its exact name only', () => {
+    const { registry, places } = registryOf(path.posix, '/srv/app');
+    const [api, mixed] = places;
+    assert.deepEqual(registry.route('/srv/app/API/x'), nobody);
+    assert.deepEqual(registry.route('/srv/app/mixed/x'), nobody);
+    assert.deepEqual(registry.route('/srv/app/api/X'), {
+      place: api,
+      key: '/X',
+    });
+    assert.deepEqual(registry.route('/srv/app/Mixed'), {
+      place: mixed,
+      key: '',
+    });
+    assert.equal(registry.route('/SRV/app/api/x'), null);
   });
 });
 
