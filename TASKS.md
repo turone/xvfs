@@ -157,16 +157,6 @@ lists through the places — with a test for both load orders.
 **Done when.** Declarations cover the public API (`VfsConfig`, `VfsKernel`,
 `PlaceFs`, `attach`) and a type check runs in CI.
 
-## P3 — `open` for writing of a published disk-origin file
-
-**Problem.** `open(p, 'w')` / `createWriteStream(p)` of a published file
-of a writable disk-origin place is `ENOTSUP 'virtual file'`, while
-`writeFile(p)` writes it; under strict, `open(new, 'w')` there is
-`EACCES` while `writeFileSync(new)` passes.
-
-**Done when.** A decided policy for descriptors that write in disk-origin
-places is documented and tested.
-
 ## After the next Node.js 26.x release — `doc/alternatives.md`
 
 **Problem.** The comparison describes Node v26.10.0; `main` already removes

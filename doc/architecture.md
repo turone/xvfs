@@ -905,21 +905,35 @@ store changes a virtual place — a native `copyFile` into one left a stray
 disk file the place never showed; SAB / Map entries have no file
 descriptor.
 
-**`open` with a flag that writes — a string with `w`, `a`, `x` or `+`, a
-number with `O_WRONLY`, `O_RDWR`, `O_CREAT`, `O_TRUNC` or `O_APPEND` — is
-a guarded mutation of what its read routing passes through: `EROFS` in a
-read-only place, `ENOTSUP` in a virtual one. The read routing answers
-first: a published entry stays `ENOTSUP` and a hidden path `EACCES`,
-whatever the flag — the `EACCES` of an `open` that writes always comes
-from its read routing. `createWriteStream` opens through `fs.open`, so its
-stream gets the same error.** _Why:_ routed only as a read,
-`openSync(p, 'w')` and `createWriteStream` bypassed the mutation policy:
-they created a file in a read-only place, and a stray one in a virtual
-place's directory on disk, which the place never shows. Checked after the
-read routing, the check keeps every refusal `open` gave before; what Node's
-own implementation opens inside a call the routing passed through
-(`writeFileSync` → `openSync`) runs in the native section and is not
-routed again.
+**A descriptor is the raw file. `open` routes its path as `readFile` does
+for what the descriptor can read — a flag with `r`, `+` or `O_RDWR`, or
+one that only reads — and as `writeFile` does for what it writes — a
+string with `w`, `a`, `x` or `+`, a number with `O_WRONLY`, `O_RDWR`,
+`O_CREAT`, `O_TRUNC` or `O_APPEND`. Where the read routing serves the path
+from the VFS no descriptor reads it, whatever else the flag does:
+`ENOTSUP` for a virtual entry whatever the flag, and for a published
+disk-origin entry with a flag that can read. A flag that only writes is a
+guarded mutation and needs no read routing: `EROFS` in a read-only place,
+`ENOTSUP` in a virtual one, and in a disk-origin place the raw file
+(`FsRouter.copy` says whether one is on disk) — a published entry opens so
+wherever `writeFile` writes it, and `open(new, 'w')` passes where
+`writeFileSync(new)` does, while a flag that can read stays `EACCES` on a
+hidden path.
+`createWriteStream` opens through `fs.open`, so its stream gets the same
+error.** _Why:_ routed only as a read, `openSync(p, 'w')` and
+`createWriteStream` bypassed the mutation policy: they created a file in a
+read-only place, and a stray one in a virtual place's directory on disk,
+which the place never shows. Refusing every descriptor to a published entry
+then left `createWriteStream` unable to do what `writeFileSync` — open,
+write, close, in the native section — did: the raw file is a disk-origin
+place's source of truth, `truncate` edited it already, and the watcher
+republishes any disk write. A descriptor that can read would read that raw
+file where `readFile` gives the prepared content — a raw file never stands
+in for canonical content — and, on a hidden path, what strict hides; a
+flag that only writes reads nothing: it is `writeFile` with a descriptor.
+What Node's own implementation opens inside a call the routing passed
+through (`writeFileSync` → `openSync`) runs in the native section and is
+not routed again.
 
 **A wrapper calls its original once no kernel is installed, and each
 `install()` wraps the restored originals.** _Why:_ a reference taken while
@@ -1079,7 +1093,9 @@ workers call `attach()`.** _Why:_ preloads do not run in worker threads.
 | Own primitives in place of `rmSync`                                                                             | rewrites its retries (`EBUSY`, `EPERM`, `maxRetries`) and errors  |
 | A native section around `cp`                                                                                    | its `filter`, the caller's code, would read past strict           |
 | Refusing an `open` that writes only where the mutation routing denies it                                        | a virtual place's directory on disk still got a stray file        |
-| Routing an `open` that writes as a mutation before its read                                                     | a published entry would answer `EROFS`, not `ENOTSUP`             |
+| Routing an `open` that writes by the mutation routing alone                                                     | a `+` flag would read what strict hides; no raw file when virtual |
+| Refusing every descriptor to a published disk-origin entry                                                      | `writeFileSync` opened the same raw file; `createWriteStream` not |
+| A descriptor that reads and writes (`+`) a published disk-origin entry                                          | it reads the raw file where `readFile` gives the prepared content |
 | Preloading rimraf when the package is imported                                                                  | races a synchronous `install()`; disk I/O on every import         |
 | Standalone place-level `script` domain, provider `memory`, `vfs:` URLs, metawatch, root-level `ext` / `compile` | superseded by the place / domain model; no aliases                |
 
