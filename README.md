@@ -433,6 +433,17 @@ the patched `node:fs` replace the operating system's isolation.
   read-only policy and fallback, in either mode; elsewhere exactly. A key
   keeps the case it is given, and an error names the path as the caller
   spelled it.
+- On Windows a UNC or namespace path — `\\?\…`, `\\.\…`, `\??\…`,
+  `\\server\share\…`, an admin share `\\localhost\C$\…`, with `\` or `/`,
+  or a relative path through a cwd on a share — may name a file below
+  `appRoot` in a spelling `appRoot` does not share. Under strict it is
+  `EACCES` (not found for `require` / `import`) before any native I/O,
+  whatever it names: an application on a share keeps its `appRoot` there,
+  where the paths lexically below it, in any case, route as usual.
+  Without strict such paths pass through natively, as before. Other
+  spellings of `appRoot` — an 8.3 short name, an NTFS stream suffix, a
+  drive mapped to its share — are not recognized: give `appRoot` in the
+  form the application uses.
 - `appRoot` itself is a **managed root**: `readdir(appRoot)` and
   `opendir(appRoot)` list the enabled places and nothing else, and
   `stat(appRoot)` is a directory. `watch` of it — as of any managed
@@ -447,10 +458,10 @@ the patched `node:fs` replace the operating system's isolation.
   unpublished or excluded-ext paths → `EACCES` (disk-backed entries
   excepted) — unless a disk-origin place sets `fs.fallback: 'disk'`
   (below).
-- Paths outside `appRoot` → ordinary Node, except operations whose walk
-  would enter `appRoot` from above: recursive listings, watches, copies and
-  removals, and `rename`, of a directory above it. Scanner does not follow
-  symlinks.
+- Paths outside `appRoot` → ordinary Node (on Windows, UNC and namespace
+  paths excepted: above), except operations whose walk would enter
+  `appRoot` from above: recursive listings, watches, copies and removals,
+  and `rename`, of a directory above it. Scanner does not follow symlinks.
 - Listings (`readdir`, `opendir`) always come from the places. A copy or a
   rename routes both of its paths and hands on the raw input, so a hidden
   source stays `EACCES`; recursive copies, hard links and watches of
