@@ -4,6 +4,7 @@ const { describe, it, before, after } = require('node:test');
 const assert = require('node:assert/strict');
 const { execFileSync } = require('node:child_process');
 const fs = require('node:fs');
+const os = require('node:os');
 const path = require('node:path');
 const { pathToFileURL } = require('node:url');
 const fsPatch = require('../lib/adapters/fs-patch.js');
@@ -17,6 +18,13 @@ const { tmpDir, writeTree, rm, kernel } = require('./helpers.js');
 // (fixtures/glob-routed.cjs), in both modes: it lists what the places list.
 
 const GLOB = 'NativeModule internal/fs/glob';
+
+// UNC and namespace spellings exist on Windows, of a path on a drive.
+const WIN = process.platform === 'win32';
+const ON_DRIVE = /^[A-Za-z]:\\/.test(os.tmpdir());
+const NAMESPACES = !WIN
+  ? 'Windows: UNC and namespace spellings'
+  : !ON_DRIVE && 'the temporary directory is not on a drive';
 
 const slashed = (list) =>
   list.map((p) => String(p).split(path.sep).join('/')).sort();
@@ -126,6 +134,38 @@ describe('glob loaded before the patch: a native walk', () => {
       await refusedEach(pattern, options, 'EACCES', start);
     }
   });
+
+  // Under strict a UNC or namespace spelling of the start — `\\?\…`,
+  // `\\.\…`, with `/` too, an admin share by name or address, a server
+  // that does not exist — is refused as the routing refuses it, before the
+  // walk that would have asked the disk, or the network, about it.
+  it(
+    'a UNC or namespace cwd or pattern is EACCES before any walk',
+    { skip: NAMESPACES },
+    async () => {
+      const site = at('site');
+      const share = `${site[0]}$${site.slice(2)}`;
+      const posix = (p) => p.replace(/\\/g, '/');
+      const spellings = [
+        `\\\\?\\${site}`,
+        `//?/${posix(site)}`,
+        `\\\\.\\${site}`,
+        `\\\\localhost\\${share}`,
+        `//127.0.0.1/${posix(share)}`,
+        `\\\\?\\UNC\\localhost\\${share}`,
+        `\\\\smfs-no-such-host.invalid\\share${site.slice(2)}`,
+      ];
+      for (const cwd of spellings) {
+        await refusedEach('**', { cwd }, 'EACCES', path.resolve(cwd));
+      }
+      // In a pattern `?` is a wildcard: `\\?\` names no namespace there,
+      // and such a walk starts at the root of the drive, outside appRoot.
+      for (const cwd of spellings.filter((s) => !s.includes('?'))) {
+        const pattern = `${posix(cwd)}/*.html`;
+        await refusedEach(pattern, undefined, 'EACCES', path.resolve(cwd));
+      }
+    },
+  );
 
   it('elsewhere it stays native', async () => {
     const expected = ['.', 'o.txt', 'sub', 'sub/p.txt'];
