@@ -18,6 +18,7 @@ const {
   writeFileSync: writeDisk,
   realpathSync: realpathDisk,
   realpath: realpathDiskCb,
+  openAsBlob: openAsBlobDisk,
 } = fs;
 
 // fs-patch executes router decisions; these tests exercise node:fs itself
@@ -1201,11 +1202,14 @@ describe('fs-patch: openAsBlob', () => {
       await (await fs.openAsBlob(path.join(outside, 'o.txt'))).text(),
       'outside',
     );
-    // node:fs's own refusal of a missing file, in its own form.
-    const missing = await failure(() =>
-      fs.openAsBlob(path.join(outside, 'missing.txt')),
-    );
-    assert.equal(missing?.code, 'ERR_INVALID_ARG_VALUE');
+    // node:fs's own refusal of a missing file, in its own form — which
+    // changes with the version: ERR_INVALID_ARG_VALUE, ENOENT from 26.10.
+    const missingFile = path.join(outside, 'missing.txt');
+    const missing = await failure(() => fs.openAsBlob(missingFile));
+    const native = await failure(() => openAsBlobDisk(missingFile));
+    assert.ok(native, 'node:fs refuses a missing file');
+    assert.equal(missing?.code, native.code);
+    assert.equal(missing.message, native.message);
   });
 
   it('options are checked as node:fs checks them', async () => {
