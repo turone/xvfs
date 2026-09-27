@@ -147,16 +147,6 @@ Windows).
 **Done when.** Listings either use `path.sep` like native `node:fs` or
 document `/` as the contract, with a test pinning the choice on Windows.
 
-## P3 — Benchmarks
-
-**Problem.** Memory savings and startup / per-request costs are stated as
-copy counts, not measured (`doc/alternatives.md`).
-
-**Done when.** A reproducible benchmark compares worker pools of several
-sizes against plain `node:fs` and against a Buffer cache in every worker:
-memory, startup, throughput, p95 / p99 request latency, and the cost of an
-update and of compression. The docs cite its results.
-
 ## P3 — One copy fewer for `Uint8Array` preparer results
 
 **Problem.** A `Uint8Array` a preparer returns is copied twice: into an
