@@ -379,11 +379,33 @@ binds only what `attach({ preparers })` gives it.** _Why:_ a missing
 function is a deployment error: startup fails, not a later publication.
 
 **Preparers are synchronous, run once per publication attempt and never on
-read; returned bytes are copied, `meta` / `scriptOptions` cloned and
-deep-frozen.** _Why:_ they run inside synchronous Map writes and the watcher
-pipeline; running on read would multiply the CPU cost per thread and
-request; cloned, frozen results travel to workers and cannot change after
-publication.
+read; returned bytes are taken the moment the preparer returns, `meta` /
+`scriptOptions` cloned and deep-frozen.** _Why:_ they run inside
+synchronous Map writes and the watcher pipeline; running on read would
+multiply the CPU cost per thread and request; cloned, frozen results
+travel to workers and cannot change after publication.
+
+**A `Uint8Array` a preparer returns for a shared place is copied once,
+straight into its provisional SAB allocation, synchronously inside
+`prepareInput` (the SAB sink hands it `cache.allocateSync`) and before
+`meta` / `scriptOptions` are cloned; the publication then places the
+companions around that entry, and a failure — a copy that throws, extras
+that cannot be cloned, any later step — frees it like every allocation
+of the attempt. Strings are encoded first; Map places keep an owned copy;
+the raw input returned as is is placed like any raw input.** _Why:_ a
+virtual write already copies its input, and the owned intermediate copy
+made such a result three copies against the raw input's two — twice the
+publication latency of Buffer and `Uint8Array` results from 64 KiB up
+(`doc/benchmarks.md`). The copy must stay synchronous: two writes issued
+in one turn run their preparers back to back before either publication
+goes on, so a preparer that reuses its output buffer would have
+overwritten the first result had the copy waited for its publication;
+and it comes before the clones, whose getters are the preparer's code
+too. The sink declines — and the pipeline copies as before — when the
+bytes cannot live in SAB or after `close()`, which a preparer may call,
+so every refusal answers as it did; a source `allocOptions` would keep
+on disk it declines as a guard, since the config already refuses
+`retainRaw: false` together with `prepare`.
 
 **Workers never prepare shared places; `attach({ preparers })` serves only
 local writes to a worker's own `map` places, and a missing preparer fails
@@ -892,6 +914,7 @@ workers call `attach()`.** _Why:_ preloads do not run in worker threads.
 | Atomics or a global lock per read; pinning a segment or every companion                                         | cross-thread cost on the hot path; holds unrelated bytes          |
 | Revisions, cancellation tokens, per-key queues or latest-wins for watcher epochs                                | a FIFO gives the guarantee with less machinery                    |
 | Several chained preparers for one extension                                                                     | one extension, one declaration, one canonical content             |
+| Copying a preparer's `Uint8Array` result only when its publication places it                                    | the next call of the same turn overwrites a reused output buffer  |
 | Preparation that emits extra files, per-domain variants or derived formats                                      | a file keeps its key, extension and one canonical content         |
 | A guarded native `opendir`; a native listing of a disk-only directory                                           | a second listing path: hidden raw files, no virtual entries       |
 | Native passthrough of the strict `appRoot`                                                                      | lists unmanaged names                                             |
