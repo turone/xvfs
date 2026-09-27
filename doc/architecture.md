@@ -280,11 +280,15 @@ best-effort. A source `fs.script.compile` cannot compile is one error
 wherever it is published: `ENOTSUP` (`fs.script.compile: source does not
 compile`), `syscall` `open`, `path` the source's — `bytecodeFor()` throws it
 for the SAB and the Map sink alike, and a worker's mutation gets it back
-with the same fields. _Why:_ startup is all or nothing; live traffic keeps
-serving the last good version; Node's CommonJS loader compiles fine without
-cached data, while a script bundle promises its cached data. A caller
-cannot tell the sinks apart: the same refusal answers the same, with a
-`code` like every other refusal of the VFS.
+with the same fields. A rename that publishes a source under a new name
+refuses it as the rename: `rename`, the renamed source as `path`, the new
+name as `dest` — the operation hands the pipeline its `fail`, and so it
+does for a preparer the thread lacks. _Why:_ startup is all or nothing;
+live traffic keeps serving the last good version; Node's CommonJS loader
+compiles fine without cached data, while a script bundle promises its
+cached data. A caller cannot tell the sinks apart: the same refusal
+answers the same, with a `code` like every other refusal of the VFS, and
+names the call that was refused, as every refusal of a rename does.
 
 ## Lifetime of shared bytes
 

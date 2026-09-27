@@ -6,7 +6,14 @@ const { Worker } = require('node:worker_threads');
 const os = require('node:os');
 const path = require('node:path');
 const { bytecodeKey } = require('../lib/companion.js');
-const { tmpDir, writeTree, rm, kernel, worker } = require('./helpers.js');
+const {
+  tmpDir,
+  writeTree,
+  rm,
+  kernel,
+  worker,
+  usedBytes,
+} = require('./helpers.js');
 
 // Bytecode flavors: fs.script.compile (bare vm.Script, PlaceFs.script()) and
 // require.compile (Module.wrap flavor, consumed by the _compile hook) are
@@ -330,6 +337,72 @@ describe('bytecode flavors: failure and rollback', () => {
       assert.equal(k.nextUpdateId, updates, 'nothing published');
       assert.equal(k.nextRetireId, retires, 'nothing retired');
       assert.equal(k.cache.stats().totalUsed, used, 'nothing allocated');
+    } finally {
+      w.kernel.close();
+      k.close();
+      rm(root);
+    }
+  });
+
+  // A rename onto an extension whose script flavor does not compile is
+  // refused as the rename: its call, its source and its destination, like
+  // every other refusal of a rename — and nothing changes.
+  it('fs.script.compile failure of a rename: the rename refuses, in sab, map and a worker', async () => {
+    const root = tmpDir('bc-script-rename');
+    const scripts = {
+      writable: true,
+      ext: ['txt', 'js'],
+      script: { ext: ['js'], compile: true },
+    };
+    const k = await kernel(root, {
+      v: { origin: 'virtual', fs: scripts },
+      m: { provider: 'map', origin: 'virtual', fs: scripts },
+    });
+    const w = worker(k);
+    try {
+      const broken = '{ not valid js (((';
+      await k.fs('v').writeFile('/a.txt', broken);
+      k.fs('m').writeFile('/a.txt', broken);
+      const updates = k.nextUpdateId;
+      const retires = k.nextRetireId;
+      const used = usedBytes(k);
+      for (const [label, name, place] of [
+        ['sab', 'v', k.fs('v')],
+        ['map', 'm', k.fs('m')],
+        ['worker', 'v', w.kernel.fs('v')],
+      ]) {
+        const { files } = k.registry.get(name);
+        const version = files.get('/a.txt');
+        let err = null;
+        try {
+          await place.rename('/a.txt', '/a.js');
+        } catch (error) {
+          err = error;
+        }
+        const from = path.join(root, name, 'a.txt');
+        const to = path.join(root, name, 'a.js');
+        const reason = 'fs.script.compile: source does not compile';
+        assert.deepEqual(
+          shape(err ?? {}),
+          {
+            code: 'ENOTSUP',
+            errno: -os.constants.errno.ENOTSUP,
+            syscall: 'rename',
+            path: from,
+            dest: to,
+            message:
+              `ENOTSUP: operation not supported (${reason}), ` +
+              `rename '${from}' -> '${to}'`,
+          },
+          label,
+        );
+        assert.equal(files.get('/a.txt'), version, `${label}: the source`);
+        assert.equal(files.has('/a.js'), false, `${label}: no destination`);
+      }
+      assert.equal(w.kernel.fs('v').exists('/a.js'), false, 'worker');
+      assert.equal(k.nextUpdateId, updates, 'nothing published');
+      assert.equal(k.nextRetireId, retires, 'nothing retired');
+      assert.equal(usedBytes(k), used, 'nothing allocated');
     } finally {
       w.kernel.close();
       k.close();

@@ -112,6 +112,17 @@ const nextEvent = (emitter, event) =>
 
 const nextMessage = (port) => nextEvent(port, 'message');
 
+// The bytes of a main kernel's pool in allocations — published, retired or
+// being published — whatever the segments they lie in: a leak of one
+// allocation shows here, where the count of segments hides it.
+const usedBytes = (k) => {
+  let used = 0;
+  for (const id of k.cache.pool.segments.keys()) {
+    used += k.cache.registry.used(id);
+  }
+  return used;
+};
+
 // The asynchronous disk calls this process starts from now on — node:fs
 // requests of every form, a file handle's close included: async_hooks sees
 // each one, whatever function made it, captured at load (lib/disk.js) or
@@ -165,5 +176,6 @@ module.exports = {
   nextEvent,
   nextMessage,
   diskCalls,
+  usedBytes,
   SMALL_MEMORY,
 };

@@ -401,12 +401,26 @@ describe('prepare pipeline: every way content arrives', () => {
     given.kernel.fs('m').writeFile('/a.js', RAW);
     assert.equal(given.kernel.fs('m').readFile('/a.js', 'utf8'), PREPARED);
     const bare = worker(k);
-    bare.kernel.fs('m').writeFile('/n.txt', 'plain');
-    assert.throws(() => bare.kernel.fs('m').writeFile('/a.js', RAW), {
+    const m = bare.kernel.fs('m');
+    m.writeFile('/n.txt', 'plain');
+    assert.throws(() => m.writeFile('/a.js', RAW), {
       code: 'ENOTSUP',
+      syscall: 'open',
+      path: m.pathOf('/a.js'),
       message: /preparer "code" is not registered in this thread/,
     });
-    assert.equal(bare.kernel.fs('m').exists('/a.js'), false);
+    assert.equal(m.exists('/a.js'), false);
+    // A rename onto the extension needs the preparer too: the rename
+    // refuses, naming its call, its source and its destination.
+    assert.throws(() => m.rename('/n.txt', '/n.js'), {
+      code: 'ENOTSUP',
+      syscall: 'rename',
+      path: m.pathOf('/n.txt'),
+      dest: m.pathOf('/n.js'),
+      message: /preparer "code" is not registered in this thread/,
+    });
+    assert.equal(m.readFile('/n.txt', 'utf8'), 'plain');
+    assert.equal(m.exists('/n.js'), false);
     given.kernel.close();
     bare.kernel.close();
     k.close();
