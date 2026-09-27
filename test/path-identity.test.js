@@ -2,6 +2,7 @@
 
 const { describe, it, before, after } = require('node:test');
 const assert = require('node:assert/strict');
+const { spawnSync } = require('node:child_process');
 const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
@@ -59,6 +60,14 @@ const refused = (code, syscall, given, dest) => (err) => {
   assert.equal(err.dest, dest, given);
   return true;
 };
+
+// Whether Node's loader itself — in a process without this library — loads
+// CommonJS from `file` on a share. Node 26.10 does not: its lookup of the
+// nearest package.json walks past the share's root and fails with
+// ERR_INVALID_PACKAGE_CONFIG, whatever the module hooks do.
+const loadsFromShare = (file) =>
+  spawnSync(process.execPath, ['-e', `require(${JSON.stringify(file)})`])
+    .status === 0;
 
 for (const strict of [false, true]) {
   describe(
@@ -926,6 +935,10 @@ describe(
         t.skip('the admin share is not available');
         return;
       }
+      if (!loadsFromShare(share)) {
+        t.skip("this Node's loader cannot load CommonJS from a share");
+        return;
+      }
       assert.equal(require(share), 'raw');
       assert.equal(require(side), 'prepared');
     });
@@ -964,7 +977,11 @@ describe('Windows, strict: an appRoot on a share', { skip: NAMESPACES }, () => {
         () => fs.writeFileSync(fresh, 'x'),
         refused('EROFS', 'open', fresh),
       );
-      assert.equal(require(path.join(share, 'LIB', 'side.js')), 'prepared');
+      if (loadsFromShare(path.join(share, 'lib', 'side.js'))) {
+        assert.equal(require(path.join(share, 'LIB', 'side.js')), 'prepared');
+      } else {
+        t.diagnostic("this Node's loader cannot load CommonJS from a share");
+      }
       const others = [
         `\\\\?\\UNC${hidden.slice(1)}`,
         hidden.replace('\\\\127.0.0.1\\', '\\\\localhost\\'),
