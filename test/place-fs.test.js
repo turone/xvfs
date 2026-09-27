@@ -204,6 +204,45 @@ describe('PlaceFs: reads', () => {
     assert.throws(() => pub.readdir('/app.js'), { code: 'ENOTDIR' });
   });
 
+  // Recursive names are '/'-separated on every platform, the form of keys;
+  // `sep: '\\'` gives the form native node:fs gives on Windows — what the
+  // patched node:fs lists with there — in the same order, the keys' (a sort
+  // of '\'-names would put `a0` before `a\b`), whatever the encoding.
+  it('readdir: recursive names are keys; sep gives the native form', () => {
+    const keys = [
+      'app.js',
+      'empty.txt',
+      'img',
+      'img/deep',
+      'img/deep/x.css',
+      'img/logo.svg',
+      'index.html',
+      'skip.bin',
+    ];
+    const windows = keys.map((key) => key.replaceAll('/', '\\'));
+    const list = (options) => pub.readdir('/', { recursive: true, ...options });
+    assert.deepEqual(list({}), keys);
+    assert.deepEqual(list({ sep: '/' }), keys);
+    assert.deepEqual(list({ sep: '\\' }), windows);
+    assert.deepEqual(
+      list({ sep: '\\', encoding: 'buffer' }),
+      windows.map((name) => Buffer.from(name)),
+    );
+    assert.deepEqual(
+      list({ sep: '\\', encoding: 'hex' }),
+      windows.map((name) => Buffer.from(name).toString('hex')),
+    );
+    // Dirents carry no separator in their names.
+    assert.deepEqual(
+      list({ sep: '\\', withFileTypes: true }).map((d) => d.name),
+      keys.map((key) => path.posix.basename(key)),
+    );
+    assert.deepEqual(pub.readdir('/img', { sep: '\\' }), ['deep', 'logo.svg']);
+    for (const sep of ['|', '', '//', 0]) {
+      assert.throws(() => list({ sep }), TypeError);
+    }
+  });
+
   it('createReadStream: ranges, chunking, zero-copy chunks', async () => {
     // Borrowed chunks: the lease ends with release(), never with the stream.
     const read = async (stream) => {

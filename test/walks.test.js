@@ -128,7 +128,9 @@ describe('native walks under strict routing', () => {
       ['o.txt', 'sub', 'sub/p.txt'],
     );
     // The managed appRoot keeps its own recursive listing.
-    assert.ok(fs.readdirSync(root, options).includes('site/index.html'));
+    assert.ok(
+      fs.readdirSync(root, options).includes(path.join('site', 'index.html')),
+    );
   });
 
   it('recursive opendir of a directory above appRoot', async () => {

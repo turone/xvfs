@@ -167,7 +167,21 @@ describe('fs-patch: reads over sab and memory places', () => {
       'index.html',
       'sub',
     ]);
-    assert.deepEqual(fs.readdirSync(at('pub'), { recursive: true }), [
+    // A recursive listing names its entries with path.sep, as native
+    // node:fs does (`sub\a.txt` on Windows), in every encoding; the facade
+    // keeps the '/' of its keys.
+    const nested = path.join('sub', 'a.txt');
+    const recursive = ['big.txt', 'hidden.bin', 'index.html', 'sub', nested];
+    assert.deepEqual(fs.readdirSync(at('pub'), { recursive: true }), recursive);
+    assert.deepEqual(
+      await fs.promises.readdir(at('pub'), { recursive: true }),
+      recursive,
+    );
+    assert.deepEqual(
+      fs.readdirSync(at('pub'), { recursive: true, encoding: 'buffer' }),
+      recursive.map((name) => Buffer.from(name)),
+    );
+    assert.deepEqual(k.fs('pub').readdir('/', { recursive: true }), [
       'big.txt',
       'hidden.bin',
       'index.html',
