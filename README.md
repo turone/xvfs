@@ -1018,7 +1018,7 @@ symlinks are unavailable.
 `npm run bench [-- --only read,patch]` measures the hot paths — reads,
 streams, the patched `node:fs`, routing, publication, update → ACK →
 free, watcher epochs, compaction, `require` and `initialize()` — each
-scenario in its own process, and writes JSON to `tmp/bench/`;
+scenario in its own process, and writes JSON to `.work/bench/`;
 `node bench/compare.js base.json new.json [--noise base2.json]` compares
 two runs.
 
