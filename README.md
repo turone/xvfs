@@ -69,6 +69,19 @@ npm install shared-memory-fs
 Package exports: `.`, `./register`, `./adapters/fs-patch`,
 `./adapters/module-hook`.
 
+Type declarations ship with the package, written by hand next to the
+modules they describe: `index.d.ts` next to `index.js`, `lib/*.d.ts` for
+the modules whose API `index.js` exports, and one next to each subpath
+(`lib/bootstrap/register.d.mts`, `lib/adapters/*.d.ts`); `package.json`
+points to them through `types`. They need `@types/node`, and a
+`moduleResolution` that reads `exports` — `node16`, `nodenext` or
+`bundler` — for the subpaths (`node10` sees the entry only). `kernel` is
+a getter of the CommonJS entry, not an ES module named export: from ESM
+read `VfsKernel.current`, or `kernel` of the default import.
+`npm run test:types` checks the declarations against their usage in
+`test-types/`, `npm test` their exports against the runtime (see
+[Tests](#tests)).
+
 ## Quick start
 
 Bootstrap (main thread only):
@@ -781,7 +794,9 @@ code should use `kernel.fs(name)`.
 snapshot, installs hooks the config asks for, applies `vfs-update` from
 the link port and ACKs **those — and only those** — back, with the
 retired versions its streams and leases still read. Publishes
-`VfsKernel.current` (also the `kernel` getter on the package).
+`VfsKernel.current` (also the `kernel` getter of the package's CommonJS
+entry — not an ES module named export: from ESM read `VfsKernel.current`,
+or `kernel` of the default import).
 `preparers` serve local writes to the worker's own `map` places; a
 worker never prepares shared places. The options object replaces the
 positional `attach(link)` of earlier versions.
@@ -1166,9 +1181,10 @@ in `readdir` / `exists` / patched `fs`.
 ## Tests
 
 ```
-npm test        # node --test "test/*.test.js"
-npm run lint    # eslint + prettier
-npm run bench   # hot-path benchmarks (not part of npm test or CI)
+npm test              # node --test "test/*.test.js"
+npm run test:types    # tsc --noEmit over test-types/
+npm run lint          # eslint + prettier
+npm run bench         # hot-path benchmarks (not part of npm test or CI)
 ```
 
 Run the complete test suite with `npm test`. The suite covers
@@ -1176,6 +1192,17 @@ configuration, cache allocation, scanner, places, routing, module hooks,
 compression, SEA, watcher, bootstrap, workers and strict routing
 behavior. The symlink test may be skipped on platforms where test
 symlinks are unavailable.
+
+`npm run test:types` type-checks the declarations (`index.d.ts`,
+`lib/**/*.d.ts`) with `tsc --noEmit` under `strict` against
+`test-types/`: the usage of this README as positive cases, the exact
+type of what every call returns (`expectType`), and `@ts-expect-error`
+where a wrong configuration or call must not compile. That checks the
+declarations against their intended use, not against the code;
+`test/exports.test.js`, part of `npm test`, checks that every value they
+export exists at runtime — for `require()` and for `import` — and that
+every declaration file is packed. ESLint does not parse TypeScript
+(`.eslintignore`); prettier formats these files like the rest.
 
 `npm run bench [-- --only read,patch]` measures the hot paths — reads by
 size, leases (`views`), streams by size and `highWaterMark`, the patched

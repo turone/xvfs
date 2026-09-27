@@ -1,3 +1,7 @@
 node_modules/
 examples/*/pub/
 .work/
+# Type declarations and type tests: espree (eslint-config-metarhia) cannot
+# parse TypeScript; prettier formats them, `npm run test:types` checks them.
+*.ts
+*.mts
