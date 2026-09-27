@@ -7,6 +7,7 @@ const { availableParallelism } = require('node:os');
 const { Worker } = require('node:worker_threads');
 const { VfsKernel } = require('../lib/kernel.js');
 const { bytecodeKey } = require('../lib/companion.js');
+const { loadRimraf } = require('../lib/disk.js');
 const {
   tmpDir,
   writeTree,
@@ -17,6 +18,7 @@ const {
   until,
   tap,
   nextEvent,
+  diskCalls,
 } = require('./helpers.js');
 
 describe('VfsKernel: lifecycle', () => {
@@ -106,6 +108,141 @@ describe('VfsKernel: lifecycle', () => {
       gate.resolve();
       k.close();
       rm(big);
+    }
+  });
+
+  // A close() while initialize() runs is final: initialize() rejects with
+  // the closed-kernel error — never a TypeError of the pool close() took
+  // away, nor the failure of a read close() found in flight — runs no
+  // preparer after it, and starts no disk call after it but the rest of
+  // the reads it found in flight. Places whose sources the pipeline reads
+  // itself (a map place, a prepared one) and one whose pool reads them (a
+  // sab place). Closed at once, the scan is at its first readdir and stops;
+  // once it stats the files, the publication of the first refuses before
+  // it reads; while it reads them, the reads finish — or fail, the file
+  // changed meanwhile — and nothing follows them.
+  it('close() during initialize() rejects with the closed-kernel error', async () => {
+    await loadRimraf(); // its probe of a missing path is a disk call too
+    const tree = { 'a.txt': 'a', 'b.txt': 'b', 'sub/c.txt': 'c' };
+    const places = {
+      map: { provider: 'map', fs: true },
+      prepared: { fs: { ext: ['txt'], prepare: 'upper' } },
+      sab: { fs: true },
+    };
+    let closed = false;
+    let prepared = 0; // preparer calls after close()
+    const preparers = {
+      upper: (raw) => {
+        if (closed) prepared++;
+        return raw.toString().toUpperCase();
+      },
+    };
+    // Disk calls after initialize() returns: the readdir of the place is in
+    // flight; then the one of sub/, a stat per file, the open of each read.
+    // A read finishes with a stat, a read, a stat and a close.
+    const moments = [
+      ['at once', 0],
+      ['once it stats the files', 2],
+      ['while it reads them', 5, 'reads'],
+      ['while it reads them, which then fail', 5, 'fail'],
+    ];
+    for (const [name, spec] of Object.entries(places)) {
+      for (const [when, started, reading] of moments) {
+        const failing = reading === 'fail';
+        const what = `${name}, ${when}`;
+        const files = {};
+        for (const [rel, text] of Object.entries(tree)) {
+          files[`${name}/${rel}`] = text;
+        }
+        const dir = writeTree(tmpDir('kernel-close-init'), files);
+        const k = new VfsKernel(config({ [name]: spec }), {
+          appRoot: dir,
+          console: quiet,
+          preparers,
+        });
+        closed = false;
+        prepared = 0;
+        let calls = null;
+        try {
+          const init = k.initialize();
+          calls = diskCalls();
+          // Each read, until it has made its last disk call.
+          const reads = [];
+          const real = k.cache.reader;
+          k.cache.reader = async (file, view) => {
+            const read = real(file, view);
+            reads.push(read.catch(() => {}));
+            await read;
+            if (failing && k.state === 'closed') {
+              throw new Error('source changed');
+            }
+          };
+          await calls.started(started);
+          closed = true;
+          k.close();
+          const atClose = calls.count;
+          const inFlight = reads.length;
+          await assert.rejects(
+            init,
+            { message: '[vfs] kernel closed before publication' },
+            what,
+          );
+          await Promise.all(reads);
+          assert.equal(inFlight > 0, Boolean(reading), `${what}: reads`);
+          assert.equal(reads.length, inFlight, `${what}: no read after`);
+          assert.equal(
+            calls.count - atClose,
+            4 * inFlight,
+            `${what}: no disk call but the rest of the reads`,
+          );
+          assert.equal(prepared, 0, `${what}: no preparer after close()`);
+          assert.equal(k.state, 'closed');
+          assert.equal(k.cache, null);
+        } finally {
+          calls?.stop();
+          k.close();
+          rm(dir);
+        }
+      }
+    }
+  });
+
+  // SEA assets need no read: closed at once, the first publication refuses
+  // before its preparer runs.
+  it('close() during initialize() of a SEA place runs no preparer', async () => {
+    const asset = Buffer.from('module.exports = 1;');
+    const seaModule = {
+      isSea: () => true,
+      getAssetKeys: () => ['pub/a.js', 'pub/b.js'],
+      getAsset: () =>
+        asset.buffer.slice(asset.byteOffset, asset.byteOffset + asset.length),
+    };
+    let closed = false;
+    let prepared = 0;
+    const k = new VfsKernel(
+      config({ pub: { provider: 'sea', fs: { ext: ['js'], prepare: 'id' } } }),
+      {
+        appRoot: root,
+        console: quiet,
+        seaModule,
+        preparers: {
+          id: (raw) => {
+            if (closed) prepared++;
+            return raw;
+          },
+        },
+      },
+    );
+    try {
+      const init = k.initialize();
+      closed = true;
+      k.close();
+      await assert.rejects(init, {
+        message: '[vfs] kernel closed before publication',
+      });
+      assert.equal(prepared, 0, 'no preparer after close()');
+    } finally {
+      k.close();
     }
   });
 

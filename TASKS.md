@@ -230,13 +230,6 @@ source and `dest`.
 **Done when.** The refusal carries the operation's `syscall`, `path` and
 `dest`, with a test.
 
-## P3 — `close()` during `initialize()` of a map place with files
-
-**Problem.** `initialize()` rejects with `TypeError: Cannot read properties
-of null (reading 'reader')` instead of the closed-kernel error.
-
-**Done when.** It rejects with the closed-kernel error, with a test.
-
 ## P3 — Scanner on a filesystem without `d_type`
 
 **Problem.** A hypothesis from reading the code: `readdir(withFileTypes)`

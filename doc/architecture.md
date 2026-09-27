@@ -268,8 +268,14 @@ _Why:_ a file that changes while being read must never be published half
 written, and a flapping file must not loop.
 
 **Failure policy.** Init aborts on any unreadable source, preparer error,
-failing `fs.script.compile` or path-less input that does not fit. Live
-updates keep the previous version and companions. `require.compile` is
+failing `fs.script.compile` or path-less input that does not fit; a
+`close()` while it runs stops its scan, and the publication in progress
+stops at its next step: a read it began finishes, no other disk call
+starts, no preparer runs, and whatever fails once the kernel is closed —
+a read close() cut short, the reader close() took away — fails as the
+close (`#publishEntry`), so that `initialize()` rejects with the
+closed-kernel error. Live updates keep the previous version and
+companions. `require.compile` is
 best-effort. A source `fs.script.compile` cannot compile is one error
 wherever it is published: `ENOTSUP` (`fs.script.compile: source does not
 compile`), `syscall` `open`, `path` the source's — `bytecodeFor()` throws it
