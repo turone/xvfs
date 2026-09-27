@@ -1233,8 +1233,8 @@ summary again (`--md`, `--filter`).
 ## Support
 
 CI (`.github/workflows/ci.yml`) runs on pushes to `main` and on pull
-requests to `main`: `npm ci`, `npm test`, `npm run test:examples` and
-`npm run lint`, on each combination below:
+requests to `main`: `npm ci`, `npm test`, `npm run test:examples`,
+`npm run lint` and `npm run test:types`, on each combination below:
 
 |         | Node 22.22.3 | Node 22.x | Node 24.12.0 | Node 24.x | Node 26.x |
 | ------- | ------------ | --------- | ------------ | --------- | --------- |

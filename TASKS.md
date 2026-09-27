@@ -148,13 +148,6 @@ fails.
 **Done when.** Both tests wait for the message they read (`nextMessage`,
 or `until` over the port's messages), and 50 runs under load pass.
 
-## P3 — TypeScript declarations
-
-**Problem.** The public API has no type declarations.
-
-**Done when.** Declarations cover the public API (`VfsConfig`, `VfsKernel`,
-`PlaceFs`, `attach`) and a type check runs in CI.
-
 ## After the next Node.js 26.x release — `doc/alternatives.md`
 
 **Problem.** The comparison describes Node v26.10.0; `main` already removes
