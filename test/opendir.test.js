@@ -169,7 +169,7 @@ describe('opendir: the filtered territory of readdir', () => {
     );
     const recursive = await fs.promises.opendir(site, { recursive: true });
     assert.deepEqual(within(site, await drain(recursive)), SITE);
-    assert.deepEqual(fs.readdirSync(site, { recursive: true }), SITE);
+    assert.deepEqual(slashed(fs.readdirSync(site, { recursive: true })), SITE);
     assert.deepEqual(names(drainSync(fs.opendirSync(at('site', 'media')))), [
       'clip.mp4',
       'deep',
@@ -190,7 +190,7 @@ describe('opendir: the filtered territory of readdir', () => {
       root,
       drainSync(fs.opendirSync(root, { recursive: true })),
     );
-    assert.deepEqual(tree, fs.readdirSync(root, { recursive: true }));
+    assert.deepEqual(tree, slashed(fs.readdirSync(root, { recursive: true })));
     assert.deepEqual(
       tree.filter((rel) => rel.startsWith('site/')),
       SITE.map((rel) => `site/${rel}`),

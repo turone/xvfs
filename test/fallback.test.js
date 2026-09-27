@@ -25,6 +25,10 @@ const {
 const resolved = (places, defaults) =>
   new VfsConfig({ places, defaults }).places.map((p) => p.fs?.fallback);
 
+// The names of a recursive listing through the patched node:fs: the keys'
+// '/' becomes path.sep, as native node:fs names them.
+const natives = (names) => names.map((name) => name.split('/').join(path.sep));
+
 describe('fs.fallback: config', () => {
   it('is normalized explicitly for disk-origin places, null elsewhere', () => {
     const places = {
@@ -199,15 +203,18 @@ describe('strict: appRoot is a managed root', () => {
 
   it('a recursive listing descends through each place own routing', async () => {
     k.fs('mem').writeFile('/m.txt', 'm');
-    assert.deepEqual(fs.readdirSync(root, { recursive: true }), [
-      'lib',
-      'mem',
-      'mem/m.txt',
-      'pub',
-      'pub/index.html',
-      'pub/sub',
-      'pub/sub/a.html',
-    ]);
+    assert.deepEqual(
+      fs.readdirSync(root, { recursive: true }),
+      natives([
+        'lib',
+        'mem',
+        'mem/m.txt',
+        'pub',
+        'pub/index.html',
+        'pub/sub',
+        'pub/sub/a.html',
+      ]),
+    );
     assert.deepEqual(await fs.promises.readdir(root), ['lib', 'mem', 'pub']);
   });
 
@@ -328,16 +335,19 @@ describe("fs.fallback: 'disk' — a partial disk cache", () => {
       'page.html',
       'pic.png',
     ]);
-    assert.deepEqual(fs.readdirSync(at('site'), { recursive: true }), [
-      'app.js',
-      'index.html',
-      'logo.png',
-      'media',
-      'media/clip.mp4',
-      'sub',
-      'sub/page.html',
-      'sub/pic.png',
-    ]);
+    assert.deepEqual(
+      fs.readdirSync(at('site'), { recursive: true }),
+      natives([
+        'app.js',
+        'index.html',
+        'logo.png',
+        'media',
+        'media/clip.mp4',
+        'sub',
+        'sub/page.html',
+        'sub/pic.png',
+      ]),
+    );
   });
 
   it('cached extensions stay VFS-only, even when present on disk', () => {
@@ -498,19 +508,24 @@ describe("fs.fallback: 'disk' — nested listings, named as path.relative does",
 
   const DIRS = [[], ['..private'], ['x y'], ['a..b', 'c']];
 
+  // The facade names them with '/', the form of keys; the patched node:fs
+  // with path.sep, as native node:fs does.
   it('names: PlaceFs and node:fs, strings and Buffers', () => {
     for (const dir of DIRS) {
       const names = reference(...dir).map(([name]) => name);
       const key = '/' + dir.join('/');
       const options = { recursive: true };
       assert.deepEqual(k.fs('site').readdir(key, options), names, key);
-      assert.deepEqual(fs.readdirSync(at('site', ...dir), options), names);
+      assert.deepEqual(
+        fs.readdirSync(at('site', ...dir), options),
+        natives(names),
+      );
       const buffers = fs.readdirSync(at('site', ...dir), {
         ...options,
         encoding: 'buffer',
       });
       assert.ok(buffers.every((name) => Buffer.isBuffer(name)));
-      assert.deepEqual(buffers.map(String), names);
+      assert.deepEqual(buffers.map(String), natives(names));
     }
   });
 
@@ -541,7 +556,7 @@ describe("fs.fallback: 'disk' — nested listings, named as path.relative does",
         isDirectory,
       ]),
     ];
-    const names = expected.map(([name]) => name);
+    const names = natives(expected.map(([name]) => name));
     const spellings = [root, root + path.sep];
     if (process.platform === 'win32') spellings.push(root.toUpperCase());
     for (const given of spellings) {
@@ -616,11 +631,10 @@ describe("fs.fallback: 'disk' — the non-strict default", () => {
       writeDisk(at('media', 'raw.html'), 'raw');
       assert.equal(fs.readFileSync(at('media', 'raw.html'), 'utf8'), 'raw');
       assert.deepEqual(fs.readdirSync(at('media')), ['clip.mp4']);
-      assert.deepEqual(fs.readdirSync(at(), { recursive: true }), [
-        'index.html',
-        'media',
-        'media/clip.mp4',
-      ]);
+      assert.deepEqual(
+        fs.readdirSync(at(), { recursive: true }),
+        natives(['index.html', 'media', 'media/clip.mp4']),
+      );
     } finally {
       fsPatch.uninstall();
       k.close();
@@ -650,12 +664,10 @@ describe("fs.fallback: 'disk' — the non-strict default", () => {
         assert.equal(fs.readFileSync(at('later', 'x.bin'), 'utf8'), 'x');
         assert.deepEqual(fs.readdirSync(at('media')), ['clip.mp4']);
         assert.deepEqual(fs.readdirSync(at('later')), []);
-        assert.deepEqual(fs.readdirSync(at(), { recursive: true }), [
-          'index.html',
-          'later',
-          'media',
-          'media/clip.mp4',
-        ]);
+        assert.deepEqual(
+          fs.readdirSync(at(), { recursive: true }),
+          natives(['index.html', 'later', 'media', 'media/clip.mp4']),
+        );
         assert.deepEqual(k.fs('site').readdir('/later'), []);
         assert.equal(k.fs('site').readFile('/later/x.bin'), null, 'cached ext');
       } finally {

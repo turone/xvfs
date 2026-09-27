@@ -798,7 +798,9 @@ ignores as it does `ENOENT`. `writeFile` / `appendFile` honor a `flag` as
 `node:fs` does: `w…` replaces the file, `a…` appends to it, `x` only
 creates it (`EEXIST`, checked when the write runs); a read or numeric flag
 is `ENOTSUP` in a virtual place. On disk, `node:fs` answers by its own
-rules.
+rules. A recursive `readdir` names its entries with `/`, the form of keys,
+on every platform; `sep: path.sep` asks for the native separator — what
+the patched `node:fs` lists with — in the same order, the keys'.
 
 | Method                                       | Returns                                               | Description                                                                                                                                       |
 | -------------------------------------------- | ----------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------- |
@@ -807,7 +809,7 @@ rules.
 | `withFileView(key, fn)`                      | Promise                                               | `fn(view)` under a lease; `null` without calling `fn` when missing                                                                                |
 | `stat(key, opts)`                            | `VfsStats` \| null                                    | Lazy; `{ bigint }` ok                                                                                                                             |
 | `exists(key)`                                | bool                                                  | File or implicit directory                                                                                                                        |
-| `readdir(key, opts)`                         | string[] \| Buffer[] \| Dirent[]                      | Implicit dirs; lex order; `{ withFileTypes, recursive, encoding }` or an encoding                                                                 |
+| `readdir(key, opts)`                         | string[] \| Buffer[] \| Dirent[]                      | Implicit dirs; lex order; `{ withFileTypes, recursive, encoding, sep }` or an encoding; recursive names `/`-separated unless `sep: path.sep`      |
 | `createReadStream(key, opts)`                | `VfsReadStream` \| null                               | `{ start, end }` inclusive, `zeroCopy`; `release()`                                                                                               |
 | `storedEncodings(key)`                       | string[]                                              | `'raw'` plus configured codecs                                                                                                                    |
 | `readFileCompressed(key, enc)`               | Buffer \| null                                        | Owned copy                                                                                                                                        |
@@ -895,10 +897,13 @@ Listings (`readdir`, `opendir`) give names in the requested `encoding`
 (an options object or an encoding string): `'buffer'` gives Buffer names,
 `Dirent.name` included; any other encoding re-encodes the UTF-8 name.
 Entries are deduplicated and sorted by their string names first, so every
-encoding lists them in the same order. Unlike native `node:fs` (22.22.3 to
-26.x), which fails `recursive` together with `encoding: 'buffer'`, a
-managed recursive listing gives Buffer names too; `parentPath` stays a
-string.
+encoding lists them in the same order. A recursive listing names its
+entries with `path.sep`, as native `node:fs` does (`sub\a.txt` on
+Windows) — `PlaceFs.readdir` keeps the `/` of its keys — sorted by their
+key, so every platform lists them in the same order too. Unlike native
+`node:fs` (22.22.3 to 26.x), which fails `recursive` together with
+`encoding: 'buffer'`, a managed recursive listing gives Buffer names too;
+`parentPath` stays a string.
 
 A reference to a patched function taken while the patch is installed
 (`const { readFile } = require('node:fs')`, or glob's own walk) keeps

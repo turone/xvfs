@@ -140,17 +140,6 @@ fails.
 **Done when.** Both tests wait for the message they read (`nextMessage`,
 or `until` over the port's messages), and 50 runs under load pass.
 
-## P3 — Separators of recursive listings on Windows
-
-**Problem.** A managed recursive `readdir` returns `/`-separated names on
-every platform; native `node:fs` returns `path.sep` (`sub\b.txt` on
-Windows).
-
-**Cause.** Place keys are `/`-separated and listings reuse them.
-
-**Done when.** Listings either use `path.sep` like native `node:fs` or
-document `/` as the contract, with a test pinning the choice on Windows.
-
 ## P3 — glob and virtual entries
 
 **Problem.** glob captures the `node:fs` functions it walks with when it is

@@ -989,6 +989,19 @@ be compared with a string key. Native `node:fs` (22.22.3 to 26.x) fails
 `recursive` with `encoding: 'buffer'` — its callback form even crashes the
 process — which is a defect, not a documented contract.
 
+**A recursive listing through the patched `node:fs` names its entries with
+`path.sep`, as native `node:fs` does; `PlaceFs.readdir` names them with
+`/`, the form of its keys, unless asked for a separator (`sep`). The
+separator is applied by `listing()` after sorting and before encoding, so
+every platform, separator and encoding lists in the one order of the
+keys.** _Why:_ the patch stands in for `node:fs`: code that splits a name
+on `path.sep`, or compares it with what `path.relative` gives, must not
+meet `/` on Windows — and `Dirent.parentPath` was native already, so one
+listing mixed both forms. A key is platform-independent, so the facade
+keeps its form and offers the native one as an option rather than a second
+method. Sorting the `\`-names instead would put `a0` before `a\b` on
+Windows alone.
+
 ## Hooks and bootstrap
 
 **One `module.registerHooks` chain for `require()` and `import`; modules
@@ -1117,7 +1130,9 @@ workers call `attach()`.** _Why:_ preloads do not run in worker threads.
   restores them in reverse; `.native` variants are preserved; with no
   kernel installed, and inside the native section, a wrapper is its
   original.
-- Listings are sorted and deduplicated by string name before any encoding.
+- Listings are sorted and deduplicated by string name — the key's `/`
+  form — before any separator or encoding is applied; only the patch asks
+  for `path.sep`.
 - A preparer runs once per publication attempt, on the publishing thread,
   never on read; its raw input is never kept in the VFS; a prepared source
   is never a disk entry; `prepare` and `scriptOptions` never turn
