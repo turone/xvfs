@@ -17,11 +17,13 @@ const { mkdirSync, writeFileSync } = require('node:fs');
 
 const SCENARIOS = [
   'read',
+  'views',
   'stream',
   'patch',
   'router',
   'publish',
   'ack',
+  'retain',
   'watch',
   'compact',
   'require',
