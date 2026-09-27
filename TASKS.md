@@ -140,16 +140,6 @@ fails.
 **Done when.** Both tests wait for the message they read (`nextMessage`,
 or `until` over the port's messages), and 50 runs under load pass.
 
-## P3 — glob and virtual entries
-
-**Problem.** glob captures the `node:fs` functions it walks with when it is
-loaded: loaded after the patch it walks the places (virtual entries show,
-filtered by route); loaded before, it walks the disk natively (they never
-show). Which one an application gets depends on load order.
-
-**Done when.** One behavior is chosen and documented — e.g. glob always
-lists through the places — with a test for both load orders.
-
 ## P3 — TypeScript declarations
 
 **Problem.** The public API has no type declarations.
