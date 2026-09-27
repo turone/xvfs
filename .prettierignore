@@ -1,6 +1,6 @@
 package-lock.json
 package.json
-tmp/
+.work/
 # Local, user-owned agent files: never part of the project, never reformatted.
 CLAUDE.md
 .claude/

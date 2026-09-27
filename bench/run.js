@@ -12,7 +12,7 @@ const { mkdirSync, writeFileSync } = require('node:fs');
 //   node bench/compare.js base.json new.json [--noise base2.json] [--md]
 //
 // Every scenario runs as one function in its own process (`--expose-gc`);
-// results go to `tmp/bench/<platform>-<node>-<time>.json` unless `--out`
+// results go to `.work/bench/<platform>-<node>-<time>.json` unless `--out`
 // names a file. A figure is the median of `repeats` rounds after a warm-up.
 
 const SCENARIOS = [
@@ -116,7 +116,7 @@ const main = async (argv) => {
     argOf(argv, 'out', null) ||
     path.join(
       ROOT,
-      'tmp',
+      '.work',
       'bench',
       `${process.platform}-${node}-${stamp}.json`,
     );
