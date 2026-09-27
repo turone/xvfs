@@ -728,8 +728,8 @@ raw bytes and miss virtual entries.
 
 - _Implemented_, served by the places: `readFile`, `stat`, `lstat`,
   `access`, `realpath`, `existsSync`, `readdir`, `opendir`,
-  `createReadStream`, `writeFile`, `appendFile`, `unlink`, `mkdir`, `rm`,
-  `rename`, `copyFile` and a non-recursive `cp`.
+  `createReadStream`, `openAsBlob`, `writeFile`, `appendFile`, `unlink`,
+  `mkdir`, `rm`, `rename`, `copyFile` and a non-recursive `cp`.
 - _Recognized but unsupported for managed territory_ (`ENOTSUP`): `open` of
   a virtual entry, whatever its flags; a copy or `rename` of a prepared
   virtual entry, a copy of a place directory; a recursive `cp` of or into
@@ -761,6 +761,18 @@ place's — and hands it over. _Why:_ a guarded native
 missed virtual entries. A snapshot keeps it synchronous and simple;
 `node:fs` does not promise to show entries changed during an iteration
 either.
+
+**`fs.openAsBlob` is implemented, routed as `readFile`: a `Blob` over an
+owned copy of the canonical content, `EISDIR` for a directory, and a
+rejection for what the patch refuses.** _Why:_ it reads through a native
+binding — no `node:fs` function on its way that a wrapper could route — so
+unpatched it read what strict hides and the raw file behind a prepared
+entry: the one path-taking read of `node:fs` that reached the disk past
+every wrapper. A `Blob` copies its source, so a lease could not be released
+behind it; the owned copy costs one more copy than a native `Blob`, which
+reads lazily. The call is documented to return a promise, so the patch's
+refusals are rejections; `node:fs` refuses its own — a missing file —
+before the promise today, and the paths it passes through keep that form.
 
 **`glob` results are filtered by route, relative ones against its `cwd`
 option.** _Why:_ glob walks with the `node:fs` functions it captured on first

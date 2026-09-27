@@ -865,9 +865,16 @@ is a routing and access boundary, not an OS sandbox.
 
 **1. Implemented** — served by the places; sync, callback and promises
 forms: `readFile`, `stat`, `lstat`, `access`, `realpath`, `readdir`,
-`opendir`, `existsSync`, `createReadStream`, `writeFile`, `appendFile`,
-`unlink`, `mkdir`, `rm`, `rename`, `copyFile` and a non-recursive `cp`
-(see [Copies and renames](#copies-and-renames)).
+`opendir`, `existsSync`, `createReadStream`, `openAsBlob`, `writeFile`,
+`appendFile`, `unlink`, `mkdir`, `rm`, `rename`, `copyFile` and a
+non-recursive `cp` (see [Copies and renames](#copies-and-renames)).
+
+`openAsBlob` reads through a native binding, past every `node:fs`
+function, so it is routed here rather than passed through: a published
+entry gives a `Blob` over an owned copy of its canonical content, a
+directory is `EISDIR`, and what the patch refuses is a rejection — the call
+is documented to return a promise. The disk territory and paths outside
+stay native, in whatever form `node:fs` refuses them.
 
 `opendir` returns a `Dir` over exactly what `readdir` lists there (the
 strict `appRoot`, a place directory, the disk territory of
@@ -1028,7 +1035,7 @@ not a raw-preserving copy.
 | `ENOTDIR`       | `readdir` of a file; a virtual key under a file; a file the VFS serves or stores, named with a trailing separator (`force` ignores it in `rm`)                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                          |
 | `EXDEV`         | `rename` across a virtual place's boundary: between two places, or between one and the disk                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                             |
 | `ENOSPC`        | No room in the pool for content that cannot fall back to disk — a virtual write, copy or rename (a subtree move included), a prepared or SEA source, a `fs.script.compile` flavor; nothing is published. Named by the operation: `open` of the key (at startup too, where `initialize()` rejects with it), `rename` with `dest`, a copy's `copyfile` / `cp` with `dest` and the store's refusal as its `cause`                                                                                                                                                                                                                                                                                                                                                                                                                                          |
-| `EISDIR`        | `readFile` / `createReadStream` of an implicit directory; a virtual file written, copied or renamed where a directory is; a write or `unlink` of a place's own directory; `unlink` of a virtual directory; a virtual file write or copy to a path with a trailing separator                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                             |
+| `EISDIR`        | `readFile` / `createReadStream` / `openAsBlob` of an implicit directory; a virtual file written, copied or renamed where a directory is; a write or `unlink` of a place's own directory; `unlink` of a virtual directory; a virtual file write or copy to a path with a trailing separator                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                              |
 
 Errors carry the same `code`, `errno`, `syscall` and `path` fields as
 `node:fs`, and `dest` for copies, links and renames. A stream stopped by
