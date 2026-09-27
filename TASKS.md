@@ -151,19 +151,6 @@ Windows).
 **Done when.** Listings either use `path.sep` like native `node:fs` or
 document `/` as the contract, with a test pinning the choice on Windows.
 
-## P3 — Public diagnostics
-
-**Problem.** Only the internal `retirements()` shows what the kernel holds.
-Pool usage and fragmentation, bytes waiting to be freed, ACK age (a stuck
-worker), disk-fallback counts and preparation failures are not observable.
-
-**Cause.** A public `stats()` was deliberately left out of the lifetime
-work.
-
-**Done when.** A documented, read-only API reports these metrics, a test
-shows a stuck worker through it, and the API never frees or changes
-anything.
-
 ## P3 — Diagnostics of `prepare` conflicts inside one domain
 
 **Problem.** When one domain's object form assigns an extension to several

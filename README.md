@@ -56,6 +56,9 @@ is unsupported.
   `module.registerHooks` chain for `require()` and `import`.
 - **Chunked streaming** — `PlaceFs.createReadStream()` with HTTP Range;
   a stream always finishes the version it started with.
+- **Diagnostics** — `kernel.diagnostics()`: pool usage and fragmentation,
+  bytes waiting to be freed, a worker that does not ACK, files the pool
+  had no room for, failed preparations; read-only.
 
 ## Install
 
@@ -665,6 +668,7 @@ finish, and nothing else starts: no read, no preparer.
 | `snapshot()`         | `{ segments, places }` — published entries only                                                                                      |
 | `link()`             | `{ vfs, transferList }` for a worker — the only worker transport                                                                     |
 | `watch()`            | Start `DirWatcher` (also auto if writable disk-origin)                                                                               |
+| `diagnostics()`      | Read-only picture of the shared memory: pool, bytes waiting to be freed, each worker's ACKs and holds — [Diagnostics](#diagnostics)  |
 | `retirements()`      | Internal diagnostics (debugging, tests; not a stable API): retired versions still held — representation, bytes, age, ACKs or holders |
 | `close()`            | Stop watcher and streams, reject queued mutations, drop projections, collectable SAB                                                 |
 
@@ -672,6 +676,85 @@ finish, and nothing else starts: no read, no preparer.
 transferList }`. The kernel posts every `vfs-update` to the port, reads
 `vfs-ack`, `vfs-release` and mutation requests, and treats port `close`
 as worker exit.
+
+#### Diagnostics
+
+`kernel.diagnostics()` returns what the shared memory holds and why, as
+of the call — a frozen plain object, a new one each time:
+
+```js
+{
+  pool: {
+    limit, segmentSize, // the budget, the size of a segment (bytes)
+    segments,           // segments reserved, empty ones kept for reuse included
+    reserved,           // their bytes
+    used,               // bytes in allocations: published, retired or being published
+    free,               // reserved − used
+    largestFree,        // the largest allocation that fits without a new segment
+    fragmentation,      // 1 − largestFree / free; 0 when nothing is free
+  },
+  published: {          // what the shared places (sab, sea) publish
+    files,              // their sources, those read from disk included
+    bytes,              // what their versions take of the pool, companions included
+  },
+  retired: {            // replaced or removed representations not freed yet
+    representations, bytes, oldestMs,
+    waitingAck: { representations, bytes },     // their update not ACKed by every worker
+    waitingRelease: { representations, bytes }, // ACKed, still read by a stream or lease
+  },
+  main: {
+    held: { representations, bytes, oldestMs }, // what this thread's streams and leases still read
+  },
+  links: [              // one per linked worker (link())
+    {
+      id,
+      pending: { updates, oldestMs },           // updates it has not ACKed
+      held: { representations, bytes, oldestMs }, // retired representations it still reads
+    },
+  ],
+  disk: {               // published sources read from disk
+    files, bytes,
+    fallback: { files, bytes }, // of them, those the pool had no room for
+  },
+  preparation: {
+    failures,           // preparations that failed since initialize()
+    places,             // { [place]: failures }, each place that declares `prepare`
+  },
+  queues: {
+    watch: { epochs, rechecks }, // watcher epochs queued or running; rechecks waiting
+    mutations: { keys, barriers }, // keys of virtual places with a mutation queued or
+                                   // running; places a subtree mutation holds
+  },
+}
+```
+
+- A **representation** is what is retired and freed on its own: a source,
+  or one of its companions — a compressed form, a bytecode flavor. One
+  replaced file with gzip and bytecode is three.
+- A **stuck worker** shows as a link whose `pending.oldestMs` grows: it
+  receives updates but does not ACK them, and every representation they
+  retire stays in the pool (`retired.waitingAck`). Only an update that
+  retires one waits for ACKs; one that adds files never does. A worker
+  that ACKs but keeps a stream or lease open shows as its `held`; the
+  main thread's own streams and leases as `main.held`.
+- `pool.used` is `published.bytes` plus `retired.bytes`, plus the bytes of
+  the publications in progress: anything more is a leak.
+- `disk.fallback` counts sources a place caches but serves from disk, the
+  pool having had no room when they were published — neither larger than
+  `maxFileSize` nor kept on disk by `retainRaw: false`; they stay on disk
+  until a change republishes them. A sign that `memory.limit` is too small.
+- `preparation.failures` counts the preparations on the main thread that
+  threw or returned what no preparer may — at init, in the watcher (the
+  previous version stays), in writes.
+- `queues` that stay above zero show a pipeline that does not drain: a
+  watcher epoch that does not finish, or a mutation that does not settle.
+  A barrier (`rm`, the rename of a directory) takes over the keys queued
+  before it.
+- Read-only: it frees, settles, compacts and publishes nothing, and costs
+  nothing on reads or publications — every figure but the failures is
+  taken from the pool, the retirement books, the links, the index and the
+  queues when asked. It walks the index: call it every few seconds, not
+  per request. Main thread only, on a ready kernel.
 
 #### Adapter API
 
