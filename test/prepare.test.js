@@ -644,6 +644,151 @@ describe('prepare pipeline: the preparer contract', () => {
     done();
   });
 
+  // Bytes in use inside the pool's segments.
+  const poolUsed = (k) => {
+    let used = 0;
+    for (const id of k.cache.pool.segments.keys()) {
+      used += k.cache.registry.used(id);
+    }
+    return used;
+  };
+
+  it('a Uint8Array result is placed at once: a reused buffer never reaches another key', async () => {
+    // One scratch buffer for every call, as a bundler reusing its output
+    // buffer would: the bytes of a result must be taken before the next
+    // call overwrites them — two writes in one turn run their preparers
+    // back to back, before either publication goes on.
+    const scratch = new Uint8Array(4096);
+    let result = null; // a fixed result instead of the scratch one
+    const { k, v, done } = await virtual((raw, file) => {
+      if (result) return result;
+      scratch.fill(0);
+      scratch.set(Buffer.from(`${file.key}: ${raw}`));
+      return scratch.subarray(0, file.key.length + 2 + raw.length);
+    });
+    const used = poolUsed(k);
+    await Promise.all([v.writeFile('/a.js', 'AAA'), v.writeFile('/b.js', 'B')]);
+    assert.equal(v.readFile('/a.js', 'utf8'), '/a.js: AAA');
+    assert.equal(v.readFile('/b.js', 'utf8'), '/b.js: B');
+    assert.equal(poolUsed(k), used + 10 + 8, 'each version once in the pool');
+    // The result with its extras, from the same placement.
+    const meta = { built: 1 };
+    result = { source: new Uint8Array([0x6d]), meta };
+    await v.writeFile('/m.js', 'x');
+    assert.equal(v.readFile('/m.js', 'utf8'), 'm');
+    assert.deepEqual(v.meta('/m.js'), meta);
+    assert.ok(Object.isFrozen(v.meta('/m.js')));
+    // A result that cannot live in SAB is refused as before, nothing kept.
+    const before = poolUsed(k);
+    result = { source: new Uint8Array(256 * 1024) };
+    await assert.rejects(v.writeFile('/big.js', 'x'), /does not fit in SAB/);
+    assert.equal(v.readFile('/big.js'), null);
+    assert.equal(poolUsed(k), before);
+    done();
+  });
+
+  it('the bytes are taken before meta and scriptOptions are cloned', async () => {
+    // A getter of `meta` runs inside structuredClone — after the copy, so
+    // what it does to the result's buffer changes nothing.
+    const scratch = Buffer.from('AAAA');
+    let result = {
+      source: new Uint8Array(scratch.buffer, scratch.byteOffset, 4),
+      get meta() {
+        scratch.fill('Z');
+        return { seen: true };
+      },
+    };
+    const { k, v, done } = await virtual(() => result);
+    await v.writeFile('/a.js', 'x');
+    assert.equal(v.readFile('/a.js', 'utf8'), 'AAAA');
+    assert.deepEqual(v.meta('/a.js'), { seen: true });
+    // Extras that cannot be cloned fail the write after the placement,
+    // which goes back to the pool.
+    const used = poolUsed(k);
+    result = { source: new Uint8Array(3000), meta: { fn() {} } };
+    await assert.rejects(v.writeFile('/b.js', 'x'), /could not be cloned/);
+    assert.equal(v.readFile('/b.js'), null);
+    assert.equal(poolUsed(k), used, 'the placed bytes went back to the pool');
+    result = {
+      source: new Uint8Array(3000),
+      scriptOptions: { cachedData: 1 },
+    };
+    await assert.rejects(v.writeFile('/b.js', 'x'), /reserved/);
+    assert.equal(poolUsed(k), used);
+    done();
+  });
+
+  it('a copy that throws leaves nothing allocated', async () => {
+    // Results that pass `instanceof Uint8Array` but cannot be copied: a
+    // Proxy that throws on its elements, and a subclass whose `length`
+    // lies, so the copy runs past the extent reserved for it.
+    const poisoned = new Proxy(new Uint8Array(4000), {
+      get(target, property, receiver) {
+        if (typeof property === 'string' && /^\d+$/.test(property)) {
+          throw new Error('poisoned element');
+        }
+        return Reflect.get(target, property, receiver);
+      },
+    });
+    class Short extends Uint8Array {
+      get length() {
+        return 10;
+      }
+    }
+    let result = 'good';
+    const { k, v, done } = await virtual(() => result);
+    await v.writeFile('/a.js', 'x');
+    const used = poolUsed(k);
+    for (const bad of [poisoned, new Short(4000), { source: poisoned }]) {
+      result = bad;
+      await assert.rejects(v.writeFile('/a.js', 'x'));
+      assert.equal(v.readFile('/a.js', 'utf8'), 'good');
+      assert.equal(poolUsed(k), used, 'nothing stayed allocated');
+    }
+    assert.equal(k.retired.size, 0);
+    done();
+  });
+
+  it('a preparer that closes the kernel: the write is refused as closed', async () => {
+    let kernel = null;
+    const { k, v, done } = await virtual(() => {
+      kernel.close();
+      return new Uint8Array([1, 2, 3]);
+    });
+    kernel = k;
+    await assert.rejects(
+      v.writeFile('/a.js', 'x'),
+      /kernel closed before publication/,
+    );
+    assert.equal(k.state, 'closed');
+    done();
+  });
+
+  it('a Uint8Array result placed before a failure is freed with it', async () => {
+    let bad = false;
+    const { k, v, done } = await virtual(
+      (raw) => new Uint8Array(Buffer.from(bad ? '(((' : raw.toString())),
+      {
+        fs: {
+          writable: true,
+          ext: ['js'],
+          prepare: { p: ['js'] },
+          script: { compile: true },
+        },
+      },
+    );
+    await v.writeFile('/a.js', 'module.exports = 1;');
+    const used = poolUsed(k);
+    const source = v.script('/a.js');
+    bad = true;
+    await assert.rejects(v.writeFile('/a.js', 'x'), /does not compile/);
+    assert.equal(poolUsed(k), used, 'the placed bytes went back to the pool');
+    assert.equal(v.readFile('/a.js', 'utf8'), 'module.exports = 1;');
+    assert.deepEqual(v.script('/a.js'), source);
+    assert.equal(k.retired.size, 0);
+    done();
+  });
+
   it('rejects async preparers and malformed results, keeping the old version', async () => {
     let result = 'good';
     const { k, v, done } = await virtual(() => result);

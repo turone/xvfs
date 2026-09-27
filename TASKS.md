@@ -147,22 +147,6 @@ Windows).
 **Done when.** Listings either use `path.sep` like native `node:fs` or
 document `/` as the contract, with a test pinning the choice on Windows.
 
-## P3 — One copy fewer for `Uint8Array` preparer results
-
-**Problem.** A `Uint8Array` a preparer returns is copied twice: into an
-owned canonical Buffer, then into its provisional SAB allocation.
-
-**Cause.** The first copy takes ownership — the caller may still change the
-array, and a view may cover part of an `ArrayBuffer` with a lifetime of
-its own; the second is the one publication path of strings, Buffers and
-arrays, which rollback, index-at-flush, `fs.script` compilation,
-companions and atomic publication rely on.
-
-**Done when.** A benchmark measures the publication of large `Uint8Array`
-results; only if it justifies it, they are written straight into the
-provisional allocation, with rollback and ownership guarantees kept and no
-regression for Buffer and string results.
-
 ## P3 — Public diagnostics
 
 **Problem.** Only the internal `retirements()` shows what the kernel holds.

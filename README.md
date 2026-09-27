@@ -326,7 +326,10 @@ Here `.js` goes through `api` once; that one prepared source is what
   (publish raw) | `string` | `Uint8Array` |
   `{ source, scriptOptions?, meta? }`. `file` is frozen
   `{ place, key, path, ext, stat }`. Synchronous only: a Promise or
-  thenable is a `TypeError`. Returned bytes are copied; `meta` and
+  thenable is a `TypeError`. Returned bytes are taken the moment the
+  preparer returns, before `meta` and `scriptOptions` are cloned — a
+  `Uint8Array` of a shared place is copied once, straight into its SAB
+  allocation — so a preparer may reuse its buffer; `meta` and
   `scriptOptions` are cloned and deep-frozen. `scriptOptions` never turn
   `fs.script` on by themselves. The library ships no Babel, CSS, HTML,
   SVG or image preparers — only the mechanism.

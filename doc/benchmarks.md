@@ -36,14 +36,14 @@ durable part.
 
 ## Machine
 
-|          |                                                                                    |
-| -------- | ---------------------------------------------------------------------------------- |
-| CPU      | AMD Ryzen 9 9900X, 6 cores visible                                                 |
-| Memory   | 192 GiB                                                                            |
-| OS       | Windows Server 2022 (10.0.20348)                                                   |
-| Node.js  | v24.20.0 (V8 13.6)                                                                 |
-| Disk     | every file read below was in the page cache                                        |
-| Revision | `lib/` (unchanged since `edcf38f`) and `bench/` of the commit that added this page |
+|          |                                                                                                                                                                 |
+| -------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| CPU      | AMD Ryzen 9 9900X, 6 cores visible                                                                                                                              |
+| Memory   | 192 GiB                                                                                                                                                         |
+| OS       | Windows Server 2022 (10.0.20348)                                                                                                                                |
+| Node.js  | v24.20.0 (V8 13.6)                                                                                                                                              |
+| Disk     | every file read below was in the page cache                                                                                                                     |
+| Revision | `lib/` (unchanged since `edcf38f`) and `bench/` of the commit that added this page; the preparer path changed after — see [Preparer results](#preparer-results) |
 
 ## Reproduce
 
@@ -335,6 +335,28 @@ A virtual write copies its input before anything else runs
 (`VirtualStore.write`), then the pipeline places the canonical bytes into
 SAB: `raw` (the preparer returns `null`) and `same` (it returns the raw
 input) are those two copies. A `Buffer` or `Uint8Array` of the preparer's
-own is copied once more, into an owned Buffer — three copies — and costs
+own was copied once more, into an owned Buffer — three copies — and cost
 1.4× at 64 KiB, 1.8–2× at 1 MiB, 1.7–1.8× at 8 MiB. A string is encoded
 first: 2–3.4×.
+
+That measurement decided the backlog entry "One copy fewer for
+`Uint8Array` preparer results": a `Uint8Array` result of a shared place
+now goes straight into its provisional SAB allocation the moment the
+preparer returns — two copies, like the raw input (`doc/architecture.md`,
+Preparation). The A/B of that change against the commit before it, four
+alternating pairs of `--only preparer,publish`, p50 in µs, `+` = better in
+every pair beyond max(5 %, 2 × base spread):
+
+| result   |    64 KiB |       1 MiB |         8 MiB |
+| -------- | --------: | ----------: | ------------: |
+| `raw`    | 26 → 25 ~ | 169 → 169 = | 1368 → 1401 = |
+| `same`   | 22 → 23 = | 164 → 168 = | 1465 → 1384 = |
+| `buffer` | 37 → 21 + | 310 → 167 + | 2463 → 1249 + |
+| `uint8`  | 38 → 22 + | 319 → 162 + | 2363 → 1266 + |
+| `string` | 52 → 51 = | 540 → 538 = | 4677 → 4560 = |
+
+A Buffer or `Uint8Array` result now publishes at the speed of the raw
+input (−41 to −49 % at every size, in every pair); the raw, same and
+string rows did not move (`raw` at 64 KiB: 2–8 % in the same direction
+in every pair, below the threshold), nor did the `publish` scenario (raw
+and prepared writes into `sab` and `map` places).
