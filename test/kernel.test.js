@@ -19,6 +19,7 @@ const {
   tap,
   nextEvent,
   diskCalls,
+  leakedBytes,
 } = require('./helpers.js');
 
 describe('VfsKernel: lifecycle', () => {
@@ -414,6 +415,40 @@ describe('VfsKernel: providers', () => {
     } finally {
       k1.close();
       k2?.close();
+    }
+  });
+});
+
+// Content without a disk file of its own never falls back to disk: a
+// virtual write the pool has no room for is refused — a new key is not
+// published, a replaced one keeps its version — and leaves nothing behind.
+describe('VfsKernel: a full pool', () => {
+  it('a virtual write that does not fit is refused', async () => {
+    const root = tmpDir('kernel-full');
+    const k = await kernel(
+      root,
+      { v: { origin: 'virtual', fs: { writable: true } } },
+      {
+        memory: { limit: '8 kib', segmentSize: '4 kib', maxFileSize: '4 kib' },
+      },
+    );
+    try {
+      const v = k.fs('v');
+      await v.writeFile('/a', 'a'.repeat(4000));
+      await v.writeFile('/b', 'b'.repeat(4000));
+      const updates = k.nextUpdateId;
+      const version = k.cache.entry('v', '/a');
+      const refused = { message: 'canonical source does not fit in SAB' };
+      await assert.rejects(v.writeFile('/c', 'c'.repeat(2000)), refused);
+      assert.equal(v.exists('/c'), false, 'not published');
+      await assert.rejects(v.writeFile('/a', 'A'.repeat(4000)), refused);
+      assert.equal(k.cache.entry('v', '/a'), version, 'the version kept');
+      assert.equal(v.readFile('/a', 'utf8'), 'a'.repeat(4000));
+      assert.equal(k.nextUpdateId, updates, 'nothing published');
+      assert.equal(leakedBytes(k), 0, 'nothing left behind');
+    } finally {
+      k.close();
+      rm(root);
     }
   });
 });

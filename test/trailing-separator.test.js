@@ -5,7 +5,14 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
 const fsPatch = require('../lib/adapters/fs-patch.js');
-const { tmpDir, writeTree, rm, kernel, worker } = require('./helpers.js');
+const {
+  tmpDir,
+  writeTree,
+  rm,
+  kernel,
+  worker,
+  leakedBytes,
+} = require('./helpers.js');
 
 // A path that ends in a separator names a directory, as on POSIX — on every
 // platform for what the VFS serves or stores. A file named so is ENOTDIR, a
@@ -182,7 +189,6 @@ describe('a trailing separator names a directory', () => {
           assert.equal(k.fs(name).readFile(f, 'utf8'), 'f', label);
         }
         // The destination of a copy: the copy's error, nothing written.
-        const used = k.cache.stats().totalUsed;
         for (const [name, syscall, copy] of [
           ['m', 'copyfile', (to) => fs.copyFileSync(outside, to)],
           ['v', 'copyfile', (to) => fs.promises.copyFile(outside, to)],
@@ -199,7 +205,7 @@ describe('a trailing separator names a directory', () => {
           );
           assert.equal(k.fs(name).exists('/copy.txt'), false, name);
         }
-        assert.equal(k.cache.stats().totalUsed, used, 'nothing allocated');
+        assert.equal(leakedBytes(k), 0, 'nothing allocated');
       } finally {
         w.kernel.close();
       }

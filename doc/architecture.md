@@ -1131,7 +1131,11 @@ stat        { size, mtimeMs } (+ sourceSize, encoding for compressed companions)
   is tested in a plain node process too (`test/fixtures/rm-kept.cjs`),
   loaded by `initialize()` and, as in a worker, under the patch.
 - A refused operation is tested for its error (`code`, `syscall`, `path`,
-  `dest`) and for leaving nothing behind — no copy, no deletion, no move.
+  `dest`) and for leaving nothing behind — no copy, no deletion, no move,
+  and no allocation: `leakedBytes()`, the bytes in allocations that no
+  published entry and no retired version accounts for, stays 0 (the count
+  of segments hides a leak inside one). A failure of the pool itself is
+  tested with a pool too small, or an allocation that finds no room.
 - Prove V8 cached-data acceptance in a worker: the per-isolate compilation
   cache masks `cachedDataRejected` in the compiling thread.
 - `npm ci` must work without git or SSH access: git dependencies are pinned

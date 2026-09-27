@@ -6,7 +6,14 @@ const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
 const fsPatch = require('../lib/adapters/fs-patch.js');
-const { tmpDir, writeTree, rm, kernel, worker } = require('./helpers.js');
+const {
+  tmpDir,
+  writeTree,
+  rm,
+  kernel,
+  worker,
+  leakedBytes,
+} = require('./helpers.js');
 
 // A virtual place keeps the hierarchy a filesystem has: a path is a file or
 // a directory, never both. A key under a file is ENOTDIR, a file where a
@@ -91,7 +98,6 @@ describe('virtual hierarchy', () => {
         await place.writeFile('/f.txt', 'f');
         await place.writeFile('/dir/a.txt', 'a');
         const keys = keysOf(k, name);
-        const used = k.cache.stats().totalUsed;
         for (const [run, code, key] of [
           [() => place.writeFile('/f.txt/x', 'x'), 'ENOTDIR', '/f.txt/x'],
           [() => place.writeFile('/f.txt/y/z', 'z'), 'ENOTDIR', '/f.txt/y/z'],
@@ -102,7 +108,7 @@ describe('virtual hierarchy', () => {
           refused(await outcome(run), code, 'open', at(name, key), undefined);
         }
         assert.deepEqual(keysOf(k, name), keys, 'nothing published');
-        assert.equal(k.cache.stats().totalUsed, used, 'nothing allocated');
+        assert.equal(leakedBytes(k), 0, 'nothing allocated');
         // A directory takes new files; a file is still rewritten in place.
         await place.writeFile('/dir/b.txt', 'b');
         await place.writeFile('/f.txt', 'g');
@@ -291,7 +297,6 @@ describe('virtual hierarchy', () => {
       const v = k.fs('v');
       await v.writeFile('/f.txt', 'f');
       await v.writeFile('/tree/t.txt', 't');
-      const used = k.cache.stats().totalUsed;
       const refusals = await Promise.allSettled([
         v.writeFile('/f.txt/x', 'x'),
         v.rename('/tree', '/f.txt/tree'),
@@ -303,7 +308,7 @@ describe('virtual hierarchy', () => {
       );
       await drained();
       assert.equal(k.mutations.size, 0, 'no lock left');
-      assert.equal(k.cache.stats().totalUsed, used, 'nothing allocated');
+      assert.equal(leakedBytes(k), 0, 'nothing allocated');
       // A publication that fails releases its key: nothing blocks it after.
       await assert.rejects(v.writeFile('/p.bad', 'x'), /boom/);
       await v.writeFile('/p.bad/child.txt', 'c');

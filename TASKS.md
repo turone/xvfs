@@ -240,21 +240,6 @@ full disk answers), the operation's `syscall` and `path`, and `dest` for
 a rename or a copy — for main-thread and worker mutations alike, with
 tests.
 
-## P3 — Coverage gaps found by mutation testing
-
-**Problem.** Mutants survive on `main` as on later revisions: a
-publication that fails does not free its own allocations
-(`cache.stats().totalUsed` counts segments, not the bytes in them); no
-test fills the pool, so a subtree move that stops half-way, a source that
-silently does not publish, or a script flavor dropped instead of refused
-go unseen; no test reads a map + disk place without a preparer; no test
-closes a kernel with a recheck pending, sees a recheck succeed, or deletes
-a map + disk file through the watcher; no test copies a symbolic link
-into a store place without `dereference`, fixes the order of the two
-refusals of a copy, or shows that a `Dir` is a snapshot.
-
-**Done when.** A test for each, each seen failing under its mutant.
-
 ## After the next Node.js 26.x release — `doc/alternatives.md`
 
 **Problem.** The comparison describes Node v26.10.0; `main` already removes

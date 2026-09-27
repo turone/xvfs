@@ -399,6 +399,56 @@ describe('single-file copies hand the raw input to the destination', () => {
     }
   });
 
+  // Both refusals that read nothing apply — an option the copy cannot
+  // honor, a *Sync copy into a place that cannot block: the option's comes
+  // first, whatever the destination.
+  it('an option the copy cannot honor is refused before a place that cannot block', async () => {
+    const from = external('x');
+    const to = at('vs', 'both.txt');
+    for (const [run, detail] of [
+      [() => fs.copyFileSync(from, to, COPYFILE_FICLONE_FORCE), 'FICLONE'],
+      [() => fs.cpSync(from, to, { filter: () => true }), 'filter'],
+    ]) {
+      const err = await outcome(run);
+      assert.equal(err.code, 'ENOTSUP', detail);
+      assert.match(err.message, new RegExp(`\\(\\w*${detail}\\w*\\)`));
+      assert.equal(k.fs('vs').exists('/both.txt'), false);
+    }
+  });
+
+  // Without `dereference`, cp copies a symbolic link as a link, which a
+  // store cannot hold: refused before anything is read. On Windows without
+  // the privilege to link a file, a junction — a link to a directory —
+  // stands in for one.
+  it('cp of a symbolic link into a store is refused without dereference', async () => {
+    const target = external('linked');
+    let link = fresh('link.txt');
+    let file = true;
+    try {
+      fs.symlinkSync(target, link, 'file');
+    } catch {
+      link = fresh('link-dir');
+      fs.symlinkSync(out, link, 'junction');
+      file = false;
+    }
+    for (const [form, cp, place] of [
+      ['cpSync', (from, to) => fs.cpSync(from, to), 'vmp'],
+      ['cp', COPIES.cp, 'vs'],
+      ['promises.cp', COPIES['promises.cp'], 'vmp'],
+    ]) {
+      const to = at(place, 'link.txt');
+      const err = await outcome(() => cp(link, to));
+      refusal(err, 'ENOTSUP', 'cp', link, to);
+      assert.match(err.message, /symbolic link/, form);
+      assert.equal(k.fs(place).exists('/link.txt'), false, form);
+    }
+    // Followed, a link to a file is the file.
+    if (file) {
+      fs.cpSync(link, at('vmp', 'link.txt'), { dereference: true });
+      assert.equal(k.fs('vmp').readFile('/link.txt', 'utf8'), 'linked');
+    }
+  });
+
   it('cp never puts a file on a directory, as node:fs', async () => {
     const from = external('f');
     const dir = fresh('dir');

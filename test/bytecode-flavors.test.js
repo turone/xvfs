@@ -12,7 +12,7 @@ const {
   rm,
   kernel,
   worker,
-  usedBytes,
+  leakedBytes,
 } = require('./helpers.js');
 
 // Bytecode flavors: fs.script.compile (bare vm.Script, PlaceFs.script()) and
@@ -246,13 +246,12 @@ describe('bytecode flavors: failure and rollback', () => {
     try {
       const v = k.fs('v');
       await v.writeFile('/h.js', '({ user }) => `hi ${user}`');
-      const before = k.cache.stats().totalUsed;
       broken = true;
       await assert.rejects(v.writeFile('/h.js', 'x => x'));
-      const after = k.cache.stats().totalUsed;
+      // The bytes in allocations, which the count of segments would hide.
       assert.equal(
-        after,
-        before,
+        leakedBytes(k),
+        0,
         'no leaked allocation from the failed attempt',
       );
       assert.equal(
@@ -333,7 +332,6 @@ describe('bytecode flavors: failure and rollback', () => {
       const versions = { v: version('v'), m: version('m') };
       const updates = k.nextUpdateId;
       const retires = k.nextRetireId;
-      const used = k.cache.stats().totalUsed;
       broken = true;
       for (const [label, name, place] of [
         ['sab', 'v', k.fs('v')],
@@ -356,9 +354,55 @@ describe('bytecode flavors: failure and rollback', () => {
       assert.deepEqual(bundle(w.kernel.fs('v')), before.v, 'worker projection');
       assert.equal(k.nextUpdateId, updates, 'nothing published');
       assert.equal(k.nextRetireId, retires, 'nothing retired');
-      assert.equal(k.cache.stats().totalUsed, used, 'nothing allocated');
+      assert.equal(leakedBytes(k), 0, 'nothing allocated');
     } finally {
       w.kernel.close();
+      k.close();
+      rm(root);
+    }
+  });
+
+  // A script flavor that finds no room in the pool refuses the whole
+  // publication, as one that does not compile does — never published
+  // without it — and what the attempt placed before it, the source and the
+  // require flavor, goes back to the pool. The pool is found full by the
+  // third allocation of the attempt, the script flavor's.
+  it('fs.script.compile flavor that does not fit: refused, and what was placed is freed', async () => {
+    const root = tmpDir('bc-script-full');
+    const k = await kernel(root, {
+      v: {
+        origin: 'virtual',
+        fs: { writable: true, ext: ['js'], script: { compile: true } },
+        require: { compile: true },
+      },
+    });
+    try {
+      const v = k.fs('v');
+      await v.writeFile('/h.js', 'module.exports = 1;');
+      const { files } = k.registry.get('v');
+      const version = () =>
+        ['/h.js', bytecodeKey('/h.js'), bytecodeKey('/h.js', 'script')].map(
+          (key) => files.get(key),
+        );
+      const before = version();
+      assert.ok(before.every(Boolean), 'the source and both flavors');
+      const { cache } = k;
+      const { allocate } = cache;
+      const allocated = [];
+      cache.allocate = async function (file, options) {
+        allocated.push(file.data.length);
+        if (allocated.length === 3) return null;
+        return allocate.call(this, file, options);
+      };
+      const updates = k.nextUpdateId;
+      await assert.rejects(v.writeFile('/h.js', 'module.exports = 2;'), {
+        message: 'fs.script.compile: source does not fit in SAB',
+      });
+      assert.equal(allocated.length, 3, 'the source, then both flavors');
+      assert.deepEqual(version(), before, 'the published version stays');
+      assert.equal(k.nextUpdateId, updates, 'nothing published');
+      assert.equal(leakedBytes(k), 0, 'the source and require flavor freed');
+    } finally {
       k.close();
       rm(root);
     }
@@ -385,7 +429,6 @@ describe('bytecode flavors: failure and rollback', () => {
       k.fs('m').writeFile('/a.txt', broken);
       const updates = k.nextUpdateId;
       const retires = k.nextRetireId;
-      const used = usedBytes(k);
       for (const [label, name, place] of [
         ['sab', 'v', k.fs('v')],
         ['map', 'm', k.fs('m')],
@@ -422,7 +465,7 @@ describe('bytecode flavors: failure and rollback', () => {
       assert.equal(w.kernel.fs('v').exists('/a.js'), false, 'worker');
       assert.equal(k.nextUpdateId, updates, 'nothing published');
       assert.equal(k.nextRetireId, retires, 'nothing retired');
-      assert.equal(usedBytes(k), used, 'nothing allocated');
+      assert.equal(leakedBytes(k), 0, 'nothing allocated');
     } finally {
       w.kernel.close();
       k.close();

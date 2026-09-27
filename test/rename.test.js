@@ -5,7 +5,14 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
 const fsPatch = require('../lib/adapters/fs-patch.js');
-const { tmpDir, writeTree, rm, kernel, worker } = require('./helpers.js');
+const {
+  tmpDir,
+  writeTree,
+  rm,
+  kernel,
+  worker,
+  leakedBytes,
+} = require('./helpers.js');
 
 // Disk access behind the VFS's back: captured before any patch is installed.
 const {
@@ -451,7 +458,6 @@ describe('a rename onto itself', () => {
       const before = versions();
       const updates = k.nextUpdateId;
       const retires = k.nextRetireId;
-      const used = k.cache.stats().totalUsed;
       const threads = [
         ['sab', 'v', k.fs('v')],
         ['map', 'm', k.fs('m')],
@@ -494,7 +500,7 @@ describe('a rename onto itself', () => {
       assert.equal(w.kernel.fs('v').readFile('/d/b.txt', 'utf8'), 'bravo');
       assert.equal(k.nextUpdateId, updates, 'no update');
       assert.equal(k.nextRetireId, retires, 'nothing retired');
-      assert.equal(k.cache.stats().totalUsed, used, 'nothing allocated');
+      assert.equal(leakedBytes(k), 0, 'nothing allocated');
       assert.equal(k.mutations.size, 0);
     } finally {
       Date.now = realNow;

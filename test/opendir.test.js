@@ -209,6 +209,26 @@ describe('opendir: the filtered territory of readdir', () => {
     assert.deepEqual(names(drainSync(fs.opendirSync(at('mem')))), ['m.txt']);
   });
 
+  // A Dir lists what its directory held when it was opened — node:fs does
+  // not promise to show entries changed during an iteration either: what is
+  // written or removed after opendir, before the first read, is not seen.
+  it('a Dir is a snapshot taken when it is opened', async () => {
+    const mem = k.fs('mem');
+    try {
+      mem.writeFile('/snap/a.txt', 'a');
+      mem.writeFile('/snap/b.txt', 'b');
+      const sync = fs.opendirSync(at('mem', 'snap'));
+      const promised = await fs.promises.opendir(at('mem', 'snap'));
+      mem.writeFile('/snap/c.txt', 'c');
+      mem.unlink('/snap/a.txt');
+      assert.deepEqual(names(drainSync(sync)), ['a.txt', 'b.txt']);
+      assert.deepEqual(names(await drain(promised)), ['a.txt', 'b.txt']);
+      assert.deepEqual(fs.readdirSync(at('mem', 'snap')), ['b.txt', 'c.txt']);
+    } finally {
+      mem.rm('/snap', { recursive: true, force: true });
+    }
+  });
+
   it('outside appRoot stays node:fs', async () => {
     const native = fs.opendirSync(outside);
     assert.ok(native instanceof fs.Dir);
