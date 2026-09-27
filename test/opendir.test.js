@@ -4,19 +4,11 @@ const { describe, it, before, after } = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
-const { pathToFileURL } = require('node:url');
 const fsPatch = require('../lib/adapters/fs-patch.js');
 const { tmpDir, writeTree, rm, kernel } = require('./helpers.js');
 
 // Disk edits behind the VFS's back: captured before any patch is installed.
 const { writeFileSync: writeDisk, unlinkSync: unlinkDisk } = fs;
-
-// glob captures the node:fs functions it walks with when it is loaded. A
-// `node --test` child loads it before any test runs; this call makes sure of
-// it under plain node too. Either way glob walks natively here, so every
-// result reaches the patch's filter unfiltered — the case that filter has to
-// hold alone.
-fs.globSync('*', { cwd: __dirname });
 
 // opendir lists the same filtered territory as readdir: published entries
 // from the VFS, plus the directories and uncached files of an
@@ -366,52 +358,5 @@ describe('opendir: the filtered territory of readdir', () => {
       code: 'ENOENT',
       syscall: 'opendir',
     });
-  });
-
-  // glob walks natively here (see the top of the file): only the patch's
-  // filter stands between its results and the listing rules.
-  it('strict glob never yields what the listings hide, whatever its cwd', async () => {
-    const hidden = ['late.html', 'raw.html', 'raw.js'];
-    const shown = (list) => {
-      const rels = slashed(list).map((p) =>
-        path.isAbsolute(p) ? slashed([path.relative(root, p)])[0] : p,
-      );
-      assert.ok(rels.includes('site/index.html'), rels.join());
-      assert.ok(rels.includes('site/media/deep/frame.png'), rels.join());
-      assert.ok(
-        rels.every((rel) => !hidden.includes(path.posix.basename(rel))),
-        rels.join(),
-      );
-      return rels;
-    };
-    const pattern = 'site/**';
-    shown(fs.globSync(pattern, { cwd: root }));
-    shown(fs.globSync(path.join(root, pattern).replace(/\\/g, '/')));
-    shown(
-      fs
-        .globSync(pattern, { cwd: root, withFileTypes: true })
-        .map((entry) => path.join(entry.parentPath, entry.name)),
-    );
-    shown(
-      await new Promise((resolve, reject) => {
-        fs.glob(pattern, { cwd: root }, (err, matches) =>
-          err ? reject(err) : resolve(matches),
-        );
-      }),
-    );
-    const collected = [];
-    for await (const match of fs.promises.glob(pattern, { cwd: root })) {
-      collected.push(match);
-    }
-    shown(collected);
-    // At appRoot: the enabled places on disk, never an unmanaged sibling.
-    assert.deepEqual(fs.globSync('*', { cwd: root }).sort(), [
-      'closed',
-      'site',
-    ]);
-    assert.deepEqual(fs.globSync('*', { cwd: pathToFileURL(root) }).sort(), [
-      'closed',
-      'site',
-    ]);
   });
 });

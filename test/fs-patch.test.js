@@ -424,20 +424,20 @@ describe('fs-patch: strict routing', () => {
     await assert.rejects(fs.promises.truncate(secret, 0), { code: 'EACCES' });
   });
 
-  it('glob never yields denied paths', async () => {
+  // glob walks natively here (the test runner loaded it before the patch):
+  // a walk into the places is refused; the routed walk is test/glob.test.js.
+  it('glob loaded before the patch never walks the places natively', async () => {
     const pattern = path.join(root, '*', '*').replace(/\\/g, '/');
-    const names = (list) => list.map((p) => path.basename(String(p))).sort();
-    // Published, disk-backed and passthrough entries stay; denied ones
-    // (hidden.bin, lib/util.js, stray/s.txt) never appear.
-    const visible = ['big.txt', 'index.html', 'n.txt', 'u.txt'];
-    assert.deepEqual(names(fs.globSync(pattern)), visible);
-    const viaCb = await new Promise((resolve, reject) =>
-      fs.glob(pattern, (err, m) => (err ? reject(err) : resolve(m))),
-    );
-    assert.deepEqual(names(viaCb), visible);
-    const collected = [];
-    for await (const entry of fs.promises.glob(pattern)) collected.push(entry);
-    assert.deepEqual(names(collected), visible);
+    assert.throws(() => fs.globSync(pattern), {
+      code: 'ENOTSUP',
+      syscall: 'scandir',
+      path: root,
+    });
+    const viaCb = await new Promise((resolve) => fs.glob(pattern, resolve));
+    assert.equal(viaCb.code, 'ENOTSUP');
+    await assert.rejects(fs.promises.glob(pattern).next(), {
+      code: 'ENOTSUP',
+    });
   });
 
   it('mutating APIs honour a read-only place even without strict', () => {
@@ -506,7 +506,11 @@ describe('fs-patch: strict routing', () => {
 
     it('glob', () => {
       const pattern = path.join(root, 'stray', '**').replace(/\\/g, '/');
-      assert.deepEqual(fs.globSync(pattern), []);
+      assert.throws(() => fs.globSync(pattern), {
+        code: 'EACCES',
+        syscall: 'scandir',
+        path: at('stray'),
+      });
     });
 
     it('readFile', () => {

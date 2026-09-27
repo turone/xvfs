@@ -781,11 +781,22 @@ reads lazily. The call is documented to return a promise, so the patch's
 refusals are rejections; `node:fs` refuses its own — a missing file —
 before the promise today, and the paths it passes through keep that form.
 
-**`glob` results are filtered by route, relative ones against its `cwd`
-option.** _Why:_ glob walks with the `node:fs` functions it captured on first
-use — native ones if it ran before the patch — so the filter is the only
-boundary; resolving results against `process.cwd()` let a glob with a `cwd`
-list what strict routing hides.
+**`glob` walks with the `node:fs` functions it captured when Node loaded
+`internal/fs/glob`; `install()` loads it, so it walks through the patch:
+every directory read and stat routed, virtual entries listed, denied
+territory never entered. A glob loaded before the first `install()` walks
+natively: a walk that starts in or above managed territory — `cwd`, or the
+pattern's literal prefix, resolved as glob resolves them — is `ENOTSUP`,
+and a start the routing denies is `EACCES` before any walk, in every
+mode.** _Why:_ the walk is Node's, and no wrapper changes the functions it
+captured. Filtering its results, as before, let a native walk list hidden
+names into memory — and hand them to the caller's `exclude` — and made
+what an application saw depend on load order: virtual entries with a
+routed walk, none with a native one. Loading glob at `install()` gives
+every bootstrapped application the routed walk; the native one — a test
+runner's, or a glob before the kernel was wired — is refused where the
+routed listings apply, as every other native walk into the places is,
+strict or not, and stays native elsewhere.
 
 **A single-file copy (`copyFile`, a non-recursive `cp`) hands the
 destination the source's raw input, and the destination publishes it
@@ -1089,6 +1100,9 @@ workers call `attach()`.** _Why:_ preloads do not run in worker threads.
 | A guarded native `opendir`; a native listing of a disk-only directory                                           | a second listing path: hidden raw files, no virtual entries       |
 | Native passthrough of the strict `appRoot`                                                                      | lists unmanaged names                                             |
 | A glob-only fix for stale patched references; a wrapper that keeps or re-installs a kernel                      | every captured reference is affected; a closed kernel is gone     |
+| Filtering the results of a glob that walks natively                                                             | it listed hidden names already, and handed them to `exclude`      |
+| Pruning a native glob with `exclude`                                                                            | bare names in its `**` branch; skipped when `cwd` is not the cwd  |
+| Emulating glob over the places with `path.matchesGlob`                                                          | `x/**` matches `x`, `./` and `..` prefixes, literal case differ   |
 | An asynchronous native section (`AsyncLocalStorage`)                                                            | user callbacks inherit it, past strict; `async_hooks` cost on 22  |
 | Own primitives in place of `rmSync`                                                                             | rewrites its retries (`EBUSY`, `EPERM`, `maxRetries`) and errors  |
 | A native section around `cp`                                                                                    | its `filter`, the caller's code, would read past strict           |
@@ -1154,9 +1168,9 @@ workers call `attach()`.** _Why:_ preloads do not run in worker threads.
   is never a disk entry; `prepare` and `scriptOptions` never turn
   `fs.script` on.
 - No native listing, copy, link, rename or watch runs over managed
-  territory past its routing, and no descriptor that writes is opened there
-  past the mutation routing; a refusal comes before any disk read or
-  write.
+  territory past its routing — a glob that walks natively included — and
+  no descriptor that writes is opened there past the mutation routing; a
+  refusal comes before any disk read or write.
 - A copy or a rename hands on the raw input only — never a prepared result
   or a companion; the destination prepares it once, and a virtual
   destination never gets a disk file.
@@ -1211,9 +1225,11 @@ stat        { size, mtimeMs } (+ sourceSize, encoding for compressed companions)
   operation holds that operation in flight first — at a gate it is seen to
   reach.
 - glob captures the `node:fs` functions it walks with when it is loaded,
-  and a `node --test` child loads it before any test runs: a glob that kept
-  the patched functions is tested in a plain node process
-  (`test/fixtures/glob-kept.cjs`). So does Node's rimraf, which
+  and a `node --test` child loads it before any test runs: in-process
+  tests see the native walk the patch refuses over managed territory,
+  while the routed walk — glob loaded by `install()` — is tested in plain
+  node processes (`test/fixtures/glob-routed.cjs`, both modes, and
+  `glob-kept.cjs` across `uninstall()`). So does Node's rimraf, which
   `test/helpers.js` loads with its first removal: which functions it keeps
   is tested in a plain node process too (`test/fixtures/rm-kept.cjs`),
   loaded by `initialize()` and, as in a worker, under the patch.
