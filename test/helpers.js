@@ -54,10 +54,11 @@ const drain = async (stream) => {
   return Buffer.concat(chunks);
 };
 
-// Wait until `predicate()` is true or `ms` elapsed.
+// Wait until `predicate()` is true or `ms` elapsed — on a monotonic clock,
+// whatever a test does to Date.now().
 const until = async (predicate, ms = 3000, step = 25) => {
-  const deadline = Date.now() + ms;
-  while (Date.now() < deadline) {
+  const deadline = performance.now() + ms;
+  while (performance.now() < deadline) {
     if (predicate()) return true;
     await sleep(step);
   }

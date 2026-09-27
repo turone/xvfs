@@ -309,6 +309,30 @@ never parsed back). _Why:_ current entries are identified by (place, key);
 a permanent id would bloat every entry and message for the rare case; a
 never-reused id means a late release can never match a later retirement.
 
+**`diagnostics()` is the public, read-only picture of the shared memory:
+the pool's usage and fragmentation; what the published versions take of
+it; the retired representations — a source or one companion each — and
+what they wait for; what the main thread and each link still hold; each
+link's pending ACKs — the age of the oldest shows a stuck worker; the
+sources served from disk because the pool had no room for them; the
+failed preparations, by place; the work queued — watcher epochs and
+rechecks, the keys and barriers of virtual mutations. It is taken when
+asked, from the pool (`FilesystemCache.usage()`), the books
+(`Retirement.summary()`, `heldBy()`, `pendingOf()`), the links, one walk
+of the index and the queues' sizes; its one counter, a place's failed
+preparations, moves only when one fails. It frees, settles and compacts
+nothing and returns a frozen plain object; main thread only.** _Why:_ an
+operator must see a stuck worker, a full pool or a pipeline that does not
+drain before the memory runs out, and `retirements()` lists records, not
+a verdict; figures derived when asked cost the read and publication paths
+nothing — a question asked every few seconds must not tax every request —
+and cannot drift from the state they describe: `pool.used` is
+`published.bytes` and `retired.bytes` plus the publications in progress.
+Looking must not change what it looks at: a settle or a compaction would.
+Only an update that retires a representation waits for ACKs, so a worker
+that receives only additions never shows as stuck — it holds nothing
+either.
+
 **`Retirement` (`lib/retirement.js`) keeps the books — the retired
 versions, the ACKs each update still waits for, the holders — and decides
 what is free; it frees nothing. Each change of the books hands the kernel
@@ -975,6 +999,8 @@ workers call `attach()`.** _Why:_ preloads do not run in worker threads.
 | IPC per chunk or per pin                                                                                        | pins of current versions must stay local                          |
 | Freeing a retired version on a timeout                                                                          | reuse under a slow reader returns another file's bytes            |
 | Retirement books that free the bytes themselves                                                                 | a free starts a compaction, whose epoch only the kernel commits   |
+| Diagnostics counted on the read or publication path (hits, fallbacks, ACK ages)                                 | every request pays for a question asked every few seconds         |
+| A diagnostics call that settles, frees or compacts                                                              | looking would change what is looked at                            |
 | GC-driven release of views                                                                                      | use-after-free for destructured views and subarrays               |
 | Releasing zero-copy streams on `'end'`                                                                          | sockets still hold the last chunks                                |
 | Manual worker transports (`broadcast`, `getWorkerIds`)                                                          | every one would have to re-implement retirement                   |
@@ -1026,6 +1052,8 @@ workers call `attach()`.** _Why:_ preloads do not run in worker threads.
   synchronous `#flush`.
 - A retired version is freed only after all linked workers ACKed its update
   and no thread holds it; nothing is freed on a timeout.
+- `diagnostics()` reads: it frees, settles, compacts and publishes
+  nothing.
 - Compaction never moves or overwrites retired bytes; emptied segments are
   reused, never returned to the OS.
 - Source and companions of a file are published in one `vfs-update`.
