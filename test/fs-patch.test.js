@@ -648,36 +648,49 @@ describe('fs-patch: strict routing', () => {
   });
 });
 
-// open() routes its path as a read; a flag that writes routes what the read
-// passes through as a mutation as well. Before, node:fs created the file in
-// a read-only place, and a stray one in a virtual place's directory on disk,
-// which the place never shows.
+// A descriptor is the raw file. open() routes its path as a read for what
+// the descriptor can read — a hidden path stays EACCES, an entry the place
+// serves from the VFS has no descriptor to read, whatever else the flag
+// does — and, for a flag that only writes, as a mutation, as writeFile
+// does: a read-only place refuses, a virtual place has no raw file, a
+// disk-origin place hands out its raw file, which the watcher republishes.
+// Before, node:fs created the file in a read-only place and a stray one in
+// a virtual place's directory on disk, which the place never shows; then
+// every descriptor to a published entry was refused, while writeFileSync
+// opened the same raw file.
 
 const { O_RDONLY, O_WRONLY, O_RDWR, O_CREAT, O_TRUNC, O_APPEND } = fs.constants;
-const WRITE_FLAGS = [
+// Flags that write and cannot read: no 'r', no '+', O_WRONLY without O_RDWR.
+const WRITE_ONLY_FLAGS = [
   'w',
   'wx',
-  'w+',
   'a',
   'ax',
-  'a+',
   'as',
+  O_WRONLY,
+  O_WRONLY | O_TRUNC,
+  O_WRONLY | O_CREAT | O_TRUNC,
+];
+// Flags that write and can read.
+const READ_WRITE_FLAGS = [
+  'w+',
+  'a+',
   'r+',
   'rs+',
-  O_WRONLY,
   O_RDWR,
   O_CREAT,
   O_TRUNC,
   O_APPEND,
-  O_WRONLY | O_TRUNC,
-  O_WRONLY | O_CREAT | O_TRUNC,
 ];
+const WRITE_FLAGS = [...WRITE_ONLY_FLAGS, ...READ_WRITE_FLAGS];
 const READ_FLAGS = [undefined, 'r', 'rs', O_RDONLY];
 
 // The arguments after the path: each flag alone and with a mode after it —
 // fs.open(p, 'w', 0o600, callback) included — and, to read, none at all.
 const withMode = (flags) => flags.flatMap((flag) => [[flag], [flag, 0o600]]);
 const WRITES = withMode(WRITE_FLAGS);
+const WRITE_ONLY = withMode(WRITE_ONLY_FLAGS);
+const READ_WRITES = withMode(READ_WRITE_FLAGS);
 const READS = [[], ...withMode(READ_FLAGS)];
 
 // open() in each form — sync, callback, promise — with `args` after the
@@ -728,16 +741,19 @@ const refusedEach = async (file, argsList, expected) => {
 
 describe('fs-patch: open with a flag that writes', () => {
   let root;
+  let outside;
   let k;
   const at = (...p) => path.join(root, ...p);
 
   before(async () => {
+    outside = writeTree(tmpDir('fspatch-open-out'), { 'a.txt': 'published' });
     root = writeTree(tmpDir('fspatch-open'), {
       'ro/a.txt': 'published',
       'ro/raw.bin': 'raw', // not cached: the disk territory
       'ro/big.txt': 'B'.repeat(70 * 1024), // over maxFileSize: a disk entry
       'site/a.txt': 'published',
       'site/b.txt': 'published',
+      'prep/a.txt': 'published', // prepared: served upper-case
       'drive/d.txt': 'disk',
     });
     // The directories of the virtual places exist on disk, without a file;
@@ -749,11 +765,13 @@ describe('fs-patch: open with a flag that writes', () => {
       {
         ro: { fs: { ext: ['txt'] } },
         site: { fs: { ext: ['txt'], writable: true } },
+        prep: { fs: { ext: ['txt'], writable: true, prepare: 'upper' } },
         drive: { provider: 'disk', fs: true },
         v: { origin: 'virtual', fs: { writable: true } },
         m: { provider: 'map', origin: 'virtual', fs: { writable: true } },
       },
       { watchTimeout: 60000 },
+      { preparers: { upper: (raw) => raw.toString().toUpperCase() } },
     );
     k.fs('m').writeFile('/p.txt', 'virtual');
     await k.fs('v').writeFile('/p.txt', 'virtual');
@@ -764,6 +782,7 @@ describe('fs-patch: open with a flag that writes', () => {
     fsPatch.uninstall();
     k.close();
     rm(root);
+    rm(outside);
   });
 
   it('a read-only place is EROFS, without strict: nothing created or changed', async () => {
@@ -821,16 +840,83 @@ describe('fs-patch: open with a flag that writes', () => {
     }
   });
 
-  it('a published entry is ENOTSUP whatever the flag, as before', async () => {
+  it('a published virtual entry is ENOTSUP whatever the flag, as before', async () => {
     const expected = { code: 'ENOTSUP', detail: 'virtual file' };
-    for (const file of [at('ro', 'a.txt'), at('site', 'a.txt')]) {
-      await refusedEach(file, [...READS, ...WRITES], expected);
-      assert.equal(readDisk(file, 'utf8'), 'published', file);
-    }
     for (const name of ['v', 'm']) {
       await refusedEach(at(name, 'p.txt'), [...READS, ...WRITES], expected);
       assert.equal(k.fs(name).readFile('/p.txt', 'utf8'), 'virtual', name);
     }
+  });
+
+  // The watcher publishes what the descriptor wrote: one epoch by hand.
+  const republish = async (file) => {
+    k.watcher.emit('epoch', new Map([[file, 'change']]));
+    await k.watchQueue.idle;
+  };
+
+  it('a published disk-origin entry: no descriptor reads it, one that only writes is its raw file', async () => {
+    const content = { code: 'ENOTSUP', detail: 'virtual file' };
+    // A flag that can read — `r`, `+`, `O_RDWR`, `O_CREAT` / `O_TRUNC` /
+    // `O_APPEND` without `O_WRONLY` — meets no descriptor, whether it
+    // writes too: the raw file is not the canonical content.
+    for (const file of [at('ro', 'a.txt'), at('site', 'a.txt')]) {
+      await refusedEach(file, [...READS, ...READ_WRITES], content);
+      assert.equal(readDisk(file, 'utf8'), 'published', file);
+    }
+    // Read-only place: its raw file is not writable either.
+    await refusedEach(at('ro', 'a.txt'), WRITE_ONLY, { code: 'EROFS' });
+    assert.equal(readDisk(at('ro', 'a.txt'), 'utf8'), 'published');
+    // Writable place: the raw file, opened as node:fs opens a plain file
+    // with the same flag — an exclusive flag meets it (EEXIST), a flag the
+    // platform refuses is refused the same way.
+    const file = at('site', 'a.txt');
+    const plain = path.join(outside, 'a.txt');
+    const codes = (outcomes) => outcomes.map((o) => o.code ?? o);
+    for (const args of WRITE_ONLY) {
+      writeDisk(file, 'published');
+      writeDisk(plain, 'published');
+      const native = codes(await openEach(plain, args));
+      assert.deepEqual(codes(await openEach(file, args)), native, args);
+      assert.equal(readDisk(file, 'utf8'), readDisk(plain, 'utf8'), args);
+    }
+    // Written through the descriptor, the raw file changes at once; the
+    // published content follows when the watcher republishes it.
+    writeDisk(file, 'published');
+    const fd = fs.openSync(file, 'w');
+    fs.writeSync(fd, 'edited');
+    fs.closeSync(fd);
+    assert.equal(readDisk(file, 'utf8'), 'edited');
+    assert.equal(fs.readFileSync(file, 'utf8'), 'published');
+    await republish(file);
+    assert.equal(fs.readFileSync(file, 'utf8'), 'edited');
+    const stream = fs.createWriteStream(file);
+    stream.end('streamed');
+    await finished(stream);
+    assert.equal(readDisk(file, 'utf8'), 'streamed');
+    await republish(file);
+    assert.equal(fs.readFileSync(file, 'utf8'), 'streamed');
+  });
+
+  it('no descriptor reads the raw file behind prepared content; one that only writes replaces it', async () => {
+    const file = at('prep', 'a.txt');
+    assert.equal(fs.readFileSync(file, 'utf8'), 'PUBLISHED');
+    // `r+`, `a+`, `w+`, `O_RDWR`… would read the raw file where readFile
+    // gives the prepared content: no descriptor, nothing changed.
+    await refusedEach(file, [...READS, ...READ_WRITES], {
+      code: 'ENOTSUP',
+      detail: 'virtual file',
+    });
+    assert.equal(readDisk(file, 'utf8'), 'published', 'the raw file');
+    assert.equal(fs.readFileSync(file, 'utf8'), 'PUBLISHED');
+    // A flag that only writes replaces the raw input; the watcher prepares
+    // it again.
+    const handle = await fs.promises.open(file, 'w');
+    await handle.write('changed');
+    await handle.close();
+    assert.equal(readDisk(file, 'utf8'), 'changed');
+    assert.equal(fs.readFileSync(file, 'utf8'), 'PUBLISHED', 'not yet');
+    await republish(file);
+    assert.equal(fs.readFileSync(file, 'utf8'), 'CHANGED', 'prepared again');
   });
 
   it('a writable disk-origin place: a new file is created, as before', async () => {
@@ -879,15 +965,20 @@ describe('fs-patch: open with a flag that writes', () => {
   it('createWriteStream: the refusal is emitted on the stream', async () => {
     const place = { code: 'ENOTSUP', detail: 'virtual place' };
     const file = { code: 'ENOTSUP', detail: 'virtual file' };
+    const published = readDisk(at('site', 'a.txt'), 'utf8');
     for (const [target, flags, expected] of [
       [at('ro', 'ws.txt'), 'w', { code: 'EROFS' }],
       [at('ro', 'raw.bin'), 'r+', { code: 'EROFS' }],
+      [at('ro', 'a.txt'), 'w', { code: 'EROFS' }],
+      [at('ro', 'a.txt'), 'a+', file],
       [at('drive', 'd.txt'), 'a', { code: 'EROFS' }],
+      [at('site', 'a.txt'), 'r+', file],
+      [at('site', 'a.txt'), 'a+', file],
       [at('v', 'ws.txt'), 'w', place],
       [at('v', 'sub', 'ws.txt'), 'w', place],
       [at('m', 'ws.txt'), 'w', place],
-      [at('ro', 'a.txt'), 'w', file],
       [at('v', 'p.txt'), 'w', file],
+      [at('m', 'p.txt'), 'r+', file],
     ]) {
       // An 'error' instead of an 'open' rejects; an opened stream is closed.
       const stream = fs.createWriteStream(target, { flags });
@@ -903,6 +994,7 @@ describe('fs-patch: open with a flag that writes', () => {
     assert.equal(onDisk(at('ro', 'ws.txt')), false);
     assert.equal(readDisk(at('ro', 'raw.bin'), 'utf8'), 'raw');
     assert.equal(readDisk(at('ro', 'a.txt'), 'utf8'), 'published');
+    assert.equal(readDisk(at('site', 'a.txt'), 'utf8'), published);
     assert.equal(readDisk(at('drive', 'd.txt'), 'utf8'), 'disk');
     assert.deepEqual(listDisk(at('v'), { recursive: true }), ['sub']);
     assert.deepEqual(listDisk(at('m')), []);
@@ -918,6 +1010,7 @@ describe('fs-patch under strict: open with a flag that writes', () => {
   before(async () => {
     root = writeTree(tmpDir('fspatch-open-strict'), {
       'ro/raw.bin': 'raw', // not cached: the disk territory
+      'up/a.txt': 'published',
       'stray/s.txt': 'unmanaged',
     });
     fs.mkdirSync(at('m'));
@@ -925,9 +1018,10 @@ describe('fs-patch under strict: open with a flag that writes', () => {
       root,
       {
         ro: { fs: { ext: ['txt'], fallback: 'disk' } },
+        up: { fs: { ext: ['txt'], writable: true } },
         m: { provider: 'map', origin: 'virtual', fs: { writable: true } },
       },
-      { strict: true },
+      { strict: true, watchTimeout: 60000 },
     );
     fsPatch.install(k);
   });
@@ -938,17 +1032,59 @@ describe('fs-patch under strict: open with a flag that writes', () => {
     rm(root);
   });
 
-  it('the read routing answers first: a hidden path stays EACCES', async () => {
+  it('a descriptor that can read a hidden path is EACCES', async () => {
     for (const file of [
       at('ro', 'new.txt'), // a cached extension, unpublished
+      at('up', 'new.txt'), // the same, in a writable place
       at('m', 'x.txt'),
       at('stray', 's.txt'),
     ]) {
-      await refusedEach(file, WRITES, { code: 'EACCES' });
+      await refusedEach(file, [...READS, ...READ_WRITES], { code: 'EACCES' });
     }
+    assert.equal(onDisk(at('ro', 'new.txt')), false);
+    assert.equal(onDisk(at('up', 'new.txt')), false);
+    assert.deepEqual(listDisk(at('m')), []);
+    assert.equal(readDisk(at('stray', 's.txt'), 'utf8'), 'unmanaged');
+  });
+
+  // A flag that only writes can read nothing: it is writeFile with a
+  // descriptor, and the mutation routing alone answers it.
+  it('a descriptor that only writes follows the mutation routing, as writeFile does', async () => {
+    await refusedEach(at('ro', 'new.txt'), WRITE_ONLY, { code: 'EROFS' });
+    await refusedEach(at('m', 'x.txt'), WRITE_ONLY, {
+      code: 'ENOTSUP',
+      detail: 'virtual place',
+    });
+    await refusedEach(at('stray', 's.txt'), WRITE_ONLY, { code: 'EACCES' });
     assert.equal(onDisk(at('ro', 'new.txt')), false);
     assert.deepEqual(listDisk(at('m')), []);
     assert.equal(readDisk(at('stray', 's.txt'), 'utf8'), 'unmanaged');
+    // A writable disk-origin place: the raw file is created, as
+    // writeFileSync creates it, and hidden until the watcher publishes it.
+    const file = at('up', 'new.txt');
+    for (const args of withMode(['w', 'a', O_WRONLY | O_CREAT | O_TRUNC])) {
+      assert.deepEqual(await openEach(file, args), ['ok', 'ok', 'ok'], args);
+    }
+    const fd = fs.openSync(file, 'w');
+    fs.writeSync(fd, 'new');
+    fs.closeSync(fd);
+    assert.equal(readDisk(file, 'utf8'), 'new');
+    assert.throws(() => fs.readFileSync(file), { code: 'EACCES' });
+    k.watcher.emit('epoch', new Map([[file, 'change']]));
+    await k.watchQueue.idle;
+    assert.equal(fs.readFileSync(file, 'utf8'), 'new');
+    // Once published it is a published entry: its raw file for a flag that
+    // only writes, no descriptor for one that can read.
+    for (const args of withMode(['a', 'w'])) {
+      assert.deepEqual(await openEach(file, args), ['ok', 'ok', 'ok'], args);
+    }
+    for (const entry of [file, at('up', 'a.txt')]) {
+      await refusedEach(entry, [...READS, ...READ_WRITES], {
+        code: 'ENOTSUP',
+        detail: 'virtual file',
+      });
+    }
+    assert.equal(readDisk(at('up', 'a.txt'), 'utf8'), 'published');
   });
 
   it('what it passes through is routed as a mutation: EROFS', async () => {
