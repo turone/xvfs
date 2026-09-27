@@ -16,6 +16,8 @@ const {
   readFileSync: readDisk,
   readdirSync: listDisk,
   writeFileSync: writeDisk,
+  realpathSync: realpathDisk,
+  realpath: realpathDiskCb,
 } = fs;
 
 // fs-patch executes router decisions; these tests exercise node:fs itself
@@ -1219,5 +1221,120 @@ describe('fs-patch: openAsBlob', () => {
       fs.openAsBlob(path.join(outside, 'o.txt'), 'text/plain'),
     );
     assert.equal(native?.code, 'ERR_INVALID_ARG_TYPE');
+  });
+});
+
+// fs.realpathSync.native and fs.realpath.native were copied onto the
+// patched functions unrouted: under strict they told a hidden path (a real
+// path) from a missing one (ENOENT). They are routed as realpath is.
+
+describe('fs-patch: realpath.native', () => {
+  let root;
+  let outside;
+  let k;
+  let natives; // calls of the native variants, counted before the patch
+  const at = (...p) => path.join(root, ...p);
+  const nativeCb = (p) =>
+    new Promise((resolve, reject) => {
+      fs.realpath.native(p, (err, real) => (err ? reject(err) : resolve(real)));
+    });
+
+  before(async () => {
+    root = writeTree(tmpDir('fspatch-realpath'), {
+      'ro/a.txt': 'published',
+      'ro/h.bin': 'hidden', // an uncached extension behind fallback 'deny'
+      'stray/s.txt': 'unmanaged',
+    });
+    outside = writeTree(tmpDir('fspatch-realpath-out'), { 'o.txt': 'o' });
+    k = await kernel(
+      root,
+      { ro: { fs: { ext: ['txt'], fallback: 'deny' } } },
+      { strict: true },
+    );
+    // Count the native variants themselves: set before the patch is
+    // installed, they are what it routes to.
+    natives = [];
+    const { native: syncNative } = realpathDisk;
+    const { native: cbNative } = realpathDiskCb;
+    realpathDisk.native = function (...args) {
+      natives.push('sync');
+      return syncNative.apply(this, args);
+    };
+    realpathDiskCb.native = function (...args) {
+      natives.push('callback');
+      return cbNative.apply(this, args);
+    };
+    fsPatch.install(k);
+  });
+
+  after(() => {
+    fsPatch.uninstall();
+    k.close();
+    rm(root);
+    rm(outside);
+  });
+
+  it('under strict a hidden and a missing path get the answer of realpath: EACCES, unasked', async () => {
+    for (const file of [
+      at('ro', 'h.bin'),
+      at('ro', 'nope.bin'),
+      at('ro', 'nope.txt'),
+      at('stray', 's.txt'),
+      at('stray', 'nope.txt'),
+    ]) {
+      const expected = { code: 'EACCES', syscall: 'lstat', path: file };
+      assert.throws(() => fs.realpathSync(file), expected);
+      assert.throws(() => fs.realpathSync.native(file), expected);
+      await assert.rejects(nativeCb(file), expected);
+    }
+    assert.deepEqual(natives, [], 'no native call for a managed path');
+  });
+
+  it('a published entry resolves as realpath resolves it, unasked', async () => {
+    const file = at('ro', 'a.txt');
+    assert.equal(fs.realpathSync.native(file), fs.realpathSync(file));
+    assert.equal(fs.realpathSync.native(file), path.resolve(file));
+    assert.equal(await nativeCb(file), path.resolve(file));
+    assert.deepEqual(natives, []);
+  });
+
+  it('outside appRoot the native variants answer, and are restored by uninstall()', async () => {
+    const file = path.join(outside, 'o.txt');
+    const real = realpathDisk(file);
+    assert.equal(fs.realpathSync.native(file), real);
+    assert.equal(await nativeCb(file), real);
+    assert.deepEqual(natives, ['sync', 'callback']);
+    assert.notEqual(fs.realpathSync.native, realpathDisk.native);
+    fsPatch.uninstall();
+    try {
+      assert.equal(fs.realpathSync, realpathDisk);
+      assert.equal(fs.realpathSync.native, realpathDisk.native);
+      assert.equal(fs.realpath.native, realpathDiskCb.native);
+    } finally {
+      fsPatch.install(k);
+    }
+  });
+
+  it('without strict the disk territory keeps its native answer', async () => {
+    const loose = await kernel(root, { ro: { fs: { ext: ['txt'] } } });
+    fsPatch.uninstall();
+    fsPatch.install(loose);
+    natives.length = 0;
+    try {
+      const hidden = at('ro', 'h.bin');
+      assert.equal(fs.realpathSync.native(hidden), realpathDisk(hidden));
+      await assert.rejects(nativeCb(at('ro', 'nope.bin')), { code: 'ENOENT' });
+      assert.deepEqual(natives, ['sync', 'callback']);
+      // A published entry is still the place's, unasked.
+      assert.equal(
+        fs.realpathSync.native(at('ro', 'a.txt')),
+        path.resolve(at('ro', 'a.txt')),
+      );
+      assert.deepEqual(natives, ['sync', 'callback']);
+    } finally {
+      fsPatch.uninstall();
+      fsPatch.install(k);
+      loose.close();
+    }
   });
 });

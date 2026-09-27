@@ -734,7 +734,8 @@ raw bytes and miss virtual entries.
 **Every path-taking API is in one of three groups.**
 
 - _Implemented_, served by the places: `readFile`, `stat`, `lstat`,
-  `access`, `realpath`, `existsSync`, `readdir`, `opendir`,
+  `access`, `realpath` (its `.native` variants too), `existsSync`,
+  `readdir`, `opendir`,
   `createReadStream`, `openAsBlob`, `writeFile`, `appendFile`, `unlink`,
   `mkdir`, `rm`, `rename`, `copyFile` and a non-recursive `cp`.
 - _Recognized but unsupported for managed territory_ (`ENOTSUP`): `open` of
@@ -1157,7 +1158,8 @@ workers call `attach()`.** _Why:_ preloads do not run in worker threads.
   it before publishing; remove it only when every supported Node line
   removes a tree natively.
 - `install()` records every replaced `node:fs` property and `uninstall()`
-  restores them in reverse; `.native` variants are preserved; with no
+  restores them in reverse; a `.native` variant is routed as its function
+  is and restored with it; with no
   kernel installed, and inside the native section, a wrapper is its
   original.
 - Listings are sorted and deduplicated by string name — the key's `/`
