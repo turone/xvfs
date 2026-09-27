@@ -12,6 +12,7 @@ const {
   kernel,
   worker,
   leakedBytes,
+  until,
 } = require('./helpers.js');
 
 // Disk access behind the VFS's back: captured before any patch is installed.
@@ -79,6 +80,25 @@ const RENAMES = {
 };
 // A shared virtual place mutates asynchronously: only these forms reach it.
 const { renameSync, ...ASYNC } = RENAMES;
+
+// A directory rename that passes through to node:fs. Windows answers EPERM
+// while another process — typically a virus scanner looking at what just
+// moved — holds a handle inside the directory; node:fs does not retry, so
+// the test does, on that code and platform only.
+const moveDir = async (from, to) => {
+  let busy = null;
+  const moved = await until(() => {
+    try {
+      fs.renameSync(from, to);
+      return true;
+    } catch (err) {
+      if (err.code !== 'EPERM' || process.platform !== 'win32') throw err;
+      busy = err;
+      return false;
+    }
+  });
+  if (!moved) throw busy;
+};
 
 // A refusal names the operation, its source and its destination.
 const refusal = (err, code, from, to) => {
@@ -329,18 +349,18 @@ describe('rename routes its source and its destination', () => {
     // A directory strict routing hides stays hidden.
     await refusedEverywhere(at('closed', 'rawdir'), fresh('rawdir'), 'EACCES');
     // Within its place, or outside the indexed ones, a directory is node:fs.
-    fs.renameSync(at('wd', 'pages'), at('wd', 'docs'));
+    await moveDir(at('wd', 'pages'), at('wd', 'docs'));
     assert.equal(readDisk(at('wd', 'docs', 'p.txt'), 'utf8'), 'page');
-    fs.renameSync(at('wd', 'docs'), at('wd', 'pages'));
-    fs.renameSync(unrelated, `${unrelated}2`);
-    fs.renameSync(`${unrelated}2`, unrelated);
+    await moveDir(at('wd', 'docs'), at('wd', 'pages'));
+    await moveDir(unrelated, `${unrelated}2`);
+    await moveDir(`${unrelated}2`, unrelated);
     assert.equal(readDisk(path.join(unrelated, 'o.txt'), 'utf8'), 'o');
     for (const name of ['files', 'nd']) {
       const moved = fresh(name);
-      fs.renameSync(at(name, 'd'), moved);
-      fs.renameSync(moved, at(name, 'd'));
-      fs.renameSync(at(name), moved);
-      fs.renameSync(moved, at(name));
+      await moveDir(at(name, 'd'), moved);
+      await moveDir(moved, at(name, 'd'));
+      await moveDir(at(name), moved);
+      await moveDir(moved, at(name));
       assert.ok(onDisk(at(name, 'd')), name);
     }
   });
