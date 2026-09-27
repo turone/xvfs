@@ -35,6 +35,7 @@
     "test": "node --test \"test/*.test.js\"",
     "test:examples": "node --test \"test-examples/examples-smoke.test.js\"",
     "bench": "node bench/run.js",
+    "bench:ab": "node bench/ab.js",
     "lint": "eslint . && prettier -c .",
     "fix": "eslint . --fix && prettier --write ."
   },
