@@ -99,6 +99,58 @@ describe('scanner', () => {
     }
   });
 
+  // A filesystem that reports no entry types (simulated: the fs binding
+  // reports each one unknown) makes readdir lstat every entry through the
+  // public node:fs. Where that fails — refused past the patch, here by a
+  // stand-in for it — the scanner types the names itself, through
+  // lib/disk.js, and keeps the order of the walk.
+  it('types entries through lib/disk.js when the public node:fs refuses', async (t) => {
+    const binding = process.binding?.('fs');
+    if (typeof binding?.readdir !== 'function') {
+      t.skip('no fs binding to simulate the filesystem with');
+      return;
+    }
+    const tree = {};
+    for (let d = 0; d < 3; d++) {
+      tree[`d${d}.txt`] = 'd';
+      for (let f = 0; f < 20; f++) tree[`d${d}/s${f % 2}/f${f}.txt`] = 'f';
+    }
+    const base = writeTree(tmpDir('scan-dtype'), tree);
+    const expected = [...(await scan(base)).keys()];
+    const { readdir } = binding;
+    const { lstat } = fs;
+    const { lstat: lstatPromise } = fs.promises;
+    const refused = (p) =>
+      Object.assign(new Error(`EACCES: permission denied, lstat '${p}'`), {
+        code: 'EACCES',
+      });
+    let asked = 0;
+    try {
+      binding.readdir = function (...args) {
+        const result = readdir.apply(this, args);
+        if (!args[2] || typeof result?.then !== 'function') return result;
+        return result.then(([names, types]) => [names, types.map(() => 0)]);
+      };
+      fs.lstat = (p, ...args) => {
+        asked++;
+        process.nextTick(args.at(-1), refused(p));
+      };
+      fs.promises.lstat = async (p) => {
+        asked++;
+        throw refused(p);
+      };
+      const files = await scan(base);
+      assert.ok(asked > 0, 'readdir asked the public node:fs');
+      assert.deepEqual([...files.keys()], expected);
+      assert.equal(files.size, Object.keys(tree).length);
+    } finally {
+      binding.readdir = readdir;
+      fs.lstat = lstat;
+      fs.promises.lstat = lstatPromise;
+      rm(base);
+    }
+  });
+
   it('never traverses directory links; file links only with followSymlinks', async (t) => {
     if (!canSymlink) {
       t.skip('symlinks unavailable');

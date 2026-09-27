@@ -240,16 +240,6 @@ full disk answers), the operation's `syscall` and `path`, and `dest` for
 a rename or a copy — for main-thread and worker mutations alike, with
 tests.
 
-## P3 — Scanner on a filesystem without `d_type`
-
-**Problem.** A hypothesis from reading the code: `readdir(withFileTypes)`
-lstats entries of unknown type through the public `node:fs`, so after
-`install()` under strict a rescan may get `EACCES` and skip a directory
-silently.
-
-**Done when.** Reproduced on such a filesystem and the scanner reads types
-through `lib/disk.js`, or disproved.
-
 ## P3 — Tests that do not test what they say, or hang instead of failing
 
 **Problem.** `subtree-rename.test.js` «a move queued behind a write in

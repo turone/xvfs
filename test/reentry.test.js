@@ -16,6 +16,7 @@ const {
   kernel,
   drain,
   quiet,
+  diskCalls,
 } = require('./helpers.js');
 
 // The disk as it is, behind the patch: captured before any install.
@@ -294,6 +295,112 @@ describe('PlaceFs under strict: the place writes and removes what it hides', () 
       code: 'EACCES',
     });
   });
+});
+
+// A filesystem that does not report the type of an entry (no d_type: some
+// FUSE, XFS without ftype) leaves it to readdir, which lstats the entry
+// through the public node:fs — routed once the patch is installed. Such a
+// filesystem is simulated: the fs binding reports every type unknown, and
+// node:fs does what it does on one. Under strict, the lstat of a name the
+// place does not serve yet is EACCES and the whole readdir fails: a rescan
+// published nothing of a new directory, and said nothing. The scanner reads
+// the names again and types them through lib/disk.js.
+describe('the scanner on a filesystem that reports no entry types', () => {
+  const binding = process.binding?.('fs');
+  const simulated = typeof binding?.readdir === 'function';
+  const UNKNOWN = 0; // UV_DIRENT_UNKNOWN
+
+  // A strict kernel whose epochs come by hand (its fs.watch handles are
+  // closed), the patch installed, a new directory on disk, and the binding
+  // reporting no types; done() undoes it all.
+  const setup = async () => {
+    const root = writeTree(tmpDir('vfs-reentry-dtype'), { 'site/a.txt': 'a' });
+    const logs = [];
+    const log = (m) => logs.push(m);
+    const k = await kernel(
+      root,
+      { site: { fs: { ext: ['txt'] } } },
+      { strict: true, watch: true, watchTimeout: 60000 },
+      { console: { ...quiet, warn: log, error: log } },
+    );
+    k.watcher.close();
+    const at = (...p) => path.join(root, 'site', ...p);
+    mkdirDisk(at('fresh', 'deep'), { recursive: true });
+    writeDisk(at('fresh', 'b.txt'), 'b');
+    writeDisk(at('fresh', 'deep', 'c.txt'), 'c');
+    fsPatch.install(k);
+    const { readdir } = binding;
+    binding.readdir = function (...args) {
+      const result = readdir.apply(this, args);
+      const withFileTypes = args[2];
+      if (!withFileTypes) return result;
+      const unknown = ([names, types]) => [names, types.map(() => UNKNOWN)];
+      if (typeof result?.then === 'function') return result.then(unknown);
+      return Array.isArray(result) ? unknown(result) : result;
+    };
+    const rescan = () =>
+      k.watcher.emit('epoch', new Map([[at('fresh'), 'scan']]));
+    const done = () => {
+      binding.readdir = readdir;
+      fsPatch.uninstall();
+      k.close();
+      rm(root);
+    };
+    return { k, at, logs, rescan, done };
+  };
+
+  it('a rescan under strict finds and publishes a new directory', async (t) => {
+    if (!simulated) {
+      t.skip('no fs binding to simulate the filesystem with');
+      return;
+    }
+    const { k, at, logs, rescan, done } = await setup();
+    try {
+      // The simulation holds: an entry the place hides fails the listing.
+      await assert.rejects(
+        fs.promises.readdir(at('fresh'), { withFileTypes: true }),
+        { code: 'EACCES' },
+      );
+      rescan();
+      await k.watchQueue.idle;
+      const site = k.fs('site');
+      assert.equal(site.readFile('/fresh/b.txt', 'utf8'), 'b');
+      assert.equal(site.readFile('/fresh/deep/c.txt', 'utf8'), 'c');
+      assert.deepEqual(logs, []);
+    } finally {
+      done();
+    }
+  });
+
+  // The listing of the rescan, refused past the patch, is in flight when
+  // the kernel closes; or the names read again are.
+  for (const [when, inFlight] of [
+    ['its listing', 1],
+    ['the names read again', 2],
+  ]) {
+    it(`a rescan closed during ${when} starts no disk call after it`, async (t) => {
+      if (!simulated) {
+        t.skip('no fs binding to simulate the filesystem with');
+        return;
+      }
+      const { k, logs, rescan, done } = await setup();
+      const calls = diskCalls();
+      try {
+        rescan();
+        await calls.started(inFlight);
+        const idle = k.watchQueue.idle;
+        k.close();
+        const atClose = calls.count;
+        await idle;
+        assert.equal(atClose, inFlight);
+        assert.equal(calls.count, atClose, 'no disk call after close()');
+        assert.deepEqual(logs, []);
+      } finally {
+        calls.stop();
+        done();
+      }
+    });
+  }
 });
 
 describe('copies under strict: the destination disk past the patch', () => {

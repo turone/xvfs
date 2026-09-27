@@ -891,7 +891,13 @@ strict (`EACCES`), and a recursive `rm` listed the place instead of the
 disk and stopped with part of the tree gone. The section is synchronous — a
 depth counter per thread under `try` / `finally` — so no callback or
 continuation ever runs inside it, and a stream, which opens after the call
-returned, reads through captured functions instead.
+returned, reads through captured functions instead. So does the scanner
+on a filesystem that does not report entry types (no `d_type`): there an
+asynchronous `readdir` with file types lstats each entry through the
+public `node:fs`, past any section, and where the patch refuses one — a
+name a strict place does not serve yet — the whole listing fails, which
+left a directory out of a rescan silently; the scanner then reads the
+names again and types them with the `lstat` of `disk.js`.
 
 **A call the routing passes through runs its original in the native section
 — every form of every implemented operation and every guard, except `cp`;
@@ -1106,7 +1112,9 @@ stat        { size, mtimeMs } (+ sourceSize, encoding for compressed companions)
   only for a condition to become true (`until`); nothing sleeps to prove
   that something did not happen. The disk calls a closed kernel starts are
   counted with async_hooks (`diskCalls()`), which sees the functions the
-  library captured as well.
+  library captured as well. A filesystem that reports no entry types is
+  simulated by the fs binding (`process.binding('fs').readdir` reporting
+  each type unknown), so that `node:fs` does what it does on one.
 - Hooks are installed only inside a test and uninstalled in `after` /
   `finally`; bootstrap tests run child processes.
 - glob captures the `node:fs` functions it walks with when it is loaded,
