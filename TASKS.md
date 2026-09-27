@@ -164,16 +164,6 @@ work.
 shows a stuck worker through it, and the API never frees or changes
 anything.
 
-## P3 — Preparation regression tests
-
-**Problem.** Two guarantees hold by construction but have no test: a new
-file in a new directory gets its prepared source and its bytecode in one
-`vfs-update`, and compaction keeps a prepared source and its companions
-together.
-
-**Done when.** Both are pinned in `test/prepare.test.js`, driven by manual
-watcher epochs and a forced compaction.
-
 ## P3 — Diagnostics of `prepare` conflicts inside one domain
 
 **Problem.** When one domain's object form assigns an extension to several

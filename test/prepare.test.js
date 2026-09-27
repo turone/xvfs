@@ -23,6 +23,7 @@ const {
   tap,
   worker,
   nextMessage,
+  until,
 } = require('./helpers.js');
 
 // `prepare` is declared by one domain (fs, require, import) and prepares the
@@ -275,12 +276,12 @@ const counted = (fn) => {
 
 // A disk-origin kernel whose epochs are emitted by hand and awaited: a long
 // debounce keeps real fs.watch events out.
-const disk = async (files, spec, preparers, options = {}) => {
+const disk = async (files, spec, preparers, options = {}, defaults = {}) => {
   const root = writeTree(tmpDir('vfs-prep'), files);
   const k = await kernel(
     root,
     spec,
-    { watch: true, watchTimeout: 60000 },
+    { watch: true, watchTimeout: 60000, ...defaults },
     { preparers, ...options },
   );
   const at = (...p) => path.join(root, ...p);
@@ -1032,6 +1033,136 @@ describe('prepare pipeline: publication', () => {
       assert.equal(k.retired.size, 0, 'the old version went with the ACK');
       const [usedAfter, publishedAfter] = pooled();
       assert.equal(usedAfter, publishedAfter);
+    } finally {
+      done();
+    }
+  });
+
+  // The files of a new directory reach the pipeline through a rescan of
+  // it: each gets its prepared source and the bytecode built from it — every
+  // file and every companion in the one vfs-update of the epoch.
+  it('new files in a new directory: prepared sources and bytecode in one update', async () => {
+    const prep = counted(code);
+    const { k, at, epoch, done } = await disk(
+      { 'app/a.js': RAW },
+      {
+        app: {
+          fs: { ext: ['js'], prepare: 'code', script: { compile: true } },
+          require: { ext: ['js'], compile: true },
+        },
+      },
+      { code: prep.fn },
+    );
+    try {
+      const t = tap(k);
+      fs.mkdirSync(at('app', 'new', 'deep'), { recursive: true });
+      fs.writeFileSync(at('app', 'new', 'b.js'), RAW);
+      fs.writeFileSync(at('app', 'new', 'deep', 'c.js'), RAW);
+      const delivered = nextMessage(t.port);
+      await epoch([[at('app', 'new'), 'scan']]);
+      await delivered;
+      const [update, ...more] = t.updates();
+      assert.deepEqual(more, [], 'one update');
+      const published = ['/new/b.js', '/new/deep/c.js'];
+      assert.deepEqual(
+        update.places.app.entries.map(([key]) => key).sort(),
+        published
+          .flatMap((key) => [
+            key,
+            bytecodeKey(key, 'require'),
+            bytecodeKey(key, 'script'),
+          ])
+          .sort(),
+      );
+      assert.deepEqual(prep.calls.slice(1).sort(), published, 'prepared once');
+      const app = k.fs('app');
+      for (const key of published) {
+        assert.equal(app.readFile(key, 'utf8'), PREPARED, key);
+        const bundle = app.script(key);
+        assert.equal(bundle.source, PREPARED, key);
+        assert.ok(bundle.cachedData?.length > 0, `${key}: its bytecode`);
+      }
+    } finally {
+      done();
+    }
+  });
+
+  // Compaction moves published versions as they are: a prepared source and
+  // its companions leave the emptied segment together, in the one
+  // vfs-update of the compaction, their bytes unchanged and nothing
+  // prepared, compiled or compressed again. Forced: the file that filled the
+  // segment is deleted, and its free — once the link ACKs its removal —
+  // leaves the segment below the threshold.
+  it('compaction moves a prepared source and its companions together', async () => {
+    const prep = counted(code);
+    const { k, at, epoch, done } = await disk(
+      {
+        'app/a.js': RAW,
+        'app/fill1.bin': Buffer.alloc(41000, 1),
+        'app/fill2.bin': Buffer.alloc(40000, 2),
+      },
+      {
+        app: {
+          fs: {
+            ext: ['js', 'bin'],
+            prepare: { code: ['js'] },
+            script: { compile: true },
+            compress: { encodings: ['gzip'], ext: ['js'] },
+          },
+          require: { ext: ['js'], compile: true },
+        },
+      },
+      { code: prep.fn },
+      {},
+      {
+        memory: {
+          limit: '256 kib',
+          segmentSize: '64 kib',
+          maxFileSize: '64 kib',
+        },
+        compaction: { threshold: 0.5 },
+      },
+    );
+    try {
+      const keys = [
+        '/a.js',
+        bytecodeKey('/a.js', 'require'),
+        bytecodeKey('/a.js', 'script'),
+        compressedKey('/a.js', 'gzip'),
+      ];
+      const entries = () => keys.map((key) => k.cache.entry('app', key));
+      // Largest first: fill1 opens the first segment, fill2 the second, and
+      // the prepared source and its companions join fill1.
+      const segment = k.cache.entry('app', '/fill1.bin').segmentId;
+      assert.notEqual(k.cache.entry('app', '/fill2.bin').segmentId, segment);
+      const before = entries();
+      assert.ok(before.every((entry) => entry?.segmentId === segment));
+      const bytes = keys.map((key) =>
+        Buffer.from(k.registry.get('app').files.get(key).data),
+      );
+      const t = tap(k);
+      fs.unlinkSync(at('app', 'fill1.bin'));
+      await epoch([[at('app', 'fill1.bin'), 'delete']]);
+      assert.ok(await until(() => t.updates().length === 2, 4000), 'moved');
+      const [removal, moved] = t.updates();
+      assert.deepEqual(removal.places.app.removals, ['/fill1.bin']);
+      assert.deepEqual(
+        moved.places.app.entries.map(([key]) => key).sort(),
+        [...keys].sort(),
+        'the source and its companions, in one update',
+      );
+      const after = entries();
+      assert.ok(after.every((entry) => entry.segmentId !== segment));
+      const { files } = k.registry.get('app');
+      keys.forEach((key, i) => {
+        assert.deepEqual(Buffer.from(files.get(key).data), bytes[i], key);
+      });
+      const app = k.fs('app');
+      assert.equal(app.readFile('/a.js', 'utf8'), PREPARED);
+      assert.equal(app.script('/a.js').source, PREPARED);
+      const gzip = app.readFileCompressed('/a.js', 'gzip');
+      assert.equal(require('node:zlib').gunzipSync(gzip).toString(), PREPARED);
+      assert.deepEqual(prep.calls, ['/a.js'], 'prepared once, at init');
     } finally {
       done();
     }
