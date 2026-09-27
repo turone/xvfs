@@ -200,9 +200,33 @@ against `readFileSync` of the same files through `node:fs`, ns per call.
 A lease (`view`) costs ~100 ns whatever the size; an owned copy
 (`readFile`) is a memcpy, 374 ns for 1 KiB, 1.3 ms for 8 MiB — and a
 Buffer to collect. `node:fs` from the page cache starts at 18.6 µs for the
-syscalls of a 1 KiB read: 170× a lease, 50× a copy. Copies out of shared
-memory ran ~1.3–1.6× slower than out of a `map` place's own Buffers in
-this run.
+syscalls of a 1 KiB read: 170× a lease, 50× a copy.
+
+Copies out of shared memory ran ~1.3–1.6× slower than out of a `map`
+place's own Buffers here, on Windows. That is a platform cost, not the
+library's. V8 copies out of a SharedArrayBuffer with its own routine, safe
+against concurrent writers, and out of an ordinary buffer with the C
+library's `memcpy`; which one wins depends on the destination. On Windows
+at 8 MiB, `memcpy` wins into a fresh Buffer — 97 against 145 µs/MiB — and
+loses into a warm, reused one — 40 against 20 µs/MiB. `readFile()` returns
+a fresh Buffer, so it pays the first case, and so does every copy
+primitive of JavaScript: `Buffer.from(view)`, `Buffer.allocUnsafe()` +
+`set()`, `buf.copy()` and `Buffer.copyBytesFrom()` landed within noise of
+each other, ~1.4× (1.2–1.9× over the runs) the same copy out of a Buffer at
+8 MiB, ~1.1–1.2× at 1 MiB. On Linux (the same machine, WSL2, Node.js
+24.20.0) the shared copy is as fast or faster either way, and `readFile`
+out of `sab` ran as fast as out of `map` or faster: 0.87–0.97 ms against
+1.04–1.31 ms for 8 MiB, 92–113 µs against 90–124 µs for 1 MiB, over three
+runs. Where the copy matters, a lease (`readFileView`, `withFileView`) or a
+zero-copy stream does without it.
+
+Most of a large copy's cost is its destination — the allocation and first
+touch of a fresh Buffer. Its pages may come fresh from the kernel or
+reused from the allocator, depending on what the process did before: on
+Linux the same 1 MiB copy cost ~200 µs/MiB in a fresh process and ~50
+after other work, whatever the source. A micro benchmark that measures one
+variant first can blame the source for what the allocator does; `npm run
+bench` warms every scenario up in a process of its own before it measures.
 
 ## Leases
 
