@@ -1,5 +1,6 @@
 'use strict';
 
+const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
@@ -131,6 +132,95 @@ const leakedBytes = (k) => {
   return used;
 };
 
+// One turn of the event loop: every promise settled so far has run its
+// continuations — the bookkeeping a mutation queue does once a task
+// settles included.
+const turn = () => new Promise((resolve) => setImmediate(resolve));
+
+// What a failure or a refusal leaves of a main kernel: bytes in allocations
+// nothing accounts for (leakedBytes), the work queued — watcher epochs and
+// rechecks, mutations holding a key or a place (diagnostics().queues) —
+// the keys of virtual places still in flight (SabStore.creating), and the
+// requests of `workers` (worker kernels on its links) not answered yet.
+const restOf = (k, workers = []) => {
+  let inFlight = 0;
+  for (const place of k.registry.all()) {
+    inFlight += place.store?.creating?.size ?? 0;
+  }
+  let requests = 0;
+  for (const w of workers) requests += w.mutationClient?.pending ?? 0;
+  const { queues } = k.diagnostics();
+  return { leakedBytes: leakedBytes(k), queues, inFlight, requests };
+};
+
+// Asserts a ready main kernel at rest once what it runs has settled:
+// nothing of restOf() left — but for the rechecks a failed watcher
+// publication schedules, once each.
+const assertAtRest = async (k, { workers = [], rechecks = 0 } = {}) => {
+  await turn();
+  assert.deepEqual(restOf(k, workers), {
+    leakedBytes: 0,
+    queues: {
+      watch: { epochs: 0, rechecks },
+      mutations: { keys: 0, barriers: 0 },
+    },
+    inFlight: 0,
+    requests: 0,
+  });
+};
+
+// The types of the resources that keep the event loop alive, counted —
+// what `activeSince` compares with.
+const activeResources = () => {
+  const counts = {};
+  for (const type of process.getActiveResourcesInfo()) {
+    counts[type] = (counts[type] ?? 0) + 1;
+  }
+  return counts;
+};
+
+// The resources alive now beyond `baseline` (activeResources()), by type.
+const activeSince = (baseline) => {
+  const beyond = {};
+  for (const [type, count] of Object.entries(activeResources())) {
+    const more = count - (baseline[type] ?? 0);
+    if (more > 0) beyond[type] = more;
+  }
+  return beyond;
+};
+
+// Closes `k`, then the worker kernels on its links, and asserts that
+// nothing they opened stays open: `k`'s close() closes each link port,
+// both ends see it within a deadline (whose timer holds the event loop
+// meanwhile: the ports are unref'd); no recheck and no watcher left, no
+// worker request left unsettled; and — a closed handle may be released on
+// a later turn — no resource that keeps the event loop alive beyond
+// `baseline`, taken before the kernel was made.
+const closeAtRest = async (k, { workers = [], baseline }) => {
+  const ports = [...k.links.values()];
+  for (const w of workers) if (w.port) ports.push(w.port);
+  const closed = Promise.all(
+    ports.map((port) => new Promise((resolve) => port.once('close', resolve))),
+  );
+  let late = null;
+  const deadline = new Promise((resolve) => {
+    late = setTimeout(resolve, 3000, 'deadline');
+  });
+  k.close();
+  const settled = await Promise.race([closed, deadline]);
+  clearTimeout(late);
+  assert.notEqual(settled, 'deadline', 'every link port closed');
+  for (const w of workers) {
+    w.close();
+    assert.equal(w.mutationClient?.pending ?? 0, 0, 'no request left');
+  }
+  assert.equal(k.links.size, 0);
+  assert.equal(k.rechecks.size, 0, 'no recheck left');
+  assert.equal(k.watcher, null, 'no watcher left');
+  await until(() => Object.keys(activeSince(baseline)).length === 0, 3000);
+  assert.deepEqual(activeSince(baseline), {}, 'no resource left alive');
+};
+
 // The asynchronous disk calls this process starts from now on — node:fs
 // requests of every form, a file handle's close included: async_hooks sees
 // each one, whatever function made it, captured at load (lib/disk.js) or
@@ -185,5 +275,11 @@ module.exports = {
   nextMessage,
   diskCalls,
   leakedBytes,
+  turn,
+  restOf,
+  assertAtRest,
+  activeResources,
+  activeSince,
+  closeAtRest,
   SMALL_MEMORY,
 };

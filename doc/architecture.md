@@ -1264,7 +1264,15 @@ stat        { size, mtimeMs } (+ sourceSize, encoding for compressed companions)
   and no allocation: `leakedBytes()`, the bytes in allocations that no
   published entry and no retired version accounts for, stays 0 (the count
   of segments hides a leak inside one). A failure of the pool itself is
-  tested with a pool too small, or an allocation that finds no room.
+  tested with a pool too small, or an allocation that finds no room. After
+  a failure the kernel is at rest (`assertAtRest()`): nothing leaked, no
+  mutation queued or holding a key or a place, no key in flight, no
+  watcher epoch — and no recheck but the one a failed watcher publication
+  schedules — no worker request unanswered; closed, it leaves no open link
+  port and no resource that keeps the event loop alive
+  (`closeAtRest()`). `test/at-rest.test.js` runs every refusal and failure
+  of the mutations, main thread and worker, facade and `node:fs`, a failed
+  `initialize()` and a failed watcher publication through both.
 - Prove V8 cached-data acceptance in a worker: the per-isolate compilation
   cache masks `cachedDataRejected` in the compiling thread.
 - `npm ci` must work without git or SSH access: git dependencies are pinned
