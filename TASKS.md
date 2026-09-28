@@ -100,6 +100,28 @@ opt-in that proves every native path outside `appRoot` as a place's disk
 is proven today (its real path off `appRoot`'s real line), at one
 `realpath` per call — or the boundary stays as documented.
 
+## P3 — Strict lets a link into managed territory be seen and removed
+
+**Problem.** Under strict the ops that act on a link and not its target —
+`lstat`, `readlink`, `unlink`, `rmdir`, `rm` — on a link inside a disk
+place that leads into managed territory (`d/jro` → `ro`, another place,
+`appRoot`, above it) are `EACCES`, though `node:fs` would touch nothing
+the link hides: the link cannot be inspected or removed through the patch.
+
+**Cause.** The proof (`Aliases.territory`) resolves the whole path, which
+lands in managed territory, so it cannot tell a call that follows the link
+from one that does not.
+
+**Done when.** A call that does not follow the last component is proven by
+its parent's real path plus the leaf name (`Aliases.territory(root, p,
+own)`, threaded through `VfsKernel.routeRead` / `routeMutation` and the
+`PlaceFs` facade), so such a link is seen and removed; the leaf's `.`,
+`..` and trailing-separator forms, which win32 and posix resolve
+differently, fall back to the full proof, and `stat` / `chmod` / `chown` /
+`utimes` (which follow) keep it — with tests on both platforms and the
+mutation that a following op wrongly reuses the own proof. Or the boundary
+stays fail-closed as documented (README, doc/architecture.md).
+
 ## After the next Node.js 26.x release — `doc/alternatives.md`
 
 **Problem.** The comparison describes Node v26.10.0; `main` already removes

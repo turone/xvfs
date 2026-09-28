@@ -488,7 +488,11 @@ the patched `node:fs` replace the operating system's isolation.
   another drive, a short name names nothing of `appRoot` and passes. A
   long name of that form is taken for a short one. `appRoot` itself may be
   given with short names (`os.tmpdir()` on a CI runner): the paths spelled
-  as it is route as usual. Without strict nothing changes.
+  as it is route as usual. Without strict nothing changes for `node:fs` —
+  but the `PlaceFs` facade (`kernel.fs(name)`) serves no disk file whose
+  name is in this form, in either mode: a legitimate long name that looks
+  8.3 (`FOO~1.BIN`) is not served from a place's disk territory, so a short
+  name can never make a raw file stand in for a cached one.
 - On Windows under strict a drive letter other than `appRoot`'s that
   names a share (`net use`), or `appRoot`, a directory above it or below
   it (`subst`), is refused whole: every path on it is `EACCES` before any
@@ -496,7 +500,11 @@ the patched `node:fs` replace the operating system's isolation.
   (`fs.realpathSync.native` of its root) the first time a path on it is
   routed, once per letter and thread; a letter that names nothing is asked
   again, one mapped anew after its answer is not seen. A drive off
-  `appRoot`'s line stays native.
+  `appRoot`'s line stays native. An application that reaches its own files
+  through a mapped network drive cannot under strict — the share is refused
+  whole. The first `realpath` of a disconnected drive waits out its SMB
+  timeout, and an error other than a missing drive caches the letter as
+  refused for the life of the process.
 - Under strict an `appRoot` spelled through a link, a subst drive or 8.3
   names has a second spelling, its real path (`fs.realpathSync.native`,
   asked once when the kernel is built): a path in or below it is `EACCES`,
@@ -520,14 +528,22 @@ the patched `node:fs` replace the operating system's isolation.
   link out of the place into another place, `appRoot` or a directory
   above it is `EACCES`
   before any native I/O — reading, writing, listing or removing through
-  it, and the link itself — and so, for the module loader, is a module it
+  it, and inspecting or removing the link itself (`lstat`, `readlink`,
+  `unlink`, `rmdir`, `rm`), which the proof cannot tell from following it
+  — and so, for the module loader, is a module it
   leads to; a link that stays in the place, or leads elsewhere, is
   followed. A recursive listing of such a disk names a link and never
   enters it — `node:fs`'s own `readdir` does, on Windows even with
   `withFileTypes` — and a recursive `cp` of or into it is `ENOTSUP`. The
   `PlaceFs` facade serves its disk territory the same way. Each such call
-  costs one `realpath` more; a link swapped in between the answer and the
-  call is not seen. A place's directory may itself be a link out of
+  proves its path with `realpath`, so it costs more than the string
+  routing: one for a file read, write or `stat`; two for a directory
+  listing or a path being created (its parent too); one where a recursive
+  `readdir` starts (it walks below without following links); one per
+  directory `glob` walks (it re-routes each); three for a single `cp` or a
+  `require` of a disk-place module (source, destination and what the
+  resolver reads). A link swapped in between the answer and the call is not
+  seen. A place's directory may itself be a link out of
   `appRoot` — a media store elsewhere — and is then the place's own disk;
   one that resolves into the territory `appRoot` manages — another place,
   `appRoot`, a directory above it — is a configuration error under
