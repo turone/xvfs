@@ -5,9 +5,10 @@ const path = require('node:path');
 const { readFileSync } = require('node:fs');
 const { tmpDir, writeTree, cleanup, kernel, memory } = require('../lib.js');
 
-// PlaceFs reads over sab and map: owned copies, leases, stat, exists and a
-// 100-entry listing; 1 KiB, 64 KiB, 1 MiB and 8 MiB files. `disk` is
-// readFileSync of the same file through node:fs, the OS page cache warm.
+// PlaceFs reads over sab and map: owned copies, leases, stat, version (a
+// Map lookup next to stat) and exists, and a 100-entry listing; 1 KiB,
+// 64 KiB, 1 MiB and 8 MiB files. `disk` is readFileSync of the same file
+// through node:fs, the OS page cache warm.
 
 const PROVIDERS = ['sab', 'map'];
 const SIZES = [
@@ -39,6 +40,11 @@ module.exports = async (b) => {
         );
       }
       b.ops(`read.${name}.stat`, () => place.stat('/small.txt'));
+      // Absent on a base from before the version token (bench/ab.js
+      // --bench runs this file against such a base too).
+      if (typeof place.version === 'function') {
+        b.ops(`read.${name}.version`, () => place.version('/small.txt'));
+      }
       b.ops(`read.${name}.exists`, () => place.exists('/small.txt'));
       b.ops(`read.${name}.readdir100`, () => place.readdir('/dir'));
     }
