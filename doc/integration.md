@@ -477,7 +477,7 @@ Never leave hooks installed on the test runner: uninstall in `after`.
 node --import shared-memory-fs/register app.js -- \
   --vfs.defaults.memory.limit=512mib \
   --vfs.defaults.strict=true \
-  --vfs.hooks.fs=false \
+  --vfs.defaults.hooks.fs=false \
   --vfs.enable=tools,workspace \
   --vfs.disable=static
 ```
