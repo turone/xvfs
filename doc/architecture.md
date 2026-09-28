@@ -996,17 +996,22 @@ deliver later; `existsSync` calls nothing back. Node reads the caller's
 options inside the call, so a getter there runs in the section as well:
 accepted, as strict mode is a routing policy, not a sandbox.
 
-**`initialize()` loads Node's rimraf before anything can install the patch
-(`loadRimraf()`, a workaround).** _Why:_ the asynchronous `fs.rm` and
-`fs.promises.rm` — and a recursive `rmSync` on Node 22 — are a JavaScript
-rimraf that takes its functions from the public `node:fs` when it first
-loads. Loaded under the patch, it walked a tree through routing — the
-place's listing, not the disk — and, asynchronous, past any section: a
-recursive `rm` removed part of the tree and failed with `ENOTEMPTY`. The
-bootstrap and a manual `await initialize()` install the patch afterwards,
-so they get rimraf over `node:fs` itself; a worker's `attach()` installs
-it synchronously, so there an asynchronous recursive `rm` of managed
-territory can still walk the routed listing.
+**`install()` loads Node's rimraf over `node:fs` itself before it replaces
+anything — synchronously, once per thread (`loadRimraf()`, a
+workaround).** `node:fs`'s `rm` checks its options through the public
+`fs.lstat` and loads rimraf in that callback: a stand-in `lstat` takes the
+callback, and once `fs.lstat` is `node:fs`'s again the callback hears that
+the path does not exist, which with `force` loads rimraf and removes
+nothing. _Why:_ the asynchronous `fs.rm` and `fs.promises.rm` — and a
+recursive `rmSync` on Node 22 — are a JavaScript rimraf that takes its
+functions from the public `node:fs` when it first loads. Loaded under the
+patch, it walked a tree through routing — the place's listing, not the
+disk — and, asynchronous, past any section: a recursive `rm` removed part
+of the tree and failed with `ENOTEMPTY`. `initialize()` used to wait for
+an asynchronous load, which covered the bootstrap and a manual
+`await initialize()`, but not a worker: `attach()` installs the patch at
+once, and every thread loads its own rimraf. Loaded by `install()`, it is
+loaded before the patch whatever made the kernel and in whichever thread.
 
 **Listings sort and deduplicate the string names, then encode them as
 asked; a recursive `encoding: 'buffer'` listing works in places.** _Why:_
@@ -1112,6 +1117,7 @@ workers call `attach()`.** _Why:_ preloads do not run in worker threads.
 | Refusing every descriptor to a published disk-origin entry                                                      | `writeFileSync` opened the same raw file; `createWriteStream` not |
 | A descriptor that reads and writes (`+`) a published disk-origin entry                                          | it reads the raw file where `readFile` gives the prepared content |
 | Preloading rimraf when the package is imported                                                                  | races a synchronous `install()`; disk I/O on every import         |
+| An asynchronous rimraf preload that `initialize()` waits for                                                    | a worker's `attach()` installs the patch before it could load     |
 | Standalone place-level `script` domain, provider `memory`, `vfs:` URLs, metawatch, root-level `ext` / `compile` | superseded by the place / domain model; no aliases                |
 
 ## Invariants
@@ -1154,9 +1160,9 @@ workers call `attach()`.** _Why:_ preloads do not run in worker threads.
   engines floor clears every affected release.
 - `loadRimraf()` is a load-bearing workaround (Node's asynchronous `rm`,
   and `rmSync` on Node 22, is a JavaScript rimraf that takes its functions
-  from the public `node:fs` when it first loads): `initialize()` waits for
-  it before publishing; remove it only when every supported Node line
-  removes a tree natively.
+  from the public `node:fs` when it first loads): `install()` runs it
+  before it replaces anything, in every thread; remove it only when every
+  supported Node line removes a tree natively.
 - `install()` records every replaced `node:fs` property and `uninstall()`
   restores them in reverse; a `.native` variant is routed as its function
   is and restored with it; with no
@@ -1231,10 +1237,12 @@ stat        { size, mtimeMs } (+ sourceSize, encoding for compressed companions)
   tests see the native walk the patch refuses over managed territory,
   while the routed walk — glob loaded by `install()` — is tested in plain
   node processes (`test/fixtures/glob-routed.cjs`, both modes, and
-  `glob-kept.cjs` across `uninstall()`). So does Node's rimraf, which
-  `test/helpers.js` loads with its first removal: which functions it keeps
-  is tested in a plain node process too (`test/fixtures/rm-kept.cjs`),
-  loaded by `initialize()` and, as in a worker, under the patch.
+  `glob-kept.cjs` across `uninstall()`). So does Node's rimraf, which a
+  test process may have loaded before its first `install()` (on Node 22
+  `test/helpers.js` does, with its first removal): which functions it
+  keeps is tested in a plain node process too (`test/fixtures/rm-kept.cjs`),
+  loaded by `install()` over an initialized kernel and over a projection,
+  and in a worker thread, which loads its own.
 - A refused operation is tested for its error (`code`, `syscall`, `path`,
   `dest`) and for leaving nothing behind — no copy, no deletion, no move,
   and no allocation: `leakedBytes()`, the bytes in allocations that no

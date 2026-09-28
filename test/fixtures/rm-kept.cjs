@@ -1,23 +1,19 @@
 'use strict';
 
 // Run by test/reentry.test.js in a plain node process. Unlike a
-// `node --test` child, where test/helpers.js has already removed a tree,
-// nothing has loaded Node's rimraf yet — the JavaScript walk of fs.rm and
-// fs.promises.rm, and of a recursive rmSync on Node 22 — which keeps the
-// functions it finds on node:fs when it first loads. One mode per run:
-//   native   initialize() loads rimraf before the patch is installed:
-//            every form removes the trees, sync or not.
-//   patched  as in a worker, the patch is installed with no initialize()
-//            and rimraf first loads under it: the synchronous forms still
-//            remove the trees — in the native section the functions it
-//            kept are the originals — while its asynchronous walk runs past
-//            any section (doc/architecture.md), so no such form runs here.
-// Each form removes a tree holding files the routed listing does not show
-// — written after the scan, or never published — and one that exists on
-// disk only. Prints one JSON line.
+// `node --test` child, where test/helpers.js may have removed a tree
+// already, nothing has loaded Node's rimraf yet — the JavaScript walk of
+// fs.rm and fs.promises.rm, and of a recursive rmSync on Node 22 — which
+// keeps the functions it finds on node:fs when it first loads. install()
+// loads it first, synchronously, over node:fs itself, whatever made the
+// kernel it routes to — one mode per run:
+//   initialized  initialize(), as the bootstrap does;
+//   projected    a projection and no initialize(), as a worker's attach().
+// In each, every form removes a tree holding files the routed listing does
+// not show — written after the scan, or never published — and one that
+// exists on disk only. Prints one JSON line.
 
 const fs = require('node:fs');
-const os = require('node:os');
 const path = require('node:path');
 const { VfsKernel } = require('../../lib/kernel.js');
 const fsPatch = require('../../lib/adapters/fs-patch.js');
@@ -46,37 +42,31 @@ const REMOVALS = {
   promises: (k, abs) => fs.promises.rm(abs, { recursive: true }),
 };
 
-// mode → { forms it runs, its kernel over `root` }
+// mode → its kernel over `root`
 const MODES = {
-  native: {
-    forms: Object.keys(REMOVALS),
-    open: async (root) => {
-      const k = await kernel(root, PLACES, {
-        strict: true,
-        watchTimeout: 600000,
-      });
-      k.watcher.close();
-      return k;
-    },
+  initialized: async (root) => {
+    const k = await kernel(root, PLACES, {
+      strict: true,
+      watchTimeout: 600000,
+    });
+    k.watcher.close();
+    return k;
   },
-  patched: {
-    forms: ['place', 'rmSync'],
-    open: async (root) =>
-      VfsKernel.fromSnapshot({ segments: [], places: {} }, config(PLACES), {
-        appRoot: root,
-        console: quiet,
-      }),
-  },
+  projected: async (root) =>
+    VfsKernel.fromSnapshot({ segments: [], places: {} }, config(PLACES), {
+      appRoot: root,
+      console: quiet,
+    }),
 };
 
 const main = async (mode) => {
-  const { forms, open } = MODES[mode];
+  const forms = Object.keys(REMOVALS);
   const loadedBefore = loaded();
   const tree = {};
   for (const name of forms) tree[`site/${name}/a.txt`] = 'a';
   const root = writeTree(tmpDir('vfs-rm-kept'), tree);
   const at = (...p) => path.join(root, 'site', ...p);
-  const k = await open(root);
+  const k = await MODES[mode](root);
   // Written after the scan: on disk, not published.
   for (const name of forms) {
     fs.writeFileSync(at(name, 'b.txt'), 'b');
@@ -86,13 +76,7 @@ const main = async (mode) => {
   }
   const loadedAtInstall = loaded();
   fsPatch.install(k);
-  // A path outside appRoot passes through: a rimraf not loaded yet loads
-  // now, under the patch.
-  const missing = path.join(os.tmpdir(), `vfs-rm-kept-${process.pid}-none`);
-  await new Promise((resolve) => {
-    fs.rm(missing, { recursive: true, force: true }, resolve);
-  });
-  const loadedAtRemoval = loaded();
+  const loadedAfterInstall = loaded();
   const failed = {};
   for (const name of forms) {
     for (const dir of [name, `${name}-only`]) {
@@ -111,14 +95,14 @@ const main = async (mode) => {
     mode,
     loadedBefore,
     loadedAtInstall,
-    loadedAtRemoval,
+    loadedAfterInstall,
     failed,
     left,
   };
   process.stdout.write(JSON.stringify(result) + '\n');
 };
 
-main(process.argv[2] || 'native').catch((err) => {
+main(process.argv[2] || 'initialized').catch((err) => {
   console.error(err);
   process.exit(1);
 });

@@ -5,14 +5,13 @@ const assert = require('node:assert/strict');
 const { execFileSync } = require('node:child_process');
 const fs = require('node:fs');
 const path = require('node:path');
+const { Worker } = require('node:worker_threads');
 const disk = require('../lib/disk.js');
-const { VfsKernel } = require('../lib/kernel.js');
 const fsPatch = require('../lib/adapters/fs-patch.js');
 const {
   tmpDir,
   writeTree,
   rm,
-  config,
   kernel,
   drain,
   quiet,
@@ -25,6 +24,7 @@ const {
   writeFileSync: writeDisk,
   existsSync: onDisk,
   mkdirSync: mkdirDisk,
+  readdirSync: listDisk,
 } = fs;
 
 // Node's own implementations call the public node:fs back: readFileSync and
@@ -599,46 +599,101 @@ describe('fs-patch under strict: the native section and the caller', () => {
   });
 });
 
+// install() loads Node's rimraf over node:fs itself before it replaces
+// anything, synchronously: a worker's attach() installs the patch at once.
 describe("Node's rimraf keeps the node:fs it first loads with", () => {
   const script = path.join(__dirname, 'fixtures', 'rm-kept.cjs');
   const run = (mode) =>
     JSON.parse(
-      execFileSync(process.execPath, [script, mode], { encoding: 'utf8' }),
+      execFileSync(process.execPath, [script, mode], {
+        encoding: 'utf8',
+        timeout: 30000,
+      }),
     );
 
-  it('loaded by initialize() before the patch: every form removes whole trees', () => {
-    assert.deepEqual(run('native'), {
-      mode: 'native',
-      loadedBefore: false,
-      loadedAtInstall: true,
-      loadedAtRemoval: true,
-      failed: {},
-      left: [],
+  for (const mode of ['initialized', 'projected']) {
+    it(`loaded by install(), a kernel ${mode}: every form removes whole trees`, () => {
+      assert.deepEqual(run(mode), {
+        mode,
+        loadedBefore: false,
+        loadedAtInstall: false,
+        loadedAfterInstall: true,
+        failed: {},
+        left: [],
+      });
     });
-  });
+  }
 
-  it('loaded under the patch, as in a worker: the synchronous forms still do', () => {
-    assert.deepEqual(run('patched'), {
-      mode: 'patched',
-      loadedBefore: false,
-      loadedAtInstall: false,
-      loadedAtRemoval: true,
-      failed: {},
-      left: [],
+  // A worker thread loads its own rimraf. Each tree holds a file published
+  // before the worker attached, one written after the scan and one the
+  // place does not cache; the last is on disk only.
+  it('in a worker, after attach(): the asynchronous forms remove whole trees', async () => {
+    const root = writeTree(tmpDir('vfs-reentry-worker'), {
+      'site/rm/a.txt': 'a',
+      'site/promises/a.txt': 'a',
     });
-  });
-
-  it('a close() while initialize() waits for it is final', async () => {
-    const root = tmpDir('vfs-reentry-close');
-    const places = { v: { origin: 'virtual', fs: { writable: true } } };
-    const k = new VfsKernel(config(places), { appRoot: root, console: quiet });
+    const at = (...p) => path.join(root, 'site', ...p);
+    const k = await kernel(
+      root,
+      { site: { fs: { ext: ['txt'], writable: true } } },
+      { strict: true, watchTimeout: 600000 },
+    );
+    k.watcher.close();
+    for (const name of ['rm', 'promises']) {
+      writeDisk(at(name, 'b.txt'), 'b');
+      writeDisk(at(name, 'c.bin'), 'c');
+      mkdirDisk(at(`${name}-only`));
+      writeDisk(at(`${name}-only`, 'd.txt'), 'd');
+    }
+    const WORKER = `
+      const { parentPort, workerData } = require('node:worker_threads');
+      const fs = require('node:fs');
+      const RIMRAF = 'NativeModule internal/fs/rimraf';
+      const loaded = () => process.moduleLoadList.includes(RIMRAF);
+      const loadedBefore = loaded();
+      require(${JSON.stringify(path.resolve(__dirname, '../index.js'))}).attach();
+      const loadedAtAttach = loaded();
+      const REMOVALS = {
+        rm: (p) => new Promise((resolve, reject) => {
+          fs.rm(p, { recursive: true }, (err) => (err ? reject(err) : resolve()));
+        }),
+        promises: (p) => fs.promises.rm(p, { recursive: true }),
+      };
+      (async () => {
+        const failed = {};
+        for (const [name, remove] of Object.entries(REMOVALS)) {
+          for (const dir of [name, name + '-only']) {
+            try {
+              await remove(require('node:path').join(workerData.site, dir));
+            } catch (err) {
+              failed[dir] = err.code;
+            }
+          }
+        }
+        parentPort.postMessage({ loadedBefore, loadedAtAttach, failed });
+      })();
+    `;
+    let thread = null;
     try {
-      const init = k.initialize();
-      k.close();
-      await assert.rejects(init, /kernel closed before publication/);
-      assert.equal(k.state, 'closed');
-      assert.equal(k.cache, null);
+      const { vfs, transferList } = k.link();
+      thread = new Worker(WORKER, {
+        eval: true,
+        workerData: { vfs, site: at() },
+        transferList,
+      });
+      const result = await new Promise((resolve, reject) => {
+        thread.once('message', resolve);
+        thread.once('error', reject);
+        thread.once('exit', (code) => reject(new Error(`exit ${code}`)));
+      });
+      assert.deepEqual(result, {
+        loadedBefore: false,
+        loadedAtAttach: true,
+        failed: {},
+      });
+      assert.deepEqual(listDisk(at()), []);
     } finally {
+      await thread?.terminate();
       k.close();
       rm(root);
     }
