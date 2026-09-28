@@ -270,12 +270,12 @@ expectType<
       readonly key: string;
     }
   | { readonly kind: 'root' }
-  | { readonly kind: 'passthrough' }
+  | { readonly kind: 'passthrough'; readonly place?: Place }
   | { readonly kind: 'deny'; readonly code: 'EACCES' | 'EROFS' | 'ENOTDIR' }
 >()(read);
 expectType<
   | { readonly kind: 'store'; readonly place: Place; readonly key: string }
-  | { readonly kind: 'passthrough' }
+  | { readonly kind: 'passthrough'; readonly place?: Place }
   | { readonly kind: 'deny'; readonly code: 'EACCES' | 'EROFS' }
 >()(kernel.routeMutation('/abs/path'));
 if (read.kind === 'file') {
@@ -376,4 +376,7 @@ kernel.resolveModule('/abs/path', 'fs');
 if (read.kind === 'passthrough') {
   // @ts-expect-error no `key` on a passthrough
   read.key;
+  // Under strict, the place whose disk it lies on.
+  expectType<Place | undefined>()(read.place);
 }
+expectType<typeof found>()(kernel.resolveModule('/abs/path', 'require', true));

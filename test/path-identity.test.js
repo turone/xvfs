@@ -525,9 +525,12 @@ describe(
       }
       for (const into of namespaceForms(at('rw', 'into.txt'))) {
         for (const [call, syscall, run] of PAIRS) {
+          // A recursive copy of a place's disk is refused before its
+          // destination is looked at: its walk would follow links.
+          const code = call === 'cpSync recursive' ? 'ENOTSUP' : 'EACCES';
           await assert.rejects(
             async () => run(w, into),
-            refused('EACCES', syscall, w, into),
+            refused(code, syscall, w, into),
             `${call} to ${into}`,
           );
         }
