@@ -127,6 +127,87 @@ const FAILURES = [
   ['an unlink of a directory', 'v', (f) => f.unlink('/d'), 'EISDIR'],
   ['a mkdir of a file', 'v', (f) => f.mkdir('/f'), 'EEXIST'],
   ['a mkdir under a file', 'v', (f) => f.mkdir('/f/g'), 'ENOTDIR'],
+  // Sets of writeFiles, refused whole: a file of the set before the one
+  // refused is never published, and nothing of it stays.
+  [
+    'a set with a key under another of it',
+    'v',
+    (f) =>
+      f.writeFiles([
+        ['/n', 'n'],
+        ['/n/x', 'x'],
+      ]),
+    'ENOTDIR',
+  ],
+  [
+    'a set with a key under a file',
+    'v',
+    (f) =>
+      f.writeFiles([
+        ['/g', 'g'],
+        ['/f/x', 'x'],
+      ]),
+    'ENOTDIR',
+  ],
+  [
+    'a set with a key onto a directory',
+    'v',
+    (f) =>
+      f.writeFiles([
+        ['/g', 'g'],
+        ['/d', 'x'],
+      ]),
+    'EISDIR',
+  ],
+  [
+    'an exclusive set with a key onto a file',
+    'v',
+    (f) =>
+      f.writeFiles(
+        [
+          ['/g', 'g'],
+          ['/f', 'x'],
+        ],
+        { flag: 'wx' },
+      ),
+    'EEXIST',
+  ],
+  [
+    'a set with a file too large for SAB',
+    'v',
+    (f) =>
+      f.writeFiles([
+        ['/g', 'g'],
+        ['/big', BIG],
+      ]),
+    'EFBIG',
+  ],
+  [
+    'a set whose preparer fails on its last file',
+    'p',
+    (f) =>
+      f.writeFiles([
+        ['/c.txt', 'c'],
+        ['/b.txt', 'boom'],
+      ]),
+    'EBOOM',
+  ],
+  [
+    'a set whose prepared bytes are placed, then refused',
+    'u',
+    (f) => f.writeFiles([['/y.bin', 'y'.repeat(100)]]),
+    'scriptOptions.cachedData is reserved',
+  ],
+  [
+    'a set with a file that does not compile',
+    's',
+    (f) =>
+      f.writeFiles([
+        ['/ok2.js', 'x = 1;'],
+        ['/bad.js', 'function ('],
+      ]),
+    'ENOTSUP',
+  ],
 ];
 
 // The code a call fails with — or, for an error without one, the end of
