@@ -752,8 +752,9 @@ raw bytes and miss virtual entries.
   `appRoot`, `disk` / `node-default` places, disk-territory files,
   unmanaged paths without strict; and the guarded APIs (`chmod`, `chown`,
   `utimes`, `truncate`, `symlink`, `readlink`, `statfs`, `watchFile`,
-  `rmdir`, `mkdtemp`, `glob`, and `open` — or `readFile` — with a flag
-  that writes) once every path argument is routed.
+  `rmdir`, `mkdtemp`, `glob`, and `open` — or `readFile`,
+  `createReadStream` — with a flag that writes) once every path argument
+  is routed.
 
 _Why:_ an application must be able to tell which calls the VFS serves, which
 it refuses and which belong to the operating system — and a new API must
@@ -977,14 +978,21 @@ wherever `writeFile` writes it, and `open(new, 'w')` passes where
 `writeFileSync(new)` does, while a flag that can read stays `EACCES` on a
 hidden path.
 `createWriteStream` opens through `fs.open`, so its stream gets the same
-error. `readFile` with a flag that writes opens the file with it before
-it reads: it is routed as `open` with that flag, and what `open` lets
-through is read natively.** _Why:_ routed only as a read,
+error. `readFile` and `createReadStream` with a flag that writes open the
+file with it before they read: they are routed as `open` with that flag
+— the stream before it opens anything, whatever `fs` it is given, its
+refusal emitted on it — and what `open` lets through is read natively. A
+stream given a descriptor opens nothing, whatever path names it: it is
+`node:fs`'s.**
+_Why:_ routed only as a read,
 `openSync(p, 'w')` and `createWriteStream` bypassed the mutation policy:
 they created a file in a read-only place, and a stray one in a virtual
 place's directory on disk, which the place never shows — and so did
 `readFile` with such a flag, which also truncated a file of a read-only
-place, while a published entry served its content whatever the flag.
+place, while a published entry served its content whatever the flag, as
+`createReadStream` did. Routing the stream up front, rather than leaving
+it to its own `fs.open`, holds even for a stream given functions of its
+own (`{ fs }`), which no wrapper sees.
 Refusing every descriptor to a published entry
 then left `createWriteStream` unable to do what `writeFileSync` — open,
 write, close, in the native section — did: the raw file is a disk-origin
