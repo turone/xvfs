@@ -8,7 +8,15 @@ const vm = require('node:vm');
 const { Worker } = require('node:worker_threads');
 const { createBytecode } = require('../lib/pipeline.js');
 const { bytecodeKey } = require('../lib/companion.js');
-const { tmpDir, writeTree, rm, kernel, until, tap } = require('./helpers.js');
+const {
+  tmpDir,
+  writeTree,
+  rm,
+  kernel,
+  until,
+  tap,
+  within,
+} = require('./helpers.js');
 
 // Facts about V8 cached data fs.script relies on (doc/architecture.md,
 // "Publication" and "Preparation"); if any of these ever fails on a new
@@ -25,23 +33,26 @@ const SOURCE = [
 // Consume `cachedData` for `source` under `options` in a fresh isolate;
 // resolves { rejected, result }.
 const consumeInWorker = (source, cachedData, options) =>
-  new Promise((resolve, reject) => {
-    const worker = new Worker(
-      `
-      const vm = require('node:vm');
-      const { parentPort, workerData } = require('node:worker_threads');
-      const { source, cachedData, options } = workerData;
-      const script = new vm.Script(source, { ...options, cachedData });
-      parentPort.postMessage({
-        rejected: script.cachedDataRejected,
-        result: script.runInThisContext()({ user: 'ann' }),
-      });
-      `,
-      { eval: true, workerData: { source, cachedData, options } },
-    );
-    worker.once('message', resolve);
-    worker.once('error', reject);
-  });
+  within(
+    new Promise((resolve, reject) => {
+      const worker = new Worker(
+        `
+        const vm = require('node:vm');
+        const { parentPort, workerData } = require('node:worker_threads');
+        const { source, cachedData, options } = workerData;
+        const script = new vm.Script(source, { ...options, cachedData });
+        parentPort.postMessage({
+          rejected: script.cachedDataRejected,
+          result: script.runInThisContext()({ user: 'ann' }),
+        });
+        `,
+        { eval: true, workerData: { source, cachedData, options } },
+      );
+      worker.once('message', resolve);
+      worker.once('error', reject);
+    }),
+    'the answer of the worker',
+  );
 
 describe('V8 cached data facts (script domain)', () => {
   it('is accepted across isolates regardless of filename/line/column offsets', async () => {
@@ -131,11 +142,14 @@ describe('script domain: live reload in a linked worker', () => {
   const at = (...p) => path.join(root, 'api', ...p);
 
   const ask = (key) =>
-    new Promise((resolve, reject) => {
-      worker.once('message', resolve);
-      worker.once('error', reject);
-      worker.postMessage(key);
-    });
+    within(
+      new Promise((resolve, reject) => {
+        worker.once('message', resolve);
+        worker.once('error', reject);
+        worker.postMessage(key);
+      }),
+      `the bundle of ${key} from the worker`,
+    );
 
   before(async () => {
     root = writeTree(tmpDir('script-live'), { 'api/h.js': V1 });
@@ -159,10 +173,13 @@ describe('script domain: live reload in a linked worker', () => {
       workerData: { vfs },
       transferList,
     });
-    await new Promise((resolve, reject) => {
-      worker.once('message', resolve);
-      worker.once('error', reject);
-    });
+    await within(
+      new Promise((resolve, reject) => {
+        worker.once('message', resolve);
+        worker.once('error', reject);
+      }),
+      'the worker ready',
+    );
   });
 
   after(async () => {

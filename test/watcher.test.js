@@ -17,6 +17,7 @@ const {
   quiet,
   nextMessage,
   diskCalls,
+  within,
 } = require('./helpers.js');
 
 // The disk behind the patch, captured before any install. Not rmSync: on
@@ -380,7 +381,7 @@ describe('watcher: epoch ordering', () => {
     try {
       ctx.gateFirst(false);
       ctx.change();
-      await entered.promise;
+      await within(entered.promise, 'epoch A at its gate');
       fs.writeFileSync(abs, 'NEW2');
       ctx.change();
       assert.equal(k.watchQueue.size, 2, 'B is queued behind A');
@@ -388,7 +389,7 @@ describe('watcher: epoch ordering', () => {
       assert.equal(ctx.published(), 0, 'nothing published yet');
       assert.equal(ctx.read(), 'OLD1');
       gate.resolve();
-      await k.watchQueue.idle;
+      await within(k.watchQueue.idle, 'epochs A and B');
       assert.equal(reads.length, 2);
       assert.equal(ctx.published(), 2, 'A then B, one update each');
       assert.equal(ctx.read(), 'NEW2');
@@ -405,12 +406,12 @@ describe('watcher: epoch ordering', () => {
     try {
       ctx.gateFirst(true);
       ctx.change();
-      await entered.promise;
+      await within(entered.promise, 'epoch A at its gate');
       fs.writeFileSync(abs, 'NEW2');
       ctx.change();
       assert.equal(k.watchQueue.size, 2);
       gate.resolve();
-      await k.watchQueue.idle;
+      await within(k.watchQueue.idle, 'epochs A and B');
       assert.equal(ctx.published(), 1, 'only B published');
       assert.equal(ctx.read(), 'NEW2');
       assert.ok(warnings.some((w) => /not published/.test(w)));
@@ -435,13 +436,13 @@ describe('watcher: epoch ordering', () => {
     try {
       ctx.gateFirst(false);
       ctx.change();
-      await entered.promise;
+      await within(entered.promise, 'epoch A at its gate');
       fs.writeFileSync(abs, 'NEW2');
       ctx.change();
       const idle = k.watchQueue.idle;
       k.close();
       gate.resolve();
-      await idle;
+      await within(idle, 'epochs A and B');
       assert.equal(commits, 0, 'neither A nor B was committed');
       assert.equal(k.watchQueue.size, 0);
       assert.deepEqual(errors, [], 'a closed kernel stays quiet');
@@ -506,9 +507,12 @@ describe('watcher: a bounded epoch', () => {
     };
     const done = async () => {
       open();
-      await k.watchQueue.idle;
-      k.close();
-      rm(root);
+      try {
+        await within(k.watchQueue.idle, 'the epoch, its gate open');
+      } finally {
+        k.close();
+        rm(root);
+      }
     };
     const rels = Object.keys(files);
     return { k, t, at, rels, reads, arrived, release, open, done };
@@ -535,7 +539,7 @@ describe('watcher: a bounded epoch', () => {
         assert.ok(reads.now <= IO_LIMIT, `${reads.now} reads at once`);
         release();
       }
-      await k.watchQueue.idle;
+      await within(k.watchQueue.idle, 'the epoch');
       assert.equal(reads.peak, 16, 'never more than 16 reads at once');
       assert.equal(reads.arrived, rels.length, 'every file read once');
       assert.equal(k.nextUpdateId - first, 1, 'one update');
@@ -579,7 +583,7 @@ describe('watcher: a bounded epoch', () => {
       const idle = k.watchQueue.idle;
       k.close();
       open();
-      await idle;
+      await within(idle, 'the epoch, closed');
       assert.equal(calls.count, 0, 'no disk call after close()');
       assert.equal(reads.arrived, IO_LIMIT, 'no read after close()');
       assert.equal(k.nextUpdateId, first, 'nothing published');
@@ -630,7 +634,7 @@ describe('watcher: a job in flight at close()', () => {
       const idle = k.watchQueue.idle;
       k.close();
       const atClose = calls.count;
-      await idle;
+      await within(idle, 'the epoch, closed');
       assert.equal(atClose, 4, 'one disk call in flight per job');
       assert.equal(calls.count, atClose, 'no disk call after close()');
       assert.deepEqual(logs, [], 'nothing logged');
@@ -679,7 +683,7 @@ describe('watcher: a job in flight at close()', () => {
       closed = true;
       k.close();
       const atClose = calls.count;
-      await idle;
+      await within(idle, 'the epoch, closed');
       assert.equal(atClose, 2);
       assert.equal(calls.count - atClose, 4, 'the rest of the read only');
       assert.equal(prepared, 0, 'no preparer after close()');

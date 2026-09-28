@@ -1235,7 +1235,13 @@ stat        { size, mtimeMs } (+ sourceSize, encoding for compressed companions)
   waits for that message (`nextMessage`, or `until` over the messages),
   never for the projection alone: `#flush` applies an update to the main
   thread's projection before it posts it, and the port delivers it later.
-  The disk calls a closed kernel starts are
+  Every wait for what the code under test must reach — a gate, an event or
+  a message, a queue gone idle, a worker's answer — is bounded (`within()`,
+  `nextEvent()`, `diskCalls().started()`, `until` with an assertion): a
+  regression fails the test within seconds, naming what it waited for,
+  where `node --test` would wait without a word. A test that holds an
+  operation at a gate asserts that the gate was reached before it opens
+  it, so it never passes by not reaching it. The disk calls a closed kernel starts are
   counted with async_hooks (`diskCalls()`), which sees the functions the
   library captured as well. A filesystem that reports no entry types is
   simulated by the fs binding (`process.binding('fs').readdir` reporting
