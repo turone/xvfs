@@ -46,7 +46,7 @@
     "index.d.ts"
   ],
   "scripts": {
-    "test": "node --test \"test/*.test.js\"",
+    "test": "node --test --test-force-exit --test-timeout=60000 \"test/*.test.js\"",
     "test:examples": "node --test \"test-examples/examples-smoke.test.js\"",
     "test:types": "tsc -p test-types --noEmit",
     "bench": "node bench/run.js",
