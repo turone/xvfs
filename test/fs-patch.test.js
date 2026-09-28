@@ -27,6 +27,7 @@ const {
   realpathSync: realpathDisk,
   realpath: realpathDiskCb,
   openAsBlob: openAsBlobDisk,
+  openAsBlobSync: openAsBlobSyncDisk,
   rmdirSync: rmdirDisk,
 } = fs;
 
@@ -1752,6 +1753,85 @@ describe('fs-patch: openAsBlob', () => {
       fs.openAsBlob(path.join(outside, 'o.txt'), 'text/plain'),
     );
     assert.equal(native?.code, 'ERR_INVALID_ARG_TYPE');
+  });
+
+  // fs.openAsBlobSync (Node 26.10), the same read through the same binding:
+  // routed the same way, the Blob returned, what the patch refuses thrown.
+  const SYNC =
+    typeof openAsBlobSyncDisk === 'function'
+      ? {}
+      : { skip: 'no fs.openAsBlobSync before Node 26.10' };
+
+  describe('openAsBlobSync', SYNC, () => {
+    it('a hidden path is EACCES, thrown', () => {
+      for (const file of [
+        at('pub', 'late.txt'),
+        at('stray', 's.txt'),
+        at('mem', 'nope.txt'),
+      ]) {
+        assert.throws(
+          () => fs.openAsBlobSync(file),
+          (err) => {
+            refused(err, { code: 'EACCES', file, args: [] });
+            return true;
+          },
+        );
+      }
+    });
+
+    it('a published entry is a Blob over its canonical content', async () => {
+      const blob = fs.openAsBlobSync(at('pub', 'a.txt'), {
+        type: 'text/plain',
+      });
+      assert.ok(blob instanceof Blob);
+      assert.equal(await blob.text(), 'PREPARED', 'prepared, not the raw file');
+      assert.equal(blob.size, 8);
+      assert.equal(blob.type, 'text/plain');
+      assert.equal(fs.openAsBlobSync(at('pub', 'a.txt')).type, '');
+      k.fs('mem').writeFile('/m.txt', 'virtual');
+      const virtual = fs.openAsBlobSync(at('mem', 'm.txt'));
+      // A Blob is a copy: a later write does not change it.
+      k.fs('mem').writeFile('/m.txt', 'changed');
+      assert.equal(await virtual.text(), 'virtual');
+      const again = fs.openAsBlobSync(Buffer.from(at('mem', 'm.txt')));
+      assert.equal(await again.text(), 'changed');
+    });
+
+    it('a directory is EISDIR, thrown; the disk territory and the outside stay native', async () => {
+      for (const dir of [at('pub'), at('mem'), root]) {
+        assert.throws(() => fs.openAsBlobSync(dir), {
+          code: 'EISDIR',
+          syscall: 'read',
+        });
+      }
+      const territory = fs.openAsBlobSync(at('pub', 'raw.bin'));
+      assert.equal(await territory.text(), 'territory');
+      const out = fs.openAsBlobSync(path.join(outside, 'o.txt'));
+      assert.equal(await out.text(), 'outside');
+      // node:fs's own refusal of a missing file, as node:fs throws it.
+      const missingFile = path.join(outside, 'missing.txt');
+      const native = await failure(() => openAsBlobSyncDisk(missingFile));
+      assert.ok(native, 'node:fs refuses a missing file');
+      assert.throws(() => fs.openAsBlobSync(missingFile), {
+        code: native.code,
+        message: native.message,
+      });
+    });
+
+    it('options are checked as node:fs checks them', () => {
+      for (const file of [
+        at('pub', 'a.txt'),
+        at('mem', 'm.txt'),
+        path.join(outside, 'o.txt'),
+      ]) {
+        assert.throws(() => fs.openAsBlobSync(file, 'text/plain'), {
+          code: 'ERR_INVALID_ARG_TYPE',
+        });
+        assert.throws(() => fs.openAsBlobSync(file, { type: 5 }), {
+          code: 'ERR_INVALID_ARG_TYPE',
+        });
+      }
+    });
   });
 });
 

@@ -781,6 +781,9 @@ behind it; the owned copy costs one more copy than a native `Blob`, which
 reads lazily. The call is documented to return a promise, so the patch's
 refusals are rejections; `node:fs` refuses its own — a missing file —
 before the promise today, and the paths it passes through keep that form.
+`fs.openAsBlobSync`, which Node 26.10 added, reads through the same binding
+and is routed the same way — unpatched, it read what strict hides too: it
+returns the `Blob` and throws the patch's refusals.
 
 **`glob` walks with the `node:fs` functions it captured when Node loaded
 `internal/fs/glob`; `install()` loads it, so it walks through the patch:
