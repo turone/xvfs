@@ -314,6 +314,16 @@ and missed new files, and from Node 26.10 a refusal reached it as an
 uncaught exception. One watch per directory is also what inotify costs at
 least.
 
+**The watcher publishes no link the scan would not: a rescan starts only
+at a real directory (`scan()` lstats its `startPath`), and under strict a
+changed file is taken by its own stats — a link at a watched key is no
+source, its key goes as if the file were gone.** _Why:_ the watcher stats
+what an event names, which follows a link: a junction made in a
+disk-origin place after `initialize()` became a rescan that read its
+target — another place, a directory above `appRoot` — and published it
+under the place's keys, content the scan at init never enters. Under
+strict the scan takes no link to a file either, so neither does an epoch.
+
 **Stable source reads: stat before and after a looped read; a failed
 publication keeps the previous version and gets one deferred recheck.**
 _Why:_ a file that changes while being read must never be published half

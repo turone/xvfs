@@ -552,3 +552,93 @@ describe('without strict: links answer as before', () => {
     }
   });
 });
+
+// The scan at initialize() never enters a link to a directory, and under
+// strict takes no link to a file; the watcher's epochs keep to the same. A
+// link made later in a disk-origin place publishes nothing of its target,
+// in either mode; under strict a link at a watched key is no source. The
+// epochs are emitted by hand, a new file beside the link the gate that
+// they ran.
+describe('the watcher publishes no link the scan would not', () => {
+  const opened = async (strict) => {
+    const base = tmpDir('watch-links');
+    const root = writeTree(path.join(base, 'app'), { 'site/a.txt': 'a' });
+    const other = writeTree(path.join(base, 'other'), { 'secret.txt': 's' });
+    const places = { site: { fs: { ext: ['txt'] } } };
+    const defaults = { strict, watch: true, watchTimeout: 60000 };
+    const k = await kernel(root, places, defaults);
+    const at = (...p) => path.join(root, 'site', ...p);
+    const epoch = async (events) => {
+      k.watcher.emit('epoch', new Map(events));
+      await k.watchQueue.idle;
+    };
+    return { base, other, k, at, epoch };
+  };
+
+  for (const strict of [false, true]) {
+    it(`a link to a directory made after initialize() (strict: ${strict})`, async () => {
+      const { base, other, k, at, epoch } = await opened(strict);
+      const junction = at('j');
+      linkDir(other, junction);
+      try {
+        writeTree(at(), { 'n.txt': 'n' });
+        await epoch([
+          [junction, 'scan'],
+          [at('n.txt'), 'change'],
+        ]);
+        const site = k.fs('site');
+        assert.equal(site.readFile('/n.txt', 'utf8'), 'n');
+        assert.equal(site.exists('/j/secret.txt'), false);
+        assert.deepEqual(site.readdir('/'), ['a.txt', 'n.txt']);
+      } finally {
+        k.close();
+        unlinkDir(junction);
+        rm(base);
+      }
+    });
+  }
+
+  // A published file replaced by a link goes as if it were gone — a
+  // junction here, which Windows makes without a privilege.
+  it('strict: a published key replaced by a link goes', async () => {
+    const { base, other, k, at, epoch } = await opened(true);
+    try {
+      unlinkDisk(at('a.txt'));
+      linkDir(other, at('a.txt'));
+      writeTree(at(), { 'n.txt': 'n' });
+      await epoch([
+        [at('a.txt'), 'change'],
+        [at('n.txt'), 'change'],
+      ]);
+      const site = k.fs('site');
+      assert.equal(site.readFile('/n.txt', 'utf8'), 'n');
+      assert.equal(site.exists('/a.txt'), false);
+    } finally {
+      k.close();
+      unlinkDir(at('a.txt'));
+      rm(base);
+    }
+  });
+
+  it('strict: a link to a file at a watched key is no source', async (t) => {
+    const { base, other, k, at, epoch } = await opened(true);
+    try {
+      try {
+        linkDisk(path.join(other, 'secret.txt'), at('l.txt'), 'file');
+      } catch (err) {
+        return void t.skip(`no symbolic link to a file here (${err.code})`);
+      }
+      writeTree(at(), { 'n.txt': 'n' });
+      await epoch([
+        [at('l.txt'), 'change'],
+        [at('n.txt'), 'change'],
+      ]);
+      const site = k.fs('site');
+      assert.equal(site.readFile('/n.txt', 'utf8'), 'n');
+      assert.equal(site.exists('/l.txt'), false);
+    } finally {
+      k.close();
+      rm(base);
+    }
+  });
+});

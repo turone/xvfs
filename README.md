@@ -556,7 +556,10 @@ the patched `node:fs` replace the operating system's isolation.
 - Paths outside `appRoot` → ordinary Node (the spellings of `appRoot`
   above excepted), except operations whose walk would enter
   `appRoot` from above: recursive listings, watches, copies and removals,
-  and `rename`, of a directory above it. Scanner does not follow symlinks.
+  and `rename`, of a directory above it. The scanner does not follow
+  symlinks, and neither does the watcher: a link to a directory made
+  later in a disk-origin place publishes nothing of its target, and under
+  strict a link at a watched key is no source.
 - Listings (`readdir`, `opendir`) always come from the places. A copy or a
   rename routes both of its paths and hands on the raw input, so a hidden
   source stays `EACCES`; recursive copies, hard links and watches of
