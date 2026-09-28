@@ -26,6 +26,7 @@ const FS_CALLS = [
   ...['statfs', 'readdir', 'opendir', 'writeFile', 'appendFile', 'truncate'],
   ...['unlink', 'rm', 'rmdir', 'mkdir', 'utimes', 'lutimes', 'chmod'],
   ...['chown', 'lchown', 'symlink', 'rename', 'copyFile', 'cp', 'link'],
+  ...['mkdtemp', 'mkdtempDisposable'],
 ];
 const countNative = () => {
   const calls = [];
