@@ -163,6 +163,20 @@ describe('PlaceFs: reads', () => {
     assert.notEqual(pub.stat('/app.js'), pub.stat('/app.js'), 'never cached');
   });
 
+  // Only the documented `bigint` option reaches the internal stat builder:
+  // an unrelated or internal-looking key (`directory`, the flag statsOf()
+  // itself takes) must not leak through and change what is reported.
+  it('stat ignores unknown/internal options like directory', () => {
+    const file = pub.stat('/app.js', { directory: true });
+    assert.ok(file.isFile(), 'a file stays a file');
+    assert.equal(file.size, 200);
+    const dir = pub.stat('/img', { directory: false });
+    assert.ok(dir.isDirectory(), 'a directory stays a directory');
+    const big = pub.stat('/app.js', { directory: true, bigint: true });
+    assert.ok(big.isFile());
+    assert.equal(big.size, 200n);
+  });
+
   it('readdir: direct children, recursive, withFileTypes, errors', () => {
     assert.deepEqual(pub.readdir('/'), [
       'app.js',
