@@ -81,6 +81,26 @@ throws keeps the previous version. → README
 [Lifetime of shared bytes](../README.md#lifetime-of-shared-bytes),
 [Protocol](../README.md#protocol).
 
+**A version for every publication, and an event when it lands.** Each
+commit that publishes something takes the next number of the kernel's
+count — `kernel.version`, `files.version(key)`, a lease's or a script
+bundle's own `version` — the same in every thread, so
+`${kernel.instance}-${files.version(key)}` never names two contents.
+`kernel.on('publish', …)` fires once per commit, in every thread, with
+the source keys it created, replaced or removed by place — never the
+bytes themselves, so a listener holds nothing shared and delays no free.
+It is not a replacement for raw `fs.watch`. → README
+[Versions](../README.md#versions),
+[Publication events](../README.md#publication-events).
+
+**Several files, one publication: `writeFiles`.** `writeFiles(files,
+options)` checks a whole set of `[key, data]` pairs against a virtual
+place's hierarchy and the mutations already in flight, prepares each file
+once, and publishes every one of them or none, in one commit — one
+version, one `'publish'` event, one SAB update — so no thread ever reads
+part of a related set. → README
+[writeFiles](../README.md#several-files-as-one-writefiles).
+
 **Zero-copy views and streams.** `readFileView()` and `withFileView()`
 lease a `Buffer` over the shared bytes; `createReadStream({ zeroCopy })`
 yields borrowed chunks; `readFile()` returns an owned copy where that is
@@ -382,6 +402,19 @@ worker's writes into its `map` places need `attach({ preparers })` when the
 extension has a preparer. →
 [examples/multi-tenant/](../examples/multi-tenant/),
 [integration.md → AI agent / plugin workspace](integration.md#ai-agent--plugin-workspace).
+
+### A read-through cache in front of Redis or a database (deferred idea)
+
+The shape an application could build today: Redis or a database stays the
+shared source of truth across processes; on a change, the main thread
+writes the new value into a `sab + virtual` place (`writeFile` /
+`writeFiles`) and every worker reads it from shared memory from then on —
+no round trip and no deserialization on the read path, only on
+invalidation (see Out-of-process caches, above). Nothing beyond the
+existing virtual-write API is needed to wire this by hand; a built-in
+Redis- or database-backed provider, subscriber or `fs.fallback` mode is a
+deferred idea, not implemented — there is no `provider: 'redis'` and no
+bundled client.
 
 ## Measured
 
