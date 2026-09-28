@@ -57,7 +57,9 @@ non-strict routing, and both fallbacks.
 - Recursive `cp` of or into managed territory, with `force`,
   `errorOnExist` and `filter` per descendant.
 - `watch` of managed territory: publication-level events for disk and
-  virtual updates, never a hidden raw name; a defined outcome for a
+  virtual updates — the kernel announces its publications already
+  (`kernel.on('publish')`, README, Publication events), which a watch
+  could follow — never a hidden raw name; a defined outcome for a
   preparation that fails; a recursive watch bounded by the filtered
   listing; `AbortSignal`, `close()` and backpressure as in `node:fs`.
 - Recursive `readdir` / `opendir` / `watch` from above `appRoot`, or from
@@ -94,6 +96,28 @@ every fs call — and `symlink` targets are resolved only when read.
 serves or that enclose `appRoot`, refuse links in disk territory, or check
 the real path of passthrough reads) is implemented with tests on Linux and
 Windows.
+
+## P3 — Publication events of map places
+
+**Problem.** `kernel.on('publish')` announces the publications of shared
+places only (`sab`, `sea`): a `map` place — each thread's own — publishes
+at once on its Map, past the kernel's epochs, and announces nothing, so an
+application that keeps route handlers in a `map + virtual` place (the
+hot-reload example) cannot react to its own writes through events, nor to
+what the watcher publishes into a `map + disk` place.
+
+**Cause.** The event is a property of a commit (`#flush`, `#apply`), and a
+map place commits nothing through the kernel: `MapStore` sets its entries
+itself, and the watch pipeline removes them directly
+(`place.store.remove`).
+
+**Done when.** A map place announces each local commit — a mutation, a
+set of `writeFiles`, a watcher epoch — as one `'publish'` event of its
+thread with `version: null` (its content has no version shared across
+threads), and a watcher epoch that changes shared and map places is one
+event. One way: the kernel hands each `MapStore` an announcer its
+mutations call once each, and a watcher epoch records its map changes
+beside its kernel epoch, which `#flush` joins into the epoch's event.
 
 ## After the next Node.js 26.x release — `doc/alternatives.md`
 

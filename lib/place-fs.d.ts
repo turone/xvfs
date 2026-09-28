@@ -94,8 +94,10 @@ export interface WriteFilesOptions {
   /** Of the strings. */
   encoding?: BufferEncoding | null;
   /**
-   * One flag for the set, as node:fs reads it: `w…` replaces, `x` creates
-   * every key only; an append flag is `ENOTSUP`. Default `'w'`.
+   * One flag for the set, as node:fs reads it: `w…` replaces; `x` creates
+   * every key only — `wx` or `xw`, and `ax` or `xa` too, which create as
+   * well; an append flag without `x` (`a`, `as`, `a+`…), a read or a
+   * numeric flag is `ENOTSUP`. Default `'w'`.
    */
   flag?: string;
 }

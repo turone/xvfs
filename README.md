@@ -756,7 +756,9 @@ kernel.version; // 9: the last publication this thread has seen
   once the worker holds the same state.
 - **`null`** for a missing key, a file of a `map` place (per-thread
   content, which no commit publishes) and the disk territory of
-  `fs.fallback: 'disk'`.
+  `fs.fallback: 'disk'`. A published entry the place keeps on disk — a
+  file larger than `maxFileSize`, the source of `retainRaw: false` — is no
+  disk territory: its commit published it, and it has its version.
 - Leases carry the version of their file (`lease.version`), and so does a
   script bundle (`files.script(key).version`): a `vm.Script` built from a
   bundle serves until the file's version changes.
@@ -817,6 +819,9 @@ kernel.on('publish', ({ version, places }) => {
   there; `events.on` and `events.once` take an `AbortSignal` too — an
   `events.once(kernel, 'publish')` still waiting at `close()` never
   settles without one.
+- Past 10 listeners of `'publish'` on one kernel — each `events.on`
+  iteration counts as one — Node prints its `MaxListenersExceededWarning`,
+  as for any emitter: `kernel.setMaxListeners(n)` raises the limit.
 - Events report publications, whatever their origin — never raw disk
   events: they are no `fs.watch`, which stays `ENOTSUP` for managed
   territory in the patched `node:fs`.
@@ -999,7 +1004,9 @@ and no thread ever sees part of the set.
 - **Input.** `[key, data]` pairs — an array, a `Map`, any iterable — or an
   object of key → data; data is a string (in `options.encoding`, or an
   encoding string as the options) or bytes, taken when it is called.
-  `options.flag`: `w…` (the default) replaces, `x` creates every key only.
+  `options.flag`: `w…` (the default) replaces, `x` creates every key only
+  (`wx`, `xw`, and `ax`, `xa` alike); an append flag without `x` is
+  `ENOTSUP`.
 - **Checked whole, then prepared.** The arguments are checked at once and
   nothing is queued when they fail: no file, a key twice (as its canonical
   key) or data that is not a string or bytes is a `TypeError`, an invalid
@@ -1311,12 +1318,13 @@ Errors carry the same `code`, `errno`, `syscall` and `path` fields as
 a closed kernel refuses: a publication `close()` cuts short —
 `initialize()`, a mutation still publishing, a worker's mutation its own
 kernel's `close()` finds waiting (`[vfs] kernel closed before
-publication`); a mutation still queued when the kernel closes, or asked of
-it afterwards (`[vfs] mutations requires a ready kernel (state:
-closed)`); a worker's mutation whose link to the main kernel closed
-before its answer (`[vfs] link closed before the mutation was answered:
-it may or may not have been published` — the main kernel may have
-published it before it closed).
+publication` — the worker's request may have reached the main kernel,
+which may or may not have published it); a mutation still queued when the
+kernel closes, or asked of it afterwards (`[vfs] mutations requires a
+ready kernel (state: closed)`); a worker's mutation whose link to the main
+kernel closed before its answer (`[vfs] link closed before the mutation
+was answered: it may or may not have been published` — the main kernel
+may have published it before it closed).
 
 ## Protocol
 
