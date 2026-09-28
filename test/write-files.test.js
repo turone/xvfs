@@ -14,6 +14,9 @@ const {
   worker,
   nextMessage,
   leakedBytes,
+  within,
+  turn,
+  assertAtRest,
 } = require('./helpers.js');
 
 // writeFiles: several files of a virtual place published as one. The set
@@ -38,20 +41,6 @@ const refused = (place, code, key) => (err) => {
   assert.equal(err.path, place.pathOf(key));
   return true;
 };
-
-// `promise`, or a failure after `ms`: a test waiting at a gate its
-// publication never reaches fails instead of hanging.
-const within = (promise, what, ms = 5000) =>
-  new Promise((resolve, reject) => {
-    const late = setTimeout(() => {
-      reject(new Error(`no ${what} within ${ms} ms`));
-    }, ms);
-    promise.finally(() => clearTimeout(late)).then(resolve, reject);
-  });
-
-// The queue drops the locks of a mutation a few microtasks after its
-// promise settles: once every microtask queued so far has run.
-const released = () => new Promise((resolve) => setImmediate(resolve));
 
 // Date.now() one millisecond later at each call, for the length of `fn`:
 // what reads it twice within one publication cannot hide it.
@@ -136,7 +125,7 @@ describe('writeFiles: one publication', () => {
       bytes.write('xxxxx');
       await written;
       assert.equal(v.readFile('/e.txt', 'utf8'), 'first');
-      await released();
+      await turn();
       assert.equal(k.mutations.size, 0);
       assert.equal(leakedBytes(k), 0);
     } finally {
@@ -377,9 +366,7 @@ describe('writeFiles: all or nothing', () => {
       assert.equal(v.readFile('/f', 'utf8'), 'file');
       assert.equal(k.version, version);
       assert.deepEqual(events, []);
-      assert.equal(leakedBytes(k), 0);
-      await released();
-      assert.equal(k.mutations.size, 0);
+      await assertAtRest(k);
     } finally {
       k.close();
       rm(root);
@@ -448,9 +435,8 @@ describe('writeFiles: all or nothing', () => {
       assert.equal(v.exists('/d.txt'), false);
       assert.equal(k.version, 1);
       assert.deepEqual(events, []);
-      assert.equal(leakedBytes(k), 0, 'what the files before it placed');
-      await released();
-      assert.equal(k.mutations.size, 0);
+      // Nothing of what the files before it placed stays.
+      await assertAtRest(k);
     } finally {
       k.close();
       rm(root);
@@ -481,7 +467,7 @@ describe('writeFiles: all or nothing', () => {
       }
       assert.equal(v.exists('/a'), false);
       assert.equal(k.version, 0);
-      assert.equal(leakedBytes(k), 0);
+      await assertAtRest(k);
       assert.equal(k.cache.usage().used, 0, 'the pool is empty again');
       assert.equal(
         await v.writeFiles([
@@ -518,7 +504,7 @@ describe('writeFiles: all or nothing', () => {
         return true;
       });
       assert.equal(v.exists('/ok.js'), false);
-      assert.equal(leakedBytes(k), 0);
+      await assertAtRest(k);
       const m = k.fs('m');
       assert.throws(
         () => m.writeFiles(files),
@@ -559,7 +545,7 @@ describe('writeFiles: among other mutations', () => {
       ]);
       assert.equal(after, 4);
       assert.equal(v.readFile('/a', 'utf8'), '4', 'the set came after');
-      await released();
+      await turn();
       assert.equal(k.mutations.size, 0);
     } finally {
       k.close();
@@ -622,8 +608,7 @@ describe('writeFiles: among other mutations', () => {
       open.resolve();
       assert.equal(await set, 2);
       assert.equal(v.exists('/s/y'), false);
-      await released();
-      assert.equal(k.mutations.size, 0);
+      await assertAtRest(k);
     } finally {
       k.close();
       rm(root);
@@ -776,7 +761,7 @@ describe('writeFiles: among other mutations', () => {
       ]);
       assert.equal(version, 3);
       assert.deepEqual(v.readdir('/d'), ['three', 'two']);
-      await released();
+      await turn();
       assert.equal(k.mutations.size, 0);
     } finally {
       k.close();
