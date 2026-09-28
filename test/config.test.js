@@ -562,6 +562,52 @@ describe('VfsConfig.fromArgv', () => {
     assert.equal(c.global.watchTimeout, 50);
   });
 
+  // The CLI overrides examples README ("API" → VfsConfig) and
+  // doc/integration.md ("CLI overrides") show verbatim: every `--vfs.*`
+  // key must be one parseArgv() actually accepts.
+  it('parses the CLI examples shown in README and doc/integration.md', () => {
+    const docApp = {
+      places: { tools: { fs: true }, workspace: { fs: true, require: true } },
+    };
+    const fromIntegrationDoc = VfsConfig.fromArgv(
+      argv(
+        '--vfs.defaults.memory.limit=512mib',
+        '--vfs.defaults.strict=true',
+        '--vfs.defaults.hooks.fs=false',
+        '--vfs.enable=tools,workspace',
+        '--vfs.disable=static',
+      ),
+      { ...docApp, places: { ...docApp.places, static: { fs: true } } },
+    );
+    assert.equal(fromIntegrationDoc.global.memory.limit, 512 * 1024 ** 2);
+    assert.equal(fromIntegrationDoc.global.strict, true);
+    assert.equal(fromIntegrationDoc.global.hooks.fs, false);
+    assert.deepEqual(
+      fromIntegrationDoc.places.map((p) => p.name),
+      ['tools', 'workspace'],
+    );
+
+    const fromReadme = VfsConfig.fromArgv(
+      argv(
+        '--vfs.defaults.memory.limit=512mib',
+        '--vfs.defaults.strict=true',
+        '--vfs.enable=static,lib',
+        '--vfs.disable=scratch',
+      ),
+      {
+        places: {
+          static: { fs: true },
+          lib: { fs: true },
+          scratch: { fs: true },
+        },
+      },
+    );
+    assert.deepEqual(
+      fromReadme.places.map((p) => p.name),
+      ['static', 'lib'],
+    );
+  });
+
   it('overrides place options and toggles places', () => {
     const c = VfsConfig.fromArgv(
       argv('--vfs.places.c.maxFileSize=2kib', '--vfs.enable=a,c'),
