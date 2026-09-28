@@ -169,6 +169,14 @@ describe('writeFiles: one publication', () => {
         ['an invalid key', () => v.writeFiles([['/a/../b', 'a']])],
         ['a key that is no string', () => v.writeFiles([[42, 'a']])],
         ['a number as data', () => v.writeFiles([['/a', 42]])],
+        [
+          'a DataView as data',
+          () => v.writeFiles([['/a', new DataView(new ArrayBuffer(1))]]),
+        ],
+        [
+          'a Uint16Array as data',
+          () => v.writeFiles([['/a', new Uint16Array(1)]]),
+        ],
         ['a removal', () => v.writeFiles({ '/a': null })],
       ]) {
         assert.throws(call, TypeError, what);
@@ -242,6 +250,37 @@ describe('writeFiles: one publication', () => {
         refused(v, 'EEXIST', '/n.txt'),
       );
     } finally {
+      k.close();
+      rm(root);
+    }
+  });
+});
+
+describe('writeFiles: strings', () => {
+  it('the strings of a set are encoded as its options say, in every thread and place', async () => {
+    const root = tmpDir('vfs-batch');
+    const k = await kernel(root, {
+      ...VIRTUAL,
+      m: { provider: 'map', origin: 'virtual', fs: { writable: true } },
+    });
+    const w = worker(k);
+    try {
+      const text = 'aé€';
+      for (const [where, place] of [
+        ['sab', k.fs('v')],
+        ['map', k.fs('m')],
+        ['worker', w.kernel.fs('v')],
+      ]) {
+        await place.writeFiles({ '/l.txt': 'aé' }, 'latin1');
+        await place.writeFiles([['/u.txt', text]], { encoding: 'utf16le' });
+        await place.writeFiles([['/8.txt', text]]);
+        const read = (key) => place.readFile(key);
+        assert.deepEqual(read('/l.txt'), Buffer.from('aé', 'latin1'), where);
+        assert.deepEqual(read('/u.txt'), Buffer.from(text, 'utf16le'), where);
+        assert.deepEqual(read('/8.txt'), Buffer.from(text), where);
+      }
+    } finally {
+      w.kernel.close();
       k.close();
       rm(root);
     }
@@ -585,6 +624,61 @@ describe('writeFiles: among other mutations', () => {
       assert.equal(v.exists('/s/y'), false);
       await released();
       assert.equal(k.mutations.size, 0);
+    } finally {
+      k.close();
+      rm(root);
+    }
+  });
+
+  // A key of a set counts as a file while the set is in flight, and only
+  // then: published, refused while its files are prepared, or cut short by
+  // close(), the set leaves no key behind — one left would make its path a
+  // file for good, refusing whatever is written below it.
+  it('the keys of a set are in flight until it settles, whatever becomes of it', async () => {
+    const root = tmpDir('vfs-batch');
+    const k = await kernel(root, {
+      v: {
+        origin: 'virtual',
+        fs: { writable: true, script: { ext: ['js'] } },
+      },
+    });
+    try {
+      const v = k.fs('v');
+      const { creating } = k.registry.get('v').store;
+      await v.writeFiles([
+        ['/d', 'd'],
+        ['/e', 'e'],
+      ]);
+      assert.equal(creating.size, 0, 'published');
+      await v.unlink('/d');
+      await v.writeFile('/d/x', 'x');
+      await assert.rejects(
+        v.writeFiles([
+          ['/f', 'f'],
+          ['/g.js', '((('],
+        ]),
+        refused(v, 'ENOTSUP', '/g.js'),
+      );
+      assert.equal(creating.size, 0, 'refused');
+      await v.writeFile('/f/x', 'x');
+      const reached = Promise.withResolvers();
+      const gate = Promise.withResolvers();
+      const allocate = k.cache.allocate.bind(k.cache);
+      k.cache.allocate = async (file, options) => {
+        reached.resolve();
+        await gate.promise;
+        return allocate(file, options);
+      };
+      const cut = v.writeFiles([
+        ['/h', 'h'],
+        ['/i', 'i'],
+      ]);
+      await within(reached.promise, 'the allocation of /h');
+      assert.deepEqual([...creating].sort(), ['/h', '/i'], 'in flight');
+      k.close();
+      gate.resolve();
+      await assert.rejects(cut, { code: 'ERR_VFS_CLOSED' });
+      assert.equal(creating.size, 0, 'closed');
     } finally {
       k.close();
       rm(root);

@@ -230,6 +230,17 @@ describe('version: mutations', () => {
       assert.equal(v.version('/c'), moved, 'the entry keeps its version');
       assert.equal(k.cache.entry('v', '/c').version, moved);
       assert.equal(v.version('/b'), 2);
+      // Updates and versions part here: a snapshot, and a worker made from
+      // one, carry the version.
+      assert.notEqual(k.nextUpdateId, version);
+      assert.equal(k.snapshot().version, version, 'the snapshot');
+      const later = worker(k);
+      try {
+        assert.equal(later.kernel.version, version, 'a worker linked now');
+        assert.equal(later.kernel.fs('v').version('/c'), moved);
+      } finally {
+        later.kernel.close();
+      }
     } finally {
       k.close();
       rm(root);
@@ -319,6 +330,46 @@ describe('version: reads', () => {
       mv.writeFile('/x.txt', 'x');
       assert.equal(mv.version('/x.txt'), null, 'map + virtual');
       assert.equal(k.version, 1, 'a map write takes no version');
+    } finally {
+      k.close();
+      rm(root);
+    }
+  });
+
+  // An entry kept on disk — larger than maxFileSize, or the source of
+  // `retainRaw: false` — is published all the same, unlike the disk
+  // territory: it has its version. A key the fs domain does not see has
+  // none, as it does not exist for fs.
+  it('a published entry kept on disk has its version; a key fs does not see has none', async () => {
+    const root = writeTree(tmpDir('vfs-version'), {
+      'big/large.bin': 'L'.repeat(2048),
+      'big/small.bin': 's',
+      'gz/a.css': 'a{}',
+      'mix/r.js': 'module.exports = 1;',
+      'mix/s.css': 's{}',
+    });
+    const k = await kernel(root, {
+      big: { maxFileSize: '1 kib', fs: true },
+      gz: {
+        fs: {
+          ext: ['css'],
+          compress: { encodings: ['gzip'], retainRaw: false },
+        },
+      },
+      mix: { fs: { ext: ['css'] }, require: { ext: ['js'], compile: false } },
+    });
+    try {
+      const big = k.fs('big');
+      assert.equal(k.cache.entry('big', '/large.bin').kind, 'disk');
+      assert.equal(big.version('/large.bin'), 1, 'larger than maxFileSize');
+      assert.equal(big.version('/small.bin'), 1);
+      assert.equal(k.cache.entry('gz', '/a.css').kind, 'disk');
+      assert.equal(k.fs('gz').version('/a.css'), 1, 'retainRaw: false');
+      const mix = k.fs('mix');
+      assert.equal(k.cache.entry('mix', '/r.js').version, 1, 'for require');
+      assert.equal(mix.exists('/r.js'), false);
+      assert.equal(mix.version('/r.js'), null, 'not for fs');
+      assert.equal(mix.version('/s.css'), 1);
     } finally {
       k.close();
       rm(root);

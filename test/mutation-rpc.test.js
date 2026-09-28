@@ -556,6 +556,19 @@ describe('mutation RPC: writeFiles', () => {
       const v = k.fs('v');
       assert.equal(v.readFile('/a.txt', 'utf8'), 'a');
       assert.equal(v.readFile('/b.txt', 'utf8'), 'bb');
+      // The bytes of a set are a view: one past the start of its buffer.
+      const buffer = new Uint8Array(8);
+      buffer.set(Buffer.from('xxxoppyy'));
+      reply = await request(link, {
+        place: 'v',
+        op: 'writeFiles',
+        keys: ['/o.txt', '/p.txt'],
+        sizes: [1, 2],
+        data: buffer.subarray(3, 6),
+      });
+      assert.equal(reply.error, null);
+      assert.equal(v.readFile('/o.txt', 'utf8'), 'o');
+      assert.equal(v.readFile('/p.txt', 'utf8'), 'pp');
       reply = await request(link, {
         place: 'v',
         op: 'writeFiles',
