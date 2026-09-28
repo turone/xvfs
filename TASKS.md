@@ -60,20 +60,20 @@ contents.
 
 ## P2 — Symbolic links
 
-**Problem.** Routing is lexical, and native reads follow links: a link
-inside the disk territory of a place (`fs.fallback: 'disk'`,
-`provider: 'disk'`) can point outside `appRoot`, and a link created outside
-`appRoot` to a managed entry — or to a directory above `appRoot` — reads its
-raw disk content past the routing. Not reproduced here yet (creating links
-on Windows needs a privilege).
+**Problem.** Routing is lexical, and native calls follow links. Under
+strict a native call on a place's disk proves where its path really lies
+(`doc/architecture.md`, Routing and strict mode), but the patch still
+creates links into managed territory — `fs.symlink` to a path a place
+holds, or above `appRoot` (a junction takes no privilege on Windows), a
+hard link to a file of a `disk` place — and a link that already leads into
+`appRoot` from outside it reads past the routing.
 
-**Cause.** The router never touches the disk — it sits on the hot path of
-every fs call — and `symlink` targets are resolved only when read.
+**Cause.** A link's target is resolved only when the link is used, where
+the path in hand lies outside `appRoot`.
 
-**Done when.** A decided policy (refuse links whose target the kernel
-serves or that enclose `appRoot`, refuse links in disk territory, or check
-the real path of passthrough reads) is implemented with tests on Linux and
-Windows.
+**Done when.** Under strict the patch refuses to create a link into
+managed territory, with tests on Linux and Windows, and the links that
+remain are documented as not covered.
 
 ## P3 — Publication events of map places
 

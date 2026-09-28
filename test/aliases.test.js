@@ -173,6 +173,141 @@ describe('Aliases: what a drive letter names (win32)', () => {
   });
 });
 
+// Under strict a native call on a place's disk goes where the disk says the
+// path really lies: in the place's directory, or off appRoot's line and on
+// no share. For a path to create, its nearest existing ancestor answers.
+describe('Aliases: where a native call on a place disk lands', () => {
+  const win32 = realpathOf(path.win32, {
+    'C:\\app': 'C:\\app',
+    'C:\\app\\d': 'C:\\app\\d',
+    'C:\\app\\d\\x.txt': 'C:\\app\\d\\x.txt',
+    'C:\\app\\d\\jin': 'C:\\app\\d\\sub',
+    'C:\\app\\d\\jro': 'C:\\app\\ro',
+    'C:\\app\\d\\jro\\h.bin': 'C:\\app\\ro\\h.bin',
+    'C:\\app\\d\\jup': 'C:\\',
+    'C:\\app\\d\\jout': 'D:\\data',
+    'C:\\app\\d\\jshare': '\\\\srv\\s',
+    'C:\\app\\d\\locked': 'EACCES',
+    'C:\\app\\m': 'D:\\media',
+    'C:\\app\\m\\jro': 'C:\\app\\ro',
+    'C:\\app\\wide': 'C:\\',
+  });
+  const aliases = new Aliases('C:\\app', path.win32, win32);
+  const d = 'C:\\app\\d';
+
+  it('in the place, or off the line of appRoot: proven', () => {
+    const proven = [
+      'C:\\app\\d',
+      'C:\\app\\d\\x.txt',
+      'c:\\APP\\D\\X.TXT',
+      'C:\\app\\d\\jin',
+      'C:\\app\\d\\jout\\a.bin',
+      'C:\\app\\d\\new\\file.txt',
+      'C:\\app\\d\\jout\\new\\b.bin',
+    ];
+    for (const p of proven) assert.equal(aliases.territory(d, p), true, p);
+  });
+
+  it('into another place, appRoot, above it, onto a share, or unknown: refused', () => {
+    const refused = [
+      'C:\\app\\d\\jro\\h.bin',
+      'C:\\app\\d\\jro',
+      'C:\\app\\d\\jro\\new.txt',
+      'C:\\app\\d\\jup',
+      'C:\\app\\d\\jup\\app\\ro\\h.bin',
+      'C:\\app\\d\\jshare\\x',
+      'C:\\app\\d\\locked\\x',
+    ];
+    for (const p of refused) assert.equal(aliases.territory(d, p), false, p);
+  });
+
+  it('a place whose directory is a link: its real directory is the place', () => {
+    assert.equal(aliases.territory('C:\\app\\m', 'C:\\app\\m\\a.png'), true);
+    const out = 'C:\\app\\m\\jro\\h.bin';
+    assert.equal(aliases.territory('C:\\app\\m', out), false);
+    // One that encloses appRoot holds nothing of its own: only what lies
+    // off appRoot's line is proven through it.
+    const wide = 'C:\\app\\wide';
+    const back = 'C:\\app\\wide\\app\\ro\\x';
+    assert.equal(aliases.territory(wide, back), false);
+    assert.equal(aliases.territory(wide, 'C:\\app\\wide\\other'), true);
+  });
+
+  it("asks realpath for the place's directory once", () => {
+    const realpath = realpathOf(path.posix, {
+      '/app': '/app',
+      '/app/d': '/app/d',
+      '/app/d/a': '/app/d/a',
+      '/app/d/j': '/app/ro',
+      '/app/d/o': '/data',
+    });
+    const posix = new Aliases('/app', path.posix, realpath);
+    realpath.calls.length = 0;
+    assert.equal(posix.territory('/app/d', '/app/d/a'), true);
+    assert.equal(posix.territory('/app/d', '/app/d/j/h.bin'), false);
+    assert.equal(posix.territory('/app/d', '/app/d/o/x'), true);
+    const places = realpath.calls.filter((p) => p === '/app/d');
+    assert.equal(places.length, 1);
+  });
+});
+
+describe('FsRouter under strict: the disk of a place names the place', () => {
+  const { Place } = require('../lib/place.js');
+  const { VfsConfig } = require('../lib/config.js');
+  const routerOf = (strict) => {
+    const config = new VfsConfig({
+      defaults: { strict },
+      places: {
+        d: { provider: 'disk', fs: { writable: true } },
+        nd: { provider: 'node-default', fs: true },
+        site: { fs: { ext: ['txt'], fallback: 'disk', writable: true } },
+      },
+    });
+    const registry = new PlaceRegistry('/app', path.posix, strict);
+    const places = {};
+    for (const pc of config.places) {
+      places[pc.name] = new Place(pc, '/app', false);
+      registry.register(places[pc.name]);
+    }
+    const stat = { size: 1, mtimeMs: 0 };
+    places.site.files.set('/big.txt', { data: null, path: '/b', stat });
+    places.site.files.set('/a.txt', { data: Buffer.from('a'), stat });
+    return { router: new FsRouter(registry, strict), places };
+  };
+
+  it('strict: read, mutate and copy of a place disk carry the place', () => {
+    const { router, places } = routerOf(true);
+    const on = (place) => ({ kind: 'passthrough', place });
+    assert.deepEqual(router.read('/app/d/x'), on(places.d));
+    assert.deepEqual(router.read('/app/nd/x'), on(places.nd));
+    assert.deepEqual(router.read('/app/site/big.txt'), on(places.site));
+    assert.deepEqual(router.mutate('/app/d/x'), on(places.d));
+    assert.deepEqual(router.mutate('/app/nd/x'), on(places.nd));
+    assert.deepEqual(router.mutate('/app/site/x.bin'), on(places.site));
+    assert.deepEqual(router.copy('/app/d/x', false), on(places.d));
+    assert.deepEqual(router.copy('/app/site/a.txt', false), on(places.site));
+    assert.deepEqual(router.copy('/app/site/m.bin', false), on(places.site));
+    assert.equal(router.read('/app/d/x'), router.read('/app/d/y'));
+    assert.deepEqual(router.read('/elsewhere/x'), { kind: 'passthrough' });
+    // A walk of a place's disk would follow a link out of it.
+    const unsupported = { kind: 'unsupported' };
+    for (const p of ['/app/d', '/app/nd/x', '/app/site/sub']) {
+      assert.deepEqual(router.copy(p, true), unsupported, p);
+    }
+    assert.deepEqual(router.copy('/elsewhere', true), { kind: 'passthrough' });
+  });
+
+  it('without strict: passthrough as before', () => {
+    const { router } = routerOf(false);
+    const passthrough = { kind: 'passthrough' };
+    for (const p of ['/app/d/x', '/app/nd/x', '/app/site/big.txt']) {
+      assert.deepEqual(router.read(p), passthrough, p);
+    }
+    assert.deepEqual(router.mutate('/app/d/x'), passthrough);
+    assert.deepEqual(router.copy('/app/d', true), passthrough);
+  });
+});
+
 describe('PlaceRegistry with aliases: owned by nobody, refused under strict', () => {
   const nobody = { place: null, key: null };
 

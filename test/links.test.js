@@ -1,0 +1,410 @@
+'use strict';
+
+const { describe, it, before, after } = require('node:test');
+const assert = require('node:assert/strict');
+const { execFileSync } = require('node:child_process');
+const fs = require('node:fs');
+const path = require('node:path');
+const { pathToFileURL } = require('node:url');
+const fsPatch = require('../lib/adapters/fs-patch.js');
+const moduleHook = require('../lib/adapters/module-hook.js');
+const { tmpDir, writeTree, rm, kernel } = require('./helpers.js');
+const {
+  refused,
+  countNative,
+  refusesEach,
+  FILE_READS,
+  DIR_READS,
+  FILE_MUTATIONS,
+  DIR_MUTATIONS,
+  PAIRS,
+} = require('./fs-calls.js');
+
+// Under strict a native call on a place's disk — fs.fallback: 'disk', a
+// disk or node-default place — goes only where the disk says its path
+// really lies: in the place's directory, or off appRoot's line. A link out
+// of the place into another place, appRoot or a directory above it is
+// refused before any native I/O; one that stays in the place or leaves
+// appRoot's line is followed. The links are junctions on Windows, which
+// take no privilege, and symbolic links elsewhere. The rule itself, with a
+// table for realpath: aliases.test.js.
+
+// The disk as it is, behind the patch: captured before any install.
+const {
+  existsSync: onDisk,
+  readFileSync: readDisk,
+  readdirSync: listDisk,
+  symlinkSync: linkDisk,
+  unlinkSync: unlinkDisk,
+  rmdirSync: rmdirDisk,
+} = fs;
+
+const linkDir = (target, at) => linkDisk(target, at, 'junction');
+const unlinkDir = (at) => {
+  try {
+    unlinkDisk(at);
+  } catch {
+    rmdirDisk(at);
+  }
+};
+
+const PREPARERS = {
+  up: (raw) => raw.toString().toUpperCase(),
+  mod: (raw) => raw.toString().replace("'raw'", "'prepared'"),
+};
+
+const PLACES = {
+  ro: { fs: { ext: ['txt'], fallback: 'deny', prepare: { up: ['txt'] } } },
+  terr: { fs: { ext: ['txt'], fallback: 'disk', prepare: { up: ['txt'] } } },
+  d: { provider: 'disk', fs: { writable: true } },
+  dro: { provider: 'disk', fs: true },
+  nd: { provider: 'node-default', fs: true, require: { compile: false } },
+  lib: { require: { prepare: 'mod' }, import: { ext: ['mjs'] } },
+};
+
+const TREE = {
+  'ro/a.txt': 'raw',
+  'ro/h.bin': 'hidden',
+  'terr/t.txt': 'raw',
+  'terr/m.bin': 'media',
+  'terr/sub/s.bin': 's',
+  'd/f.bin': 'f',
+  'd/sub/s.bin': 's',
+  'dro/r.bin': 'r',
+  'nd/own.js': "module.exports = 'own';",
+  'lib/m.js': "globalThis.__smfsLinked = true; module.exports = 'raw';",
+  'lib/e.mjs': "export default 'raw';",
+};
+
+// appRoot `app` and a directory `outside` in a directory of their own,
+// with links: out of a place into another place (`jro`, `jdro`, `jlib`)
+// and, with `up`, above appRoot (`jup`, that directory — which a walk that
+// entered links would never leave), within the place (`jin`), off
+// appRoot's line (`jout`). Returns { root, outside, at, remove }.
+const linkedTree = (prefix, up = true) => {
+  const base = tmpDir(prefix);
+  const root = writeTree(path.join(base, 'app'), TREE);
+  const outside = writeTree(path.join(base, 'outside'), { 'o.bin': 'o' });
+  const at = (...p) => path.join(root, ...p);
+  const links = [
+    [at('ro'), at('terr', 'jro')],
+    [outside, at('terr', 'jout')],
+    [at('terr', 'sub'), at('terr', 'jin')],
+    [at('ro'), at('d', 'jro')],
+    [at('dro'), at('d', 'jdro')],
+    [outside, at('d', 'jout')],
+    [at('d', 'sub'), at('d', 'jin')],
+    [at('lib'), at('nd', 'jlib')],
+  ];
+  if (up) links.push([base, at('terr', 'jup')], [base, at('d', 'jup')]);
+  for (const [target, link] of links) linkDir(target, link);
+  const remove = () => {
+    for (const [, link] of links) unlinkDir(link);
+    rm(base);
+  };
+  return { root, outside, at, remove };
+};
+
+describe('strict: a link out of a place disk', () => {
+  let tree;
+  let k;
+  let native;
+  const at = (...p) => tree.at(...p);
+  const up = () => path.basename(tree.root);
+
+  before(async () => {
+    tree = linkedTree('links');
+    const options = { preparers: PREPARERS };
+    k = await kernel(tree.root, PLACES, { strict: true }, options);
+    native = countNative();
+    fsPatch.install(k);
+    moduleHook.install(k);
+  });
+
+  after(() => {
+    moduleHook.uninstall();
+    fsPatch.uninstall();
+    native.restore();
+    k.close();
+    tree.remove();
+    delete globalThis.__smfsLinked;
+  });
+
+  it('reads, listings and watches through it: EACCES, nothing reaches node:fs', async () => {
+    native.calls.length = 0;
+    const files = [
+      at('terr', 'jro', 'h.bin'),
+      at('terr', 'jup', up(), 'ro', 'h.bin'),
+      at('d', 'jro', 'h.bin'),
+      at('d', 'jup', up(), 'ro', 'h.bin'),
+      at('d', 'jdro', 'r.bin'),
+      at('nd', 'jlib', 'm.js'),
+    ];
+    await refusesEach(FILE_READS, files);
+    const dirs = [
+      at('terr', 'jro'),
+      at('terr', 'jup'),
+      at('d', 'jro'),
+      at('d', 'jup'),
+      at('nd', 'jlib'),
+    ];
+    await refusesEach(DIR_READS, dirs);
+    for (const p of [...files, ...dirs]) {
+      assert.equal(fs.existsSync(p), false, p);
+    }
+    const blob = at('d', 'jro', 'h.bin');
+    await assert.rejects(fs.openAsBlob(blob), refused('EACCES', 'open', blob));
+    assert.deepEqual(native.calls, []);
+  });
+
+  it('writes, removals and metadata through it: EACCES, nothing changes', async () => {
+    native.calls.length = 0;
+    const files = [
+      at('d', 'jro', 'h.bin'),
+      at('d', 'jro', 'n.txt'),
+      at('d', 'jdro', 'r.bin'),
+      at('d', 'jdro', 'n.bin'),
+      at('d', 'jup', up(), 'ro', 'n.txt'),
+      at('nd', 'jlib', 'n.js'),
+    ];
+    await refusesEach(FILE_MUTATIONS, files);
+    const dirs = [
+      at('d', 'jro', 'sub'),
+      at('d', 'jdro', 'sub'),
+      at('d', 'jro'),
+    ];
+    await refusesEach(DIR_MUTATIONS, dirs);
+    assert.deepEqual(native.calls, []);
+    assert.deepEqual(listDisk(at('ro')), ['a.txt', 'h.bin']);
+    assert.deepEqual(listDisk(at('dro')), ['r.bin']);
+    assert.equal(readDisk(at('ro', 'h.bin'), 'utf8'), 'hidden');
+    assert.equal(readDisk(at('dro', 'r.bin'), 'utf8'), 'r');
+    assert.deepEqual(listDisk(at('lib')), ['e.mjs', 'm.js']);
+  });
+
+  it('copies, renames and links through it: EACCES, nothing moves', async () => {
+    native.calls.length = 0;
+    const pairs = [
+      [at('d', 'jro', 'h.bin'), path.join(tree.outside, 'h.bin')],
+      [at('d', 'jro', 'h.bin'), at('d', 'h.bin')],
+      [__filename, at('d', 'jro', 'x.txt')],
+      [at('d', 'f.bin'), at('d', 'jdro', 'f.bin')],
+    ];
+    // A recursive copy of a place's disk is refused on its own (below);
+    // from read-only, indexed terr only a copy leaves (a move is EROFS, a
+    // hard link ENOTSUP).
+    const single = PAIRS.filter(([call]) => call !== 'cpSync recursive');
+    const copies = single.filter(([, syscall]) => /^c/.test(syscall));
+    const from = at('terr', 'jro', 'h.bin');
+    const cases = [
+      ...pairs.map((pair) => [pair, single]),
+      [[from, path.join(tree.outside, 'h2.bin')], copies],
+    ];
+    for (const [[source, target], families] of cases) {
+      for (const [call, syscall, run] of families) {
+        await assert.rejects(
+          async () => run(source, target),
+          refused('EACCES', syscall, source, target),
+          `${call} ${source} -> ${target}`,
+        );
+      }
+    }
+    assert.deepEqual(native.calls, []);
+    assert.deepEqual(listDisk(tree.outside), ['o.bin']);
+    assert.deepEqual(listDisk(at('ro')), ['a.txt', 'h.bin']);
+    assert.deepEqual(listDisk(at('dro')), ['r.bin']);
+    assert.equal(readDisk(at('d', 'f.bin'), 'utf8'), 'f');
+  });
+
+  it('a link that stays in the place or leaves the line of appRoot is followed', () => {
+    native.calls.length = 0;
+    assert.equal(fs.readFileSync(at('terr', 'jin', 's.bin'), 'utf8'), 's');
+    assert.equal(fs.readFileSync(at('terr', 'jout', 'o.bin'), 'utf8'), 'o');
+    assert.equal(fs.readFileSync(at('d', 'jin', 's.bin'), 'utf8'), 's');
+    assert.equal(fs.readFileSync(at('d', 'jout', 'o.bin'), 'utf8'), 'o');
+    assert.deepEqual(fs.readdirSync(at('d', 'jout')), ['o.bin']);
+    fs.writeFileSync(at('d', 'jin', 'w.bin'), 'w');
+    assert.equal(readDisk(at('d', 'sub', 'w.bin'), 'utf8'), 'w');
+    assert.equal(fs.readFileSync(at('d', 'f.bin'), 'utf8'), 'f');
+    assert.ok(native.calls.includes('readFileSync'));
+    assert.equal(k.fs('terr').readFile('/jout/o.bin', 'utf8'), 'o');
+    assert.equal(k.fs('terr').readFile('/jin/s.bin', 'utf8'), 's');
+    fs.unlinkSync(at('d', 'sub', 'w.bin'));
+  });
+
+  it('the facade serves nothing through it', () => {
+    const terr = k.fs('terr');
+    assert.equal(terr.readFile('/jro/h.bin'), null);
+    assert.equal(terr.stat('/jro/h.bin'), null);
+    assert.equal(terr.stat('/jup'), null);
+    assert.equal(terr.exists('/jro'), false);
+    assert.throws(() => terr.readdir('/jro'), { code: 'ENOENT' });
+  });
+
+  // Node's resolvers take a module's real path through the patched
+  // realpath, which refuses the link; one that asks node:fs as it loaded
+  // takes the real path, which lib routes: never the raw file past it.
+  it('require and import through it: refused, or routed by the real path', async () => {
+    const linked = at('nd', 'jlib', 'm.js');
+    assert.throws(() => require(linked), { code: 'EACCES', syscall: 'lstat' });
+    assert.equal(globalThis.__smfsLinked, undefined);
+    assert.equal(require(at('nd', 'own.js')), 'own');
+    const esm = pathToFileURL(at('nd', 'jlib', 'e.mjs')).href;
+    const loaded = await import(esm).then(
+      (ns) => ns.default,
+      (err) => err.code,
+    );
+    assert.ok(['EACCES', 'raw'].includes(loaded), String(loaded));
+  });
+
+  it('with --preserve-symlinks: a module through it is not found', () => {
+    const script = path.join(__dirname, 'fixtures', 'links-preserve.cjs');
+    const out = execFileSync(
+      process.execPath,
+      ['--preserve-symlinks', script, tree.root],
+      { encoding: 'utf8' },
+    );
+    assert.deepEqual(JSON.parse(out), {
+      linked: { code: 'MODULE_NOT_FOUND' },
+      esm: { code: 'ERR_MODULE_NOT_FOUND' },
+      own: { value: 'own' },
+      ran: false,
+    });
+  });
+});
+
+// node:fs's own recursive readdir enters a link to a directory — on
+// Windows a junction even with withFileTypes — and so would a native copy
+// of the tree. The tree has no link above appRoot, where such a walk would
+// never end: a regression fails here, it does not hang.
+describe('strict: a recursive listing of a place disk', () => {
+  let tree;
+  let k;
+
+  before(async () => {
+    tree = linkedTree('links-walk', false);
+    const options = { preparers: PREPARERS };
+    k = await kernel(tree.root, PLACES, { strict: true }, options);
+    fsPatch.install(k);
+  });
+
+  after(() => {
+    fsPatch.uninstall();
+    k.close();
+    tree.remove();
+  });
+
+  const names = (list) => list.map(String).sort();
+  const EXPECTED = [
+    'f.bin',
+    'jdro',
+    'jin',
+    'jout',
+    'jro',
+    'sub',
+    path.join('sub', 's.bin'),
+  ].sort();
+
+  it('names a link, never enters it: every form', async () => {
+    const d = tree.at('d');
+    assert.deepEqual(names(fs.readdirSync(d, { recursive: true })), EXPECTED);
+    const promised = await fs.promises.readdir(d, { recursive: true });
+    assert.deepEqual(names(promised), EXPECTED);
+    const buffers = fs.readdirSync(d, { recursive: true, encoding: 'buffer' });
+    assert.ok(buffers.every((name) => Buffer.isBuffer(name)));
+    assert.deepEqual(names(buffers), EXPECTED);
+    const typed = fs.readdirSync(d, { recursive: true, withFileTypes: true });
+    const rel = (e) =>
+      path.relative(d, path.join(e.parentPath ?? e.path, e.name));
+    assert.deepEqual(names(typed.map(rel)), EXPECTED);
+    const jro = typed.find((e) => e.name === 'jro');
+    assert.equal(jro.isDirectory(), false);
+    const dir = fs.opendirSync(d, { recursive: true });
+    const opened = [];
+    for (let e = dir.readSync(); e !== null; e = dir.readSync()) {
+      opened.push(rel(e));
+    }
+    dir.closeSync();
+    assert.deepEqual(names(opened), EXPECTED);
+  });
+
+  it("the facade's listing of its disk territory and the strict appRoot's", () => {
+    assert.deepEqual(k.fs('terr').readdir('/', { recursive: true }), [
+      'm.bin',
+      'sub',
+      'sub/s.bin',
+      't.txt',
+    ]);
+    const all = names(fs.readdirSync(tree.root, { recursive: true }));
+    assert.ok(all.includes(path.join('d', 'jro')));
+    assert.ok(all.includes(path.join('terr', 'sub', 's.bin')));
+    const through = all.filter((name) =>
+      /j(ro|out|in|dro|lib)[\\/]/.test(name),
+    );
+    assert.deepEqual(through, []);
+  });
+
+  it('a native copy of the tree is refused', () => {
+    const d = tree.at('d');
+    const into = path.join(tree.outside, 'copy');
+    assert.throws(() => fs.cpSync(d, into, { recursive: true }), {
+      code: 'ENOTSUP',
+      syscall: 'cp',
+      path: d,
+      dest: into,
+    });
+    assert.equal(onDisk(into), false);
+  });
+});
+
+describe('strict: a symbolic link to a file out of a place disk', () => {
+  it('reads and writes through it: EACCES, nothing reaches node:fs', async (t) => {
+    const root = writeTree(tmpDir('file-links'), TREE);
+    const link = path.join(root, 'd', 'h.bin');
+    try {
+      linkDisk(path.join(root, 'ro', 'h.bin'), link, 'file');
+    } catch (err) {
+      rm(root);
+      return void t.skip(`no symbolic link to a file here (${err.code})`);
+    }
+    const k = await kernel(
+      root,
+      PLACES,
+      { strict: true },
+      { preparers: PREPARERS },
+    );
+    const native = countNative();
+    fsPatch.install(k);
+    try {
+      await refusesEach(FILE_READS, [link]);
+      await refusesEach(FILE_MUTATIONS.slice(0, 3), [link]);
+      assert.deepEqual(native.calls, []);
+      assert.equal(readDisk(path.join(root, 'ro', 'h.bin'), 'utf8'), 'hidden');
+    } finally {
+      fsPatch.uninstall();
+      native.restore();
+      k.close();
+      unlinkDisk(link);
+      rm(root);
+    }
+  });
+});
+
+describe('without strict: links answer as before', () => {
+  it('node:fs follows them natively', async () => {
+    const tree = linkedTree('links-open');
+    const k = await kernel(tree.root, PLACES, {}, { preparers: PREPARERS });
+    fsPatch.install(k);
+    try {
+      const hidden = tree.at('d', 'jro', 'h.bin');
+      assert.equal(fs.readFileSync(hidden, 'utf8'), 'hidden');
+      assert.deepEqual(fs.readdirSync(tree.at('d', 'jro')), ['a.txt', 'h.bin']);
+      fs.writeFileSync(tree.at('d', 'jdro', 'n.bin'), 'n');
+      assert.equal(readDisk(tree.at('dro', 'n.bin'), 'utf8'), 'n');
+    } finally {
+      fsPatch.uninstall();
+      k.close();
+      tree.remove();
+    }
+  });
+});

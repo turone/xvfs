@@ -23,9 +23,15 @@ export interface RootRoute {
   readonly kind: 'root';
 }
 
-/** Original node:fs handles it. */
+/**
+ * Original node:fs handles it. Under strict, on the disk of a place — a
+ * `disk` or `node-default` place, a disk-backed entry, a disk-origin write
+ * — it names the place: the kernel has proven the path really lies in the
+ * place's directory, or off `appRoot`'s line.
+ */
 export interface PassthroughRoute {
   readonly kind: 'passthrough';
+  readonly place?: Place;
 }
 
 /**

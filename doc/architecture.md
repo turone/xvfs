@@ -805,6 +805,49 @@ mapped to one is refused as the share's own UNC paths are; for the same
 reason the local path behind a share of this machine (`C:\…` behind an
 `appRoot` on `\\localhost\C$\…`) is not recognized.
 
+**Under strict a native route on a place's disk — the disk territory of
+`fs.fallback: 'disk'`, a `disk` or `node-default` place, a disk-backed
+entry, a disk-origin write, the raw source of a copy — names its place
+(`{ kind: 'passthrough', place }`), and the kernel's route API asks the
+disk where the path really lies before it hands the route on
+(`VfsKernel#proven`, `Aliases.territory`): `realpath.native` of the path —
+for a path to create, of its nearest existing ancestor with the rest after
+it — and, once, of the place's directory. In the place's directory, or off
+`appRoot`'s real line and on no share or namespace path, the route holds;
+anything else is `EACCES` before any native call, as is what realpath
+cannot answer. `PlaceFs` asks the same of its disk territory, its
+disk-backed entries and its disk-origin mutations, and the load hook of a
+module of a `node-default` or `disk` place. A recursive listing of such a
+disk walks one directory at a time and enters no link
+(`disk.readdirSyncBelow`); a recursive `cp` of or into any place's disk is
+`ENOTSUP`. FsRouter stays lexical: the proof is the kernel's.** _Why:_ a
+junction needs no privilege on Windows, and a link inside a place's disk
+— an extracted archive, a deployment's shared directory — took a native
+read, write, listing or `require` into another place, a hidden file, a
+read-only place or above `appRoot`. The router's string answer covers the
+path's top, which is where the link is not. A link to elsewhere reaches
+what a path there reaches anyway, so it is followed; refusing every link
+out of the place would break the shared directories a release links in.
+`node:fs`'s own recursive `readdir` enters a junction even with
+`withFileTypes` (Node 22 to 26 on Windows) and its `cp` copies what a
+junction holds, so neither walks a place's disk under strict; `opendir`,
+`rm` and a recursive `watch` enter none. Node's resolvers take a module's
+real path — through the patched `realpath`, which refuses the link — but
+not with `--preserve-symlinks`, which the load hook covers. Each native
+call on a place's disk pays one `realpath` (tens of microseconds on
+Windows; doc/benchmarks.md); a link swapped in between the answer and the
+call is not seen, as no path-based check can see it.
+
+**A link that already leads into `appRoot` from outside it is not
+covered: its path lies outside `appRoot`, where strict asks nothing.** _Why:_
+every system has such links — Windows' own junctions (`C:\Documents and
+Settings`, `%USERPROFILE%\Local Settings`, `AppData\Local\Application
+Data`) reach any `appRoot` below the user profile, `/proc/self/root/…` and
+`/proc/self/cwd/…` any `appRoot` on Linux — and a hard link has no other
+spelling at all. Covering them would ask the disk for every native call
+outside `appRoot`, the hot path of everything else the application does;
+strict is a routing policy, not an OS sandbox.
+
 **A path already in the form `path.resolve` returns is taken as it is: a
 drive letter, `:` and `\` on Windows (UNC paths are resolved), `/` on
 POSIX, alone or then names none of which is empty, `.` or `..`, no
@@ -1048,11 +1091,14 @@ destination rebuilds its own. Refusing every copy of served content made
 the most common operation on a disk-origin place impossible.
 
 **A recursive `cp` stays native at both ends: a source or a destination in
-a place, or one that encloses `appRoot`, is `ENOTSUP`.** _Why:_ a native
-walk reads raw files past the filtered listings, misses virtual entries and
-writes a destination's files behind its store; a recursive copy of a place,
-or of a directory above `appRoot`, carried files strict routing denies to a
-readable destination. A VFS-aware walk is in `TASKS.md`.
+an indexed place — under strict in any place — or one that encloses
+`appRoot`, is `ENOTSUP`.** _Why:_ a native walk reads raw files past the
+filtered listings, misses virtual entries and writes a destination's files
+behind its store; a recursive copy of a place, or of a directory above
+`appRoot`, carried files strict routing denies to a readable destination;
+and it enters a link out of a `disk` or `node-default` place, which the
+proof of its top path does not see (Routing and strict mode). A VFS-aware
+walk is in `TASKS.md`.
 
 **A hard link into or out of an indexed place is `ENOTSUP`
 (`FsRouter.link`); a hidden source is `EACCES`.** _Why:_ a hard link is one
@@ -1367,6 +1413,10 @@ workers call `attach()`.** _Why:_ preloads do not run in worker threads.
 | Refusing every name where `appRoot` has a short one (its long name may be any)                                  | refuses its siblings; `appRoot`'s real path names the long one    |
 | Auditing every drive letter when the kernel starts                                                              | touches every mapped drive's server; a disconnected one stalls    |
 | Mapping a drive or a share onto the local path it may name                                                      | the server says what a share names; no list of aliases is whole   |
+| Refusing every link out of a place's directory under strict                                                     | one elsewhere reaches nothing new; shared directories of releases |
+| A proof kept per directory of a place's disk                                                                    | a directory swapped for a link after it passes unseen             |
+| The proof in FsRouter, or `realpath` for every native call under strict                                         | the router stays lexical; all other I/O would pay for it          |
+| `node:fs`'s recursive `readdir` or `cp` over a place's disk under strict                                        | they enter junctions, `readdir` even with `withFileTypes`         |
 | Native `cp` with a routing `filter` for managed trees                                                           | raw disk bytes, no virtual entries, no canonical content          |
 | Copying canonical (prepared) content as a copy's input                                                          | the destination prepares it again; its bundle names the source    |
 | Feeding a prepared virtual entry's canonical content back in as raw                                             | stale `meta` / filename / bytecode, a silently different input    |
@@ -1509,6 +1559,10 @@ workers call `attach()`.** _Why:_ preloads do not run in worker threads.
   and thread (again only while a letter names nothing); a path in `appRoot`'s
   real spelling, or on a drive that names a share or `appRoot`'s line,
   reaches neither `node:fs` nor Node's loader.
+- Under strict no native call on a place's disk — through the patch, the
+  facade or the load hook — runs before the disk has said its path really
+  lies in the place's directory or off `appRoot`'s line; a recursive
+  listing there enters no link, and no native recursive copy walks it.
 
 ## Protocol
 

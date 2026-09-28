@@ -280,7 +280,16 @@ export class VfsKernel extends EventEmitter<VfsKernelEvents> {
   // views, without the ownership and ext policies PlaceFs applies.
   routeRead(filePath: string): ReadRoute;
   routeMutation(filePath: string): MutationRoute;
-  resolveModule(filePath: string, domain: ModuleDomain): ModuleResolution;
+  /**
+   * `loading`: the load hook asks about the file Node's loader is to read;
+   * under strict a module of a `disk` or `node-default` place that really
+   * lies elsewhere is `{ denied: true }` then.
+   */
+  resolveModule(
+    filePath: string,
+    domain: ModuleDomain,
+    loading?: boolean,
+  ): ModuleResolution;
   /** A borrowed SAB view of the cached data of a CommonJS source, or null. */
   bytecode(filePath: string): Buffer | null;
 }

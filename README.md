@@ -504,6 +504,30 @@ the patched `node:fs` replace the operating system's isolation.
   leaves it `EACCES`, as for `appRoot`'s own spelling. A share of this
   machine is not recognized as its local path: an `appRoot` on
   `\\localhost\C$\…` is reachable as `C:\…` too.
+- Under strict a native call on a place's disk — the disk territory of
+  `fs.fallback: 'disk'`, a `disk` or `node-default` place, a disk-backed
+  entry, a disk-origin write — first asks the disk where its path really
+  lies (`fs.realpathSync.native`; for a path to create, of its nearest
+  existing ancestor; for the place's directory, once): in the place's
+  directory, or off `appRoot`'s line and on no share. A link out of the
+  place into another place, `appRoot` or a directory above it is `EACCES`
+  before any native I/O — reading, writing, listing or removing through
+  it, and the link itself — and so, for the module loader, is a module it
+  leads to; a link that stays in the place, or leads elsewhere, is
+  followed. A recursive listing of such a disk names a link and never
+  enters it — `node:fs`'s own `readdir` does, on Windows even with
+  `withFileTypes` — and a recursive `cp` of or into it is `ENOTSUP`. The
+  `PlaceFs` facade serves its disk territory the same way. Each such call
+  costs one `realpath` more; a link swapped in between the answer and the
+  call is not seen.
+- A link that already leads into `appRoot` from outside it is not
+  covered: its path lies outside `appRoot`, where strict asks nothing —
+  and every system has such links: Windows' own junctions (`C:\Documents
+and Settings`, `%USERPROFILE%\Local Settings`,
+  `AppData\Local\Application Data`) reach any `appRoot` below the user
+  profile, and on Linux `/proc/self/root/…` and `/proc/self/cwd/…` reach
+  any `appRoot` at all; so do hard links. Strict is a routing policy, not
+  an OS sandbox.
 - `appRoot` itself is a **managed root**: `readdir(appRoot)` and
   `opendir(appRoot)` list the enabled places and nothing else, and
   `stat(appRoot)` is a directory. `watch` of it — as of any managed
@@ -1183,9 +1207,10 @@ read or written:
   open as `open` does.
 - `cp` / `copyFile` / `rename` of a prepared virtual (or SEA) entry: there
   is no raw input to hand on. A copy of a place directory, too.
-- A recursive `cp` whose source or destination is in a place, or that
-  encloses `appRoot`: a native walk reads and writes raw files past the
-  routing and misses virtual entries.
+- A recursive `cp` whose source or destination is in an indexed place —
+  under strict in any place, whose walk would follow a link out of it —
+  or that encloses `appRoot`: a native walk reads and writes raw files
+  past the routing and misses virtual entries.
 - A hard link into or out of a place: one physical file under two names,
   while a place gives each name its own canonical content, preparation and
   companions — and a second name would escape the place's mutation policy.
@@ -1214,7 +1239,10 @@ read or written:
 
 - unrelated paths outside `appRoot`, `disk` and `node-default` places,
   files of the disk territory (`fs.fallback: 'disk'`), and — without
-  strict — unmanaged paths under `appRoot`;
+  strict — unmanaged paths under `appRoot`; under strict a place's disk
+  only where the disk says the path really lies (see
+  [Strict routing](#strict-routing)), and its recursive `readdir` from a
+  walk that enters no link;
 - the guarded APIs, once the routing of every path argument allows them:
   `chmod` / `lchmod`, `chown` / `lchown`, `utimes` / `lutimes`,
   `truncate`, `symlink`, `readlink`, `statfs`, `watchFile`, `rmdir`
