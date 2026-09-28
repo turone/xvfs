@@ -4,6 +4,7 @@ const { describe, it } = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
+const { Worker } = require('node:worker_threads');
 const { bytecodeKey } = require('../lib/companion.js');
 const {
   tmpDir,
@@ -741,6 +742,98 @@ describe('writeFiles: map places', () => {
     } finally {
       bare.kernel.close();
       w.kernel.close();
+      k.close();
+      rm(root);
+    }
+  });
+});
+
+describe('writeFiles: worker threads', () => {
+  it('two workers write sets of the same keys: one update each, both announced once in each worker', async () => {
+    const root = tmpDir('vfs-batch');
+    const k = await kernel(root, VIRTUAL);
+    const workers = [];
+    try {
+      // Each worker answers a set with the version of its commit, and a
+      // version with the events it announced, once it has applied that
+      // version.
+      const WORKER = `
+        const { parentPort } = require('node:worker_threads');
+        const { attach } = require(${JSON.stringify(path.resolve(__dirname, '../index.js'))});
+        const kernel = attach();
+        const events = [];
+        kernel.on('publish', (event) => events.push(event));
+        parentPort.on('message', async (msg) => {
+          if (typeof msg === 'number') {
+            const send = () => parentPort.postMessage(events);
+            if (kernel.version >= msg) return send();
+            kernel.on('publish', function reached(event) {
+              if (event.version < msg) return;
+              kernel.off('publish', reached);
+              send();
+            });
+            return;
+          }
+          try {
+            parentPort.postMessage({ version: await kernel.fs('v').writeFiles(msg) });
+          } catch (err) {
+            parentPort.postMessage({ code: err.code, message: err.message });
+          }
+        });
+        parentPort.postMessage('ready');
+      `;
+      const spawn = () => {
+        const { vfs, transferList } = k.link();
+        return new Worker(WORKER, {
+          eval: true,
+          workerData: { vfs },
+          transferList,
+        });
+      };
+      const answer = (w, msg) =>
+        within(
+          new Promise((resolve, reject) => {
+            w.once('message', resolve);
+            w.once('error', reject);
+            if (msg !== undefined) w.postMessage(msg);
+          }),
+          'the answer of a worker',
+          10000,
+        );
+      workers.push(spawn(), spawn());
+      await Promise.all(workers.map((w) => answer(w)));
+      const keys = ['/k1', '/k2', '/k3', '/k4'];
+      const answers = await Promise.all(
+        workers.map((w, i) =>
+          answer(
+            w,
+            keys.map((key) => [key, `from-${i}`]),
+          ),
+        ),
+      );
+      assert.deepEqual(
+        answers.map((a) => a.version).sort(),
+        [1, 2],
+        'both resolved with their versions',
+      );
+      assert.equal(k.nextUpdateId, 2, 'one update per set');
+      const last = answers.findIndex((a) => a.version === 2);
+      const v = k.fs('v');
+      for (const key of keys) {
+        assert.equal(v.readFile(key, 'utf8'), `from-${last}`, key);
+        assert.equal(v.version(key), 2);
+      }
+      for (const w of workers) {
+        const events = await answer(w, 2);
+        assert.deepEqual(
+          events.map((event) => event.version),
+          [1, 2],
+        );
+        assert.deepEqual(events[0].places.v.created, keys);
+        assert.deepEqual(events[1].places.v.replaced, keys);
+      }
+    } finally {
+      for (const w of workers) await w.terminate();
       k.close();
       rm(root);
     }

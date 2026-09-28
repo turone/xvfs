@@ -1017,12 +1017,15 @@ and no thread ever sees part of the set.
   to the pool, and every file keeps its previous version.
   A refusal about a key is named by it: `syscall` `writeFiles`, `path` the
   key's.
-- **Places.** A `sab + virtual` place of the main thread resolves with the
-  version of the commit; a `map` place — each thread's own — publishes the
-  set at once, every preparer and bytecode flavor computed before the
-  first file changes, and returns `undefined`. A read-only place is
-  `EROFS`, a disk-origin place `ENOTSUP` (its writes land on disk file by
-  file): both with the place's directory as `path`.
+- **Places.** A `sab + virtual` place resolves with the version of the
+  commit, in any thread: a worker's set crosses its link as one request,
+  its bytes in one transferred buffer, and the main kernel checks it again
+  whole; its update reaches the worker before the answer, as for any
+  worker mutation. A `map` place — each thread's own — publishes the set
+  at once, every preparer and bytecode flavor computed before the first
+  file changes, and returns `undefined`. A read-only place is `EROFS`, a
+  disk-origin place `ENOTSUP` (its writes land on disk file by file): both
+  with the place's directory as `path`.
 - One flag and no removals in a set: `null` data is a `TypeError`.
 
 ## Patched `node:fs`
@@ -1319,7 +1322,9 @@ vfs-update  { name, updateId, version, places: { <name>: { entries, removals,
 vfs-ack     { name: 'vfs-ack', updateId, retained?: [retireId] }              worker → main
 vfs-release { name: 'vfs-release', retireIds: [retireId] }                    worker → main
 vfs-mutate  { name, id, place, op, key, to?, options?, data? }                worker → main
-vfs-mutated { name, id, error?: { code, message, syscall, path, dest } }      main → worker
+            writeFiles: { name, id, place, op, keys, sizes, options, data }
+vfs-mutated { name, id, error?: { code, message, syscall, path, dest },
+              version? }                                                      main → worker
 entry       shared { kind, segmentId, offset, length, stat, version, scriptOptions?, meta? }
             | disk { kind, path, stat, version, scriptOptions?, meta? }
 stat        { size, mtimeMs } (+ sourceSize, encoding for compressed companions)
@@ -1333,7 +1338,10 @@ retired versions its streams or leases still read, and one `vfs-release`
 follows when the last of them is done. Bytes are freed once every linked
 worker has ACKed (or exited) and no thread holds them. An update's
 `version` is the kernel's after it — a relocation keeps it — and each
-entry carries the version of the commit that published it.
+entry carries the version of the commit that published it. A worker's
+`writeFiles` is one `vfs-mutate`: its keys, the size of each file and
+their bytes one after another in `data`; its answer carries the version
+of the commit.
 
 ## Examples
 
