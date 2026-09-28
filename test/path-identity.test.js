@@ -27,6 +27,7 @@ const {
   existsSync: onDisk,
   readFileSync: readDisk,
   readdirSync: listDisk,
+  writeFileSync: writeDisk,
 } = fs;
 
 // Windows file systems take one name in any case: appRoot and a place's
@@ -1279,6 +1280,13 @@ describe('Windows, strict: short (8.3) names', { skip: NAMESPACES }, () => {
           code: 'ENOTSUP',
         },
       );
+      // A sibling of appRoot spelled as appRoot is — through the 8.3 names
+      // of the directories above it, as os.tmpdir() gives them on a CI
+      // runner — is outside it, and native.
+      writeDisk(path.join(outside, 'o.bin'), 'o');
+      const sibling = path.join(path.dirname(short), path.basename(outside));
+      assert.equal(fs.readFileSync(path.join(sibling, 'o.bin'), 'utf8'), 'o');
+      assert.deepEqual(fs.readdirSync(sibling), ['o.bin']);
     } finally {
       fsPatch.uninstall();
       brief.close();

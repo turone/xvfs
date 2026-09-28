@@ -501,7 +501,12 @@ the patched `node:fs` replace the operating system's isolation.
   names has a second spelling, its real path (`fs.realpathSync.native`,
   asked once when the kernel is built): a path in or below it is `EACCES`,
   a recursive walk from above it `ENOTSUP`, a short name where a path
-  leaves it `EACCES`, as for `appRoot`'s own spelling. A share of this
+  leaves it `EACCES`, as for `appRoot`'s own spelling. A name of
+  `appRoot`'s own 8.3 spelling at that position is `appRoot`'s: a path
+  along either spelling leaves it where it leaves `appRoot`, so a sibling
+  of `appRoot` in its 8.3 spelling stays native, and a path that mixes the
+  two (`…\runneradmin\…\APP~1\…` for an `appRoot` given as
+  `…\RUNNER~1\…\APP~1`) is `EACCES`. A share of this
   machine is not recognized as its local path: an `appRoot` on
   `\\localhost\C$\…` is reachable as `C:\…` too.
 - Under strict a native call on a place's disk — the disk territory of

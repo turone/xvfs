@@ -793,7 +793,9 @@ than `appRoot`'s names, the first time a path on it is routed. Where the
 real path differs from `appRoot` as spelled — `appRoot` through a link, a
 subst drive, a namespace or 8.3 names — it is a second spelling: a path in
 or below it is owned by nobody, a directory above it encloses the places,
-and a short name where a path leaves it may stand for it. A drive whose
+and a short name where a path leaves it may stand for it — a name of
+`appRoot`'s own 8.3 spelling at that position is `appRoot`'s, and a path
+that mixes the two spellings is owned by nobody. A drive whose
 root resolves to a UNC or namespace path (a mapped drive), or onto
 `appRoot`'s real line — `appRoot`, above it or below it (subst) — is an
 alias whole: every path on it is owned by nobody. A letter that names
@@ -804,7 +806,12 @@ is built, and makes a drive an alias.** _Why:_ `subst P: appRoot`, a
 and the real path of an `appRoot` given through a junction or a subst
 drive read what the places hide, as did the long spelling of an `appRoot`
 given with short names: they lie outside `appRoot` to the strings, and
-which directory a letter or a link names only the disk knows. Asking once
+which directory a letter or a link names only the disk knows. Held to the
+real spelling alone, a sibling of an `appRoot` given with short names,
+spelled as it is (`…\RUNNER~1\…\Temp\other`), left it at `RUNNER~1` and
+was refused, though it names nothing of `appRoot`; a path that takes each
+name from one spelling or the other (`…\runneradmin\…\Temp\SMFS-A~1\…`)
+leaves neither and names `appRoot`, so it is refused whole. Asking once
 keeps the router off the disk on its hot path: a Map lookup per path on
 another drive, a containment check where `appRoot` has a second spelling.
 A drive is asked when first used, not when the kernel starts: auditing
