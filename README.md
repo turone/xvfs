@@ -1509,8 +1509,13 @@ npm run bench         # hot-path benchmarks (not part of npm test or CI)
 Run the complete test suite with `npm test`. The suite covers
 configuration, cache allocation, scanner, places, routing, module hooks,
 compression, SEA, watcher, bootstrap, workers and strict routing
-behavior. The symlink test may be skipped on platforms where test
-symlinks are unavailable.
+behavior. The tests of symbolic links to files are skipped where none can
+be made (Windows without the privilege); a link to a directory is a
+junction there. On Windows the spellings of `appRoot` are tested on the
+real disk where Windows makes them — 8.3 names where the volume generates
+them, subst drives, a drive mapped to the admin share — made and removed
+by the tests themselves; where Windows makes none, the test says why it
+skips.
 
 `npm run test:types` type-checks the declarations (`index.d.ts`,
 `lib/**/*.d.ts`) with `tsc --noEmit` under `strict` against

@@ -1681,6 +1681,16 @@ stat        { size, mtimeMs } (+ sourceSize, encoding for compressed companions)
   an accessor, carried by an export — are refused under strict and left
   alone without it; a delegated export is refused on a hidden path through
   the patch it goes through.
+- A spelling strict refuses is tested with every family of `node:fs`
+  calls over it (`test/fs-calls.js`) and with `node:fs` counted beneath
+  the patch: nothing reaches it. The rules are tested for both path
+  flavors on any host, a disk that realpath answers for stood in by a
+  table (`test/aliases.test.js`); on Windows the real disk makes what it
+  can — 8.3 names where the volume generates them, junctions (no
+  privilege), subst drives, a drive mapped to the admin share — in the
+  tests, which remove them in `finally` and skip, saying why, where
+  Windows makes none. A tree with a link above `appRoot` is never walked
+  recursively by a test: a regression that followed it would not end.
 - Prove V8 cached-data acceptance in a worker: the per-isolate compilation
   cache masks `cachedDataRejected` in the compiling thread.
 - `npm ci` must work without git or SSH access: git dependencies are pinned
