@@ -730,9 +730,26 @@ module loaded through a share. Refusing the forms is what a lexical router
 can guarantee; which file a share or a namespace names is the operating
 system's to say, and no list of aliases is complete. Only strict asks,
 so without it the route outside costs nothing more. Spellings in drive
-form — an 8.3 short name, an NTFS stream suffix, a drive mapped to a
-share — stay unrecognized, so `appRoot` is given in the form the
-application uses.
+form — an 8.3 short name, a drive mapped to a share — stay unrecognized,
+so `appRoot` is given in the form the application uses.
+
+**On Windows under strict a path with NTFS stream syntax — a `:` past the
+colon of its drive, in the path as resolved, or in the part below a UNC or
+namespace `appRoot` — is owned by nobody, below `appRoot` or not: `EACCES`
+before any native I/O, not found for the module hooks. Without strict
+nothing asks. The `PlaceFs` facade takes no key with a `:` for a file of
+its disk territory, in either mode.** _Why:_ no file name holds a `:`;
+Windows opens a stream of the file or directory the name before it names,
+and its main stream is that file itself. `appRoot\place\a.txt::$DATA` in a
+place with `fs.fallback: 'disk'` read the raw file of a cached, prepared
+extension — its extension taken as `txt::$data` — and
+`appRoot::$INDEX_ALLOCATION\place\hidden`, outside `appRoot` to the
+strings, read what the place hides. Which stream a name opens is the file
+system's to say; the syntax is what the strings show, and refusing it
+costs one search of the path. The facade's rule — a cached extension is
+never read from disk — holds in either mode, so it holds against a stream
+too. A relative `x:stream` is a path on drive X to `path.resolve`, and to
+Windows.
 
 **A path already in the form `path.resolve` returns is taken as it is: a
 drive letter, `:` and `\` on Windows (UNC paths are resolved), `/` on
@@ -1290,6 +1307,7 @@ workers call `attach()`.** _Why:_ preloads do not run in worker threads.
 | Other spellings of a virtual place's keys                                                                       | its reads and mutations would disagree (`exists` against `wx`)    |
 | Refusing every miss of a cached extension without strict on Windows                                             | the permissive default's unpublished files; unlike on POSIX       |
 | Mapping UNC and namespace spellings (`\\?\C:\…`, `\\localhost\C$\…`) onto `appRoot`                             | no list of aliases is complete; the OS says what a share names    |
+| Stripping a stream suffix to route the file before it (`a.txt::$DATA` as `a.txt`)                               | the file system says which stream a name opens, not the strings   |
 | Native `cp` with a routing `filter` for managed trees                                                           | raw disk bytes, no virtual entries, no canonical content          |
 | Copying canonical (prepared) content as a copy's input                                                          | the destination prepares it again; its bundle names the source    |
 | Feeding a prepared virtual entry's canonical content back in as raw                                             | stale `meta` / filename / bytecode, a silently different input    |
@@ -1423,8 +1441,8 @@ workers call `attach()`.** _Why:_ preloads do not run in worker threads.
 - Disk territory never leaves its place (`PlaceFs.#within`) and, under
   strict, never serves or lists a cached extension.
 - On Windows under strict, the patch and the module hooks pass no UNC or
-  namespace path outside `appRoot` on to `node:fs` or Node's loader: the
-  router refuses it first.
+  namespace path outside `appRoot`, and no path with NTFS stream syntax,
+  on to `node:fs` or Node's loader: the router refuses it first.
 
 ## Protocol
 
