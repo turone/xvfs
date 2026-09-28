@@ -27,7 +27,7 @@ const runIn = (cwd, entry, ...vfsArgs) => {
 
 const run = (entry, ...vfsArgs) => runIn(FIXTURES, entry, ...vfsArgs);
 
-describe('bootstrap: --import shared-memory-fs/register', () => {
+describe('bootstrap: --import xvfs/register', () => {
   it('ESM entry: kernel ready before entry, static imports served from VFS, worker attaches', () => {
     const r = run('app.mjs', '--vfs.config=vfs.config.cjs');
     assert.equal(r.code, 0, r.stderr);

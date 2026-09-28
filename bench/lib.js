@@ -13,7 +13,7 @@ const { VfsKernel } = require('../lib/kernel.js');
 const quiet = { log() {}, warn() {}, error() {}, debug() {} };
 
 const tmpDir = (prefix) =>
-  mkdtempSync(path.join(os.tmpdir(), `smfs-${prefix}-`));
+  mkdtempSync(path.join(os.tmpdir(), `xvfs-${prefix}-`));
 
 // writeTree(root, { 'a/b.txt': content }) → root
 const writeTree = (root, files) => {

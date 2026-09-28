@@ -2,7 +2,7 @@
 // takes it; the resolved forms, leaf by leaf; what the declarations must
 // refuse.
 
-import { VfsConfig } from 'shared-memory-fs';
+import { VfsConfig } from 'xvfs';
 import type {
   DeepReadonly,
   Encoding,
@@ -12,7 +12,7 @@ import type {
   ResolvedRequireDomain,
   ResolvedScript,
   VfsRawConfig,
-} from 'shared-memory-fs';
+} from 'xvfs';
 import { expectType } from './expect.js';
 
 // --- The README configurations ---

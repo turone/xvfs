@@ -4,7 +4,7 @@
 import { delimiter, sep } from 'node:path';
 import { pipeline } from 'node:stream/promises';
 import type { ServerResponse } from 'node:http';
-import { PlaceFs, VfsDirent, VfsStats } from 'shared-memory-fs';
+import { PlaceFs, VfsDirent, VfsStats } from 'xvfs';
 import type {
   Encoding,
   FileLease,
@@ -12,7 +12,7 @@ import type {
   VfsBigIntStats,
   VfsKernel,
   VfsReadStream,
-} from 'shared-memory-fs';
+} from 'xvfs';
 import { expectType } from './expect.js';
 
 declare const kernel: VfsKernel;

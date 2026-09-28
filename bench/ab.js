@@ -573,7 +573,7 @@ const main = (argv) => {
   mkdirSync(out, { recursive: true });
   clearResults(out);
 
-  const temp = mkdtempSync(path.join(os.tmpdir(), 'smfs-ab-'));
+  const temp = mkdtempSync(path.join(os.tmpdir(), 'xvfs-ab-'));
   const cleanup = () => {
     if (options.keep) process.stderr.write(`kept ${temp}\n`);
     else rmSync(temp, { recursive: true, force: true });

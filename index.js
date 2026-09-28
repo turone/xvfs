@@ -15,7 +15,7 @@ module.exports = {
   VfsStats,
   VfsDirent,
   attach,
-  // Kernel published by `--import shared-memory-fs/register` or attach(), or null.
+  // Kernel published by `--import xvfs/register` or attach(), or null.
   get kernel() {
     return VfsKernel.current;
   },

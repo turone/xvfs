@@ -1,6 +1,6 @@
 # Architecture and decisions
 
-How shared-memory-fs is built and **why**. Each section states the
+How xvfs is built and **why**. Each section states the
 decisions in force together with the reasons behind them; [Rejected
 designs](#rejected-designs) lists what was considered and turned down, so it
 is not reintroduced without new evidence. Keep this file aligned with the
@@ -1447,7 +1447,7 @@ throwing module body is never re-executed.
 may compile after an async gap, when the shared bytes could already belong
 to a newer version.
 
-**`--import shared-memory-fs/register` bootstraps the main thread;
+**`--import xvfs/register` bootstraps the main thread;
 workers call `attach()`.** _Why:_ preloads do not run in worker threads.
 
 ## Rejected designs

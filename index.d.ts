@@ -18,7 +18,7 @@ export * from './lib/registry.js';
 export * from './lib/stats.js';
 
 /**
- * The kernel published by `--import shared-memory-fs/register` or
+ * The kernel published by `--import xvfs/register` or
  * `attach()`, or null: a getter, live. Not a named export for an ES
  * module — Node finds no `kernel` in the CommonJS entry — so in ESM read
  * `VfsKernel.current`, or `kernel` of the default import (the

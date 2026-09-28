@@ -1,6 +1,6 @@
 # Use cases and alternatives
 
-shared-memory-fs gives a Node.js process **one copy of the files its
+xvfs gives a Node.js process **one copy of the files its
 `worker_threads` serve** — static assets, templates, configuration,
 handler sources, modules — under the real paths the application already
 uses, with every change published to every thread at once.
@@ -435,7 +435,7 @@ The library's own costs
 
 |                                     | files live in                       | shared across threads             | live updates                              | done once: bytecode, compression, preparation | real paths        |
 | ----------------------------------- | ----------------------------------- | --------------------------------- | ----------------------------------------- | --------------------------------------------- | ----------------- |
-| shared-memory-fs                    | one SAB copy                        | yes, zero-copy                    | atomic epochs, ACK-before-free            | yes                                           | yes               |
+| xvfs                                | one SAB copy                        | yes, zero-copy                    | atomic epochs, ACK-before-free            | yes                                           | yes               |
 | `node:vfs`                          | memory, a directory, ZIP, providers | not described; mounted per worker | memory local; `RealFSProvider` reads disk | no                                            | no, own namespace |
 | `@platformatic/vfs`                 | memory, SQLite, a directory         | no                                | local to the instance                     | no                                            | overlay (shim)    |
 | memfs                               | memory, one volume                  | no                                | local to the volume                       | no                                            | no                |
@@ -454,7 +454,7 @@ easiest to confuse with this library. Facts below reflect September 25,
 yet. `node:vfs` is experimental and still changing — check the current docs
 before relying on a detail.
 
-|                         | shared-memory-fs                                                             | `node:vfs`                                                                                              |
+|                         | xvfs                                                                         | `node:vfs`                                                                                              |
 | ----------------------- | ---------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------- |
 | Status                  | userland; Node 22.22.3+, 24.12+, 26                                          | core, Node 26 only (not backported to 22 / 24); Stability 1 (experimental), behind `--experimental-vfs` |
 | Built for               | many threads reading the same files                                          | self-contained file trees: tests, fixtures, embedded assets, archives, SEA                              |
@@ -522,21 +522,21 @@ between threads, builds cached data, compresses content or overlays real
 paths, so the differences below should hold in the near term.
 
 **Purpose.** `node:vfs` gives a program a file tree that does not exist on
-disk. shared-memory-fs keeps files that do exist (or that the application
+disk. xvfs keeps files that do exist (or that the application
 writes) in one shared copy for many threads. The first is about _where
 files come from_; the second is about _how many copies of them a process
 holds and how they change_.
 
 **Path model.** A `node:vfs` mount lives in its own namespace: code has to
 use the mount point (or be started from it with `--vfs-load`). A place of
-shared-memory-fs is a real directory under `appRoot`: existing code keeps
+xvfs is a real directory under `appRoot`: existing code keeps
 reading `appRoot/static/index.html` and gets the cached bytes, with the
 patched `node:fs` and the module hooks deciding per path.
 
 **Threads.** The `node:vfs` documentation does not describe sharing an
 instance between threads; a `MemoryProvider` tree is ordinary JavaScript
 state, and a startup source is mounted again in each worker (on `main`, at
-the same mount point in every thread). shared-memory-fs keeps every byte
+the same mount point in every thread). xvfs keeps every byte
 once in `SharedArrayBuffer` segments: each worker projects the same memory
 from a snapshot, receives each change as one delta, and a replaced version
 is freed only after every worker has moved on and no stream or view still
@@ -545,18 +545,18 @@ up to `n × m` — measured above as 261 against 348 MiB of RSS at eight
 workers for a 20 MiB set.
 
 **Live updates.** `RealFSProvider` always reads the disk, so it is current
-but not cached. shared-memory-fs watches disk-origin places and publishes
+but not cached. xvfs watches disk-origin places and publishes
 each batch of changes atomically — a source with its bytecode and
 compressed companions — to every thread, while readers that started before
 finish the version they began with.
 
 **API surface.** `node:vfs` aims at the whole `node:fs` contract, including
-file descriptors and symlinks. shared-memory-fs implements what hot read
+file descriptors and symlinks. xvfs implements what hot read
 paths need and guards the rest: an unimplemented API can refuse a path, but
 it is never served from the VFS; `open()` of a published file is `ENOTSUP`.
 
 **Modules.** `node:vfs` mounts take part in the full CommonJS and ESM
-resolution, `node_modules` and native addons included. shared-memory-fs
+resolution, `node_modules` and native addons included. xvfs
 resolves files and directories of its places (no `exports` / `imports`
 maps) and adds what `node:vfs` does not: V8 cached data built once on the
 main thread and reused by every worker's `require()`.
@@ -577,11 +577,11 @@ and the module hooks — useful discipline, not a security boundary.
 Use **`node:vfs`** for a virtual tree: test fixtures without touching disk,
 packaging an application or its assets (ZIP, SEA), code that needs the full
 `node:fs` contract, descriptors or native addons from memory, or a
-single-threaded program. Use **shared-memory-fs** when several worker
+single-threaded program. Use **xvfs** when several worker
 threads read the same files and memory, startup time or per-request CPU
 matter. They can coexist: a `node:vfs` mount and the places of
-shared-memory-fs never overlap. A `VirtualProvider` backed by a
-shared-memory-fs place would give the full fs contract over shared bytes;
+xvfs never overlap. A `VirtualProvider` backed by a
+xvfs place would give the full fs contract over shared bytes;
 it is **not built**.
 
 ### `@platformatic/vfs`
@@ -595,7 +595,7 @@ are shim-only. It states that "native addon and FFI library loading from
 virtual bytes, SEA integration, and transparent interception of Node's
 internal module-resolution filesystem calls require Node core and are not
 supported", and that core's `ZipProvider` is not included. Against
-shared-memory-fs the trade-offs are those of `node:vfs`: a tree of its own,
+xvfs the trade-offs are those of `node:vfs`: a tree of its own,
 one instance per thread, no work done once.
 
 ### memfs
@@ -606,7 +606,7 @@ in memory, with `fs.watch`, snapshots and adapters to the browser's file
 system API. It is the right tool for tests and mocks
 and for code that needs a full `fs` in memory; one volume per thread,
 nothing shared, no module loading of its own and no work done once.
-shared-memory-fs can serve test fixtures too
+xvfs can serve test fixtures too
 ([integration.md → Testing with virtual fixtures](integration.md#testing-with-virtual-fixtures)),
 but that is a side effect of the patch, not its purpose.
 
@@ -618,7 +618,7 @@ that stays on disk anyway. The page cache is shared by every thread and
 every process, so a read rarely touches the disk — but each read is a
 syscall and a fresh `Buffer` (18.6 µs for 1 KiB, 76–122 µs per request
 in the pool measurement), and every thread parses, compiles, compresses and
-prepares the same files again. shared-memory-fs keeps large files there
+prepares the same files again. xvfs keeps large files there
 (`maxFileSize`) and serves them from disk through the same API.
 
 ### A cache in every worker (`lru-cache` and the like)
@@ -634,7 +634,7 @@ invalidations, and no moment at which every thread serves the same version;
 in the measurement the private copies stopped at ~0.5–0.6 M requests per
 second from two workers on, with a p99 four times the shared copy's. It
 stays the right choice for one worker, for computed values rather than
-files, and for TTL semantics, which shared-memory-fs has not.
+files, and for TTL semantics, which xvfs has not.
 
 ### Out-of-process caches: Redis, memcached
 
@@ -644,7 +644,7 @@ memory object caching system". Every read is a round trip over a socket
 and a deserialization — the reason Redis documents client-side caching:
 "the time needed in order to access the local computer memory is orders of
 magnitude smaller compared to accessing a networked service like a
-database". shared-memory-fs is that local layer for the threads of one
+database". xvfs is that local layer for the threads of one
 process, for file-shaped data; it does not replace the shared store across
 processes. The two combine: the store holds the truth, an invalidation
 message makes the main thread write the new value into a `sab + virtual`
@@ -655,7 +655,7 @@ place, and every worker serves it from then on.
 nginx serves files from disk with `sendfile` and caches descriptors,
 sizes and modification times (`open_file_cache`), not contents — the page
 cache does that; a CDN caches at the edge. They are the right layer for
-public static content in front of an origin. shared-memory-fs serves the
+public static content in front of an origin. xvfs serves the
 origin: what the Node.js process itself must render or serve — templates,
 handlers, data, private assets, SEA assets — and the static files of a
 deployment that runs without a reverse proxy.

@@ -2,7 +2,7 @@
 // leaf by leaf; the error shape.
 
 import { workerData } from 'node:worker_threads';
-import { attach, FilesystemCache, VfsKernel } from 'shared-memory-fs';
+import { attach, FilesystemCache, VfsKernel } from 'xvfs';
 import type {
   CacheEntry,
   FileInput,
@@ -10,7 +10,7 @@ import type {
   ScriptOptions,
   VfsError,
   VfsLink,
-} from 'shared-memory-fs';
+} from 'xvfs';
 import { expectType } from './expect.js';
 
 // --- attach() ---
