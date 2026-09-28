@@ -469,10 +469,15 @@ the patched `node:fs` replace the operating system's isolation.
   `EACCES` (not found for `require` / `import`) before any native I/O,
   whatever it names: an application on a share keeps its `appRoot` there,
   where the paths lexically below it, in any case, route as usual.
-  Without strict such paths pass through natively, as before. Other
-  spellings of `appRoot` — an 8.3 short name, an NTFS stream suffix, a
-  drive mapped to its share — are not recognized: give `appRoot` in the
-  form the application uses.
+  Without strict such paths pass through natively, as before.
+- On Windows a path with NTFS stream syntax — a `:` past the drive:
+  `…\a.txt::$DATA`, the main stream of `a.txt`, which is the file itself;
+  `appRoot::$INDEX_ALLOCATION\…`, `appRoot` as a name its strings do not
+  show; `…\x:stream` — is, under strict, `EACCES` (not found for `require`
+  / `import`) before any native I/O, below `appRoot` or not. Without
+  strict it passes through as before. Other spellings of `appRoot` — an
+  8.3 short name, a drive mapped to its share — are not recognized: give
+  `appRoot` in the form the application uses.
 - `appRoot` itself is a **managed root**: `readdir(appRoot)` and
   `opendir(appRoot)` list the enabled places and nothing else, and
   `stat(appRoot)` is a directory. `watch` of it — as of any managed
@@ -488,7 +493,7 @@ the patched `node:fs` replace the operating system's isolation.
   excepted) — unless a disk-origin place sets `fs.fallback: 'disk'`
   (below).
 - Paths outside `appRoot` → ordinary Node (on Windows, UNC and namespace
-  paths excepted: above), except operations whose walk would enter
+  paths and streams excepted: above), except operations whose walk would enter
   `appRoot` from above: recursive listings, watches, copies and removals,
   and `rename`, of a directory above it. Scanner does not follow symlinks.
 - Listings (`readdir`, `opendir`) always come from the places. A copy or a
@@ -518,7 +523,9 @@ places: {
 - `'disk'` — the files its cache filters do not select (here: images,
   video, …) are served from disk, inside this place only. Cached
   extensions stay VFS-only under strict, so a raw or unpublished file
-  never stands in for canonical (prepared) content. `readdir` merges
+  never stands in for canonical (prepared) content — nor under another
+  name: on Windows the `PlaceFs` facade takes no key with a `:` for a
+  disk file, in either mode (`/a.txt::$DATA` is `a.txt`). `readdir` merges
   published entries with disk directories and files of the other
   extensions (no companions, no duplicates) — also in a directory that
   exists only on disk, and in either mode: a file of a cached extension is

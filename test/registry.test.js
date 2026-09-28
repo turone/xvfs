@@ -8,6 +8,7 @@ const {
   FsRouter,
   Containment,
   namespaced,
+  streamed,
   resolvedFor,
   listedNames,
 } = require('../lib/registry.js');
@@ -388,6 +389,143 @@ describe('PlaceRegistry: UNC and namespace paths', () => {
       } finally {
         k.close();
       }
+    }
+  });
+});
+
+// NTFS takes a `:` past the drive for a stream of the file or directory
+// before it: `a.txt::$DATA` is a.txt itself, `C:\app::$INDEX_ALLOCATION` the
+// directory C:\app. A registry built for strict owns every such path to
+// nobody, below appRoot or not, which strict refuses; without strict nothing
+// is asked. Strings only, for both flavors on any platform;
+// path-identity.test.js runs it through node:fs and the module hooks.
+describe('PlaceRegistry: NTFS stream spellings', () => {
+  const nobody = { place: null, key: null };
+  const registryOf = (P, root, strict = true) => {
+    const registry = new PlaceRegistry(root, P, strict);
+    const ro = { name: 'ro' };
+    registry.register(ro);
+    return { registry, ro };
+  };
+
+  it('streamed: a colon past the drive of a resolved path', () => {
+    const streams = [
+      ...['C:\\app\\a.txt::$DATA', 'C:\\app\\a.txt:s', 'C:\\app:s'],
+      ...['C:\\app::$INDEX_ALLOCATION\\x', 'c:\\a:$I30:$INDEX_ALLOCATION'],
+      ...['x:\\a:', 'C:\\:', '\\a:b'],
+    ];
+    for (const abs of streams) assert.equal(streamed(abs), true, abs);
+    const plain = ['C:\\app\\a.txt', 'C:\\', 'x:\\stream', '\\app\\x'];
+    for (const abs of plain) assert.equal(streamed(abs), false, abs);
+  });
+
+  it('win32 under strict: a stream below appRoot, of it or above it is owned by nobody', () => {
+    const { registry, ro } = registryOf(path.win32, 'C:\\app');
+    const forms = [
+      ...['C:\\app\\ro\\a.txt::$DATA', 'C:\\app\\ro\\a.txt:s:$DATA'],
+      ...['C:\\app\\ro\\x:stream', 'c:/APP/RO/A.TXT::$data', 'C:\\app\\ro:s'],
+      ...['C:\\app\\ro\\sub::$INDEX_ALLOCATION\\x', 'C:\\app\\x:y'],
+      ...['C:\\app::$INDEX_ALLOCATION', 'C:\\app::$INDEX_ALLOCATION\\ro\\x'],
+      ...['C:\\app:$I30:$INDEX_ALLOCATION\\ro\\x', 'C:/app::$DATA/ro/x'],
+      ...['C:\\::$INDEX_ALLOCATION\\app\\ro\\x', 'C:\\app\\ro\\a.txt:'],
+      // Outside appRoot too: which file it names is not asked.
+      ...['D:\\other\\x.txt:Zone.Identifier', 'C:\\other\\x::$DATA'],
+    ];
+    for (const p of forms) assert.deepEqual(registry.route(p), nobody, p);
+    assert.deepEqual(registry.route('C:\\app\\ro\\a.txt'), {
+      place: ro,
+      key: '/a.txt',
+    });
+    // A relative `x:stream` is a path on drive X, no stream.
+    assert.equal(registry.route('x:\\stream'), null);
+    assert.equal(registry.route('D:\\other\\x.txt'), null);
+  });
+
+  // path.win32 resolves a relative path against process.cwd() on any host.
+  it('win32 under strict: a relative stream is what the cwd makes of it', () => {
+    const { registry } = registryOf(path.win32, 'C:\\app');
+    const { cwd } = process;
+    const through = (at, p) => {
+      process.cwd = () => at;
+      try {
+        return registry.route(p);
+      } finally {
+        process.cwd = cwd;
+      }
+    };
+    assert.deepEqual(through('C:\\app\\ro', 'a.txt::$DATA'), nobody);
+    assert.deepEqual(through('C:\\other', 'x.txt:s'), nobody);
+    assert.deepEqual(through('C:\\app', '..\\app::$INDEX_ALLOCATION'), nobody);
+  });
+
+  it('win32 without strict: the name as given, nothing asked outside', () => {
+    const { registry, ro } = registryOf(path.win32, 'C:\\app', false);
+    assert.deepEqual(registry.route('C:\\app\\ro\\a.txt::$DATA'), {
+      place: ro,
+      key: '/a.txt::$DATA',
+    });
+    assert.equal(registry.route('C:\\app::$INDEX_ALLOCATION\\ro\\x'), null);
+    assert.equal(registry.route('D:\\other\\x.txt:s'), null);
+  });
+
+  it('win32 under strict, appRoot on a share or in a namespace: below it too', () => {
+    const share = registryOf(path.win32, '\\\\srv\\share\\app');
+    assert.deepEqual(
+      share.registry.route('\\\\srv\\share\\app\\ro\\a.txt::$DATA'),
+      nobody,
+    );
+    assert.deepEqual(share.registry.route('\\\\srv\\share\\app\\ro\\a'), {
+      place: share.ro,
+      key: '/a',
+    });
+    const ns = registryOf(path.win32, '\\\\?\\C:\\app');
+    assert.deepEqual(ns.registry.route('\\\\?\\C:\\app\\ro\\a:s'), nobody);
+    assert.deepEqual(ns.registry.route('\\\\?\\c:\\APP\\ro\\a'), {
+      place: ns.ro,
+      key: '/a',
+    });
+  });
+
+  it('posix: a colon is a character of the name', () => {
+    const { registry, ro } = registryOf(path.posix, '/app');
+    assert.deepEqual(registry.route('/app/ro/a.txt::$DATA'), {
+      place: ro,
+      key: '/a.txt::$DATA',
+    });
+    assert.equal(registry.route('/app::$INDEX_ALLOCATION/ro/x'), null);
+  });
+
+  it('strict refuses a stream in every routing decision', () => {
+    const strict = new FsRouter(
+      registryOf(path.win32, 'C:\\app').registry,
+      true,
+    );
+    const eacces = { kind: 'deny', code: 'EACCES' };
+    const plain = 'C:\\app\\ro\\x';
+    for (const p of ['C:\\app\\ro\\a.txt::$DATA', 'C:\\app::$DATA\\ro\\x']) {
+      assert.deepEqual(strict.read(p), eacces, p);
+      assert.deepEqual(strict.mutate(p), eacces, p);
+      assert.deepEqual(strict.copy(p, false), eacces, p);
+      assert.deepEqual(strict.copy(p, true), eacces, p);
+      assert.deepEqual(strict.rename(p, plain), eacces, p);
+      assert.deepEqual(strict.link(p, plain), eacces, p);
+      assert.deepEqual(strict.link('D:\\x', p), eacces, p);
+    }
+  });
+
+  it('module lookup: strict refuses a stream', () => {
+    const config = new VfsConfig({
+      defaults: { strict: true },
+      places: { lib: { require: true } },
+    });
+    const k = new VfsKernel(config, { appRoot: 'C:\\app', console: quiet });
+    k.registry = new PlaceRegistry('C:\\app', path.win32, true);
+    try {
+      for (const p of ['C:\\app\\lib\\m.js::$DATA', 'C:\\app::$DATA\\m.js']) {
+        assert.deepEqual(k.resolveModule(p, 'require'), { denied: true }, p);
+      }
+    } finally {
+      k.close();
     }
   });
 });

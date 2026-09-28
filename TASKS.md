@@ -3,27 +3,26 @@
 Future project work. Priority: **P1** — strict boundary or correctness,
 **P2** — policy gaps and missing implementations, **P3** — improvements.
 
-## P1 — Windows: 8.3 and stream spellings of managed paths
+## P1 — Windows: 8.3 spellings of managed paths
 
 **Problem.** Under strict, spellings of a managed path in drive form that
 routing does not compare as the file system does still reach the disk: the
 8.3 short name of `appRoot` or of a directory above it
-(`…\SMFS-A~1\place\hidden`) and a stream suffix on it
-(`appRoot::$INDEX_ALLOCATION\place\hidden`) lie outside `appRoot` to the
-strings, and `appRoot\place\a.txt::$DATA` in a place with
-`fs.fallback: 'disk'` reads the raw file of a cached, prepared extension —
-its extension taken as `txt::$data`. Without strict the same spellings of
-a place's name or key pass through as unowned. A drive mapped to a UNC
-`appRoot`, or the drive form of a namespaced one, is the same class.
+(`…\SMFS-A~1\place\hidden`) lies outside `appRoot` to the strings, and a
+short name in a place with `fs.fallback: 'disk'` (`INDEX~1.HTM` for
+`index.html`) reads the raw file of a cached extension. Without strict the
+same spellings of a place's name or key pass through as unowned. A drive
+mapped to a UNC `appRoot`, or the drive form of a namespaced one, is the
+same class.
 
 **Cause.** Routing is lexical, and one file has spellings the strings do
-not show: 8.3 names, NTFS stream syntax, drive mappings. Case, UNC and
-namespace forms are handled (`doc/architecture.md`, Routing and strict
+not show: 8.3 names, drive mappings. Case, UNC and namespace forms and
+NTFS stream syntax are handled (`doc/architecture.md`, Routing and strict
 mode).
 
 **Done when.** A decided policy — for instance, under strict, refusing a
-`:` past the drive and comparing `appRoot` by its long form — is
-implemented with tests on Windows.
+name in short-name form where it may stand for `appRoot` — is implemented
+with tests on Windows.
 
 ## P2 — VFS-aware versions of the operations refused today
 

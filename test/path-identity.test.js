@@ -14,6 +14,7 @@ const {
   refused,
   countNative,
   refusesEach,
+  refusesPairs,
   FILE_READS,
   DIR_READS,
   FILE_MUTATIONS,
@@ -833,3 +834,230 @@ describe('Windows, strict: an appRoot on a share', { skip: NAMESPACES }, () => {
     }
   });
 });
+
+// NTFS takes a `:` past the drive for a stream of the file or directory
+// before it: `…\a.txt::$DATA` is a.txt itself, `appRoot::$INDEX_ALLOCATION`
+// appRoot. Under strict such a path is refused before any native I/O,
+// below appRoot or not; without strict it passes through as before. The
+// PlaceFs facade serves no disk-territory file behind a stream, in either
+// mode: a cached extension is never read from disk through it.
+
+const STREAM_PLACES = {
+  ro: PLACES.ro,
+  terr: PLACES.terr,
+  rw: PLACES.rw,
+  v: PLACES.v,
+  lib: { require: { prepare: 'mod' }, import: { ext: ['mjs'] } },
+};
+
+const STREAM_TREE = {
+  'ro/a.txt': 'raw',
+  'ro/h.bin': 'hidden',
+  'terr/t.txt': 'raw',
+  'terr/m.bin': 'media',
+  'rw/w.txt': 'w',
+  'lib/side.js': NS_TREE['lib/side.js'],
+  'lib/e.mjs': NS_TREE['lib/e.mjs'],
+};
+
+// A file's streams: its main one, a named one, typed; a directory's index
+// as a name, and the paths through it.
+const fileStreams = (f) => [`${f}::$DATA`, `${f}:s`, `${f}:s:$DATA`];
+const dirStreams = (d) => [
+  `${d}::$INDEX_ALLOCATION`,
+  `${d}:$I30:$INDEX_ALLOCATION`,
+];
+const through = (d, ...rest) => dirStreams(d).map((s) => path.join(s, ...rest));
+
+describe('Windows, strict: NTFS stream spellings', { skip: NAMESPACES }, () => {
+  let root;
+  let outside;
+  let k;
+  let native;
+  const at = (...p) => path.join(root, ...p);
+
+  before(async () => {
+    root = writeTree(tmpDir('streams'), STREAM_TREE);
+    outside = writeTree(tmpDir('streams-outside'), { 'o.txt': 'o' });
+    const options = { preparers: PREPARERS };
+    k = await kernel(root, STREAM_PLACES, { strict: true }, options);
+    native = countNative();
+    fsPatch.install(k);
+    moduleHook.install(k);
+  });
+
+  after(() => {
+    moduleHook.uninstall();
+    fsPatch.uninstall();
+    native.restore();
+    k.close();
+    rm(root);
+    rm(outside);
+    delete globalThis.__smfsSide;
+    delete globalThis.__smfsEsm;
+  });
+
+  it('reads, listings and watches: EACCES, nothing reaches node:fs', async () => {
+    native.calls.length = 0;
+    const files = [
+      at('ro', 'h.bin'),
+      at('terr', 't.txt'),
+      at('terr', 'm.bin'),
+      at('lib', 'side.js'),
+      path.join(outside, 'o.txt'),
+    ];
+    const spellings = [
+      ...files.flatMap(fileStreams),
+      ...through(root, 'ro', 'h.bin'),
+      ...through(at('terr'), 't.txt'),
+      ...through(path.dirname(root), path.basename(root), 'ro', 'h.bin'),
+      at('ro', 'x:stream'),
+    ];
+    await refusesEach(FILE_READS, spellings);
+    const dirs = [
+      ...dirStreams(root),
+      ...dirStreams(at('ro')),
+      ...dirStreams(at('terr')),
+      ...dirStreams(path.dirname(root)),
+      ...through(root, 'rw'),
+    ];
+    await refusesEach(DIR_READS, dirs);
+    for (const p of [...spellings, ...dirs]) {
+      assert.equal(fs.existsSync(p), false, p);
+    }
+    assert.deepEqual(native.calls, []);
+  });
+
+  it('writes, removals and metadata: EACCES, nothing changes', async () => {
+    native.calls.length = 0;
+    const files = [
+      ...fileStreams(at('rw', 'w.txt')),
+      ...fileStreams(at('ro', 'a.txt')),
+      ...fileStreams(at('v', 'x.txt')),
+      ...through(root, 'rw', 'n.txt'),
+      at('rw', 'x:stream'),
+      `${path.join(outside, 'o.txt')}:s`,
+    ];
+    await refusesEach(FILE_MUTATIONS, files);
+    const dirs = [
+      ...dirStreams(at('rw')),
+      ...through(root, 'rw', 'd'),
+      ...dirStreams(root),
+    ];
+    await refusesEach(DIR_MUTATIONS, dirs);
+    assert.deepEqual(native.calls, []);
+    assert.equal(readDisk(at('rw', 'w.txt'), 'utf8'), 'w');
+    assert.equal(readDisk(at('ro', 'a.txt'), 'utf8'), 'raw');
+    assert.deepEqual(listDisk(at('rw')), ['w.txt']);
+    assert.equal(onDisk(`${at('rw', 'w.txt')}:s`), false);
+    assert.equal(onDisk(`${path.join(outside, 'o.txt')}:s`), false);
+    assert.deepEqual(k.fs('v').readdir('/'), []);
+  });
+
+  it('copies, renames and links from or to a stream: EACCES, nothing moves', async () => {
+    native.calls.length = 0;
+    const w = at('rw', 'w.txt');
+    await refusesPairs([
+      [`${w}::$DATA`, at('rw', 'z.txt')],
+      [path.join(`${root}::$INDEX_ALLOCATION`, 'ro', 'h.bin'), outside],
+      [`${at('terr', 't.txt')}::$DATA`, path.join(outside, 't.txt')],
+      [`${path.join(outside, 'o.txt')}::$DATA`, path.join(outside, 'p.txt')],
+      [__filename, `${w}:s`],
+      [__filename, path.join(`${root}::$INDEX_ALLOCATION`, 'rw', 'i.txt')],
+    ]);
+    assert.deepEqual(native.calls, []);
+    assert.equal(readDisk(w, 'utf8'), 'w');
+    assert.deepEqual(listDisk(at('rw')), ['w.txt']);
+    assert.deepEqual(listDisk(outside), ['o.txt']);
+  });
+
+  it('require and import: not found, never loaded', async () => {
+    const side = at('lib', 'side.js');
+    const sides = [...fileStreams(side), ...through(root, 'lib', 'side.js')];
+    for (const form of sides) {
+      assert.throws(() => require(form), {
+        code: 'MODULE_NOT_FOUND',
+        message: /\(vfs: not published\)/,
+      });
+    }
+    const esm = at('lib', 'e.mjs');
+    for (const form of [`${esm}::$DATA`, ...through(root, 'lib', 'e.mjs')]) {
+      await assert.rejects(import(pathToFileURL(form).href), {
+        code: 'ERR_MODULE_NOT_FOUND',
+        message: /\(vfs: not published\)/,
+      });
+    }
+    assert.equal(globalThis.__smfsSide, undefined);
+    assert.equal(globalThis.__smfsEsm, undefined);
+    assert.equal(require(side), 'prepared');
+  });
+
+  it('a relative stream, through the cwd, is refused too', () => {
+    native.calls.length = 0;
+    const cwd = process.cwd();
+    process.chdir(at('terr'));
+    try {
+      for (const p of ['t.txt::$DATA', 'm.bin:s', '..\\ro\\h.bin::$DATA']) {
+        assert.throws(() => fs.readFileSync(p), refused('EACCES', 'open', p));
+      }
+    } finally {
+      process.chdir(cwd);
+    }
+    assert.deepEqual(native.calls, []);
+  });
+
+  it('the facade serves no disk-territory file behind a stream', () => {
+    const terr = k.fs('terr');
+    for (const key of ['/t.txt::$DATA', '/m.bin::$DATA', '/m.bin:s']) {
+      assert.equal(terr.readFile(key), null, key);
+      assert.equal(terr.stat(key), null, key);
+      assert.equal(terr.exists(key), false, key);
+    }
+    assert.equal(terr.readFile('/m.bin', 'utf8'), 'media');
+  });
+});
+
+describe(
+  'Windows, without strict: stream spellings pass through as before',
+  { skip: NAMESPACES },
+  () => {
+    let root;
+    let k;
+    const at = (...p) => path.join(root, ...p);
+
+    before(async () => {
+      root = writeTree(tmpDir('streams-open'), STREAM_TREE);
+      k = await kernel(root, STREAM_PLACES, {}, { preparers: PREPARERS });
+      fsPatch.install(k);
+    });
+
+    after(() => {
+      fsPatch.uninstall();
+      k.close();
+      rm(root);
+    });
+
+    it('node:fs reads what the path names: the raw file behind a stream', (t) => {
+      const main = `${at('terr', 't.txt')}::$DATA`;
+      if (!onDisk(main)) {
+        t.skip('the temporary directory keeps no NTFS streams');
+        return;
+      }
+      assert.equal(fs.readFileSync(main, 'utf8'), 'raw');
+      const hidden = path.join(`${root}::$INDEX_ALLOCATION`, 'ro', 'h.bin');
+      assert.equal(fs.readFileSync(hidden, 'utf8'), 'hidden');
+      assert.throws(() => fs.readFileSync(at('ro', 'h.bin')), {
+        code: 'EACCES',
+      });
+    });
+
+    it('the facade serves no disk-territory file behind a stream', () => {
+      const terr = k.fs('terr');
+      for (const key of ['/t.txt::$DATA', '/m.bin::$DATA']) {
+        assert.equal(terr.readFile(key), null, key);
+        assert.equal(terr.stat(key), null, key);
+      }
+      assert.equal(terr.readFile('/t.txt', 'utf8'), 'RAW');
+    });
+  },
+);
