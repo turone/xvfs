@@ -234,6 +234,29 @@ process, the pair of `instance` and version does not. A map place's
 content is each thread's own: a count per thread would give one file a
 different version in each.
 
+**A publication is announced where it is applied: `VfsKernel` is an
+`EventEmitter`, and `#apply` — the one code of the main thread and of a
+worker — turns an update of a newer version into one `'publish'` event:
+its version and the source keys it created, replaced and removed, by
+place, deep-frozen. `#announce` emits it in a microtask of its own, which
+drops it once `close()` has come; `close()` emits `'close'` once, in a
+microtask, then drops every listener. The lists are built only when
+there is a listener. No `'error'` is ever emitted; what a listener throws
+is an uncaught exception.** _Why:_ an application reacts to what was
+published — a cache keyed by version, a route table, a worker waiting for
+a write — and a raw `fs.watch` reports disk events, not publications, of
+disk-origin places only. Built in `#apply`, an event is the same in every
+thread and follows the order of the updates; a relocation, of the same
+version, is none. A microtask runs no application code inside the commit
+— a listener that closes the kernel, writes or throws does so after it —
+and still runs before the continuation of the mutation's promise, which
+settles later in the same queue: its listeners have run when
+`await writeFile()` returns; `process.nextTick` from a microtask would
+run after all of them. Strings and numbers hold no shared bytes, so a
+listener delays no free. A listener's error is the application's, as
+with any Node emitter: logging it would hide it, and the publication is
+done by then.
+
 **Watcher epochs run strictly one at a time, in arrival order
 (`SerialQueue`); rechecks use the same queue.** _Why:_ epochs processed in
 parallel let an older epoch publish over a newer one (new content on disk,
@@ -1194,6 +1217,12 @@ workers call `attach()`.** _Why:_ preloads do not run in worker threads.
 | A clock or random ids as versions                                                                               | a clock repeats; neither orders commits nor names one             |
 | The version in `stat()`                                                                                         | `VfsStats` stands in for `fs.Stats`, which the patch returns      |
 | A version per thread for the files of a map place                                                               | one file, another version in each thread: a false ETag match      |
+| Emitting `'publish'` inside `#flush`                                                                            | application code inside the commit; init's before it is ready     |
+| Emitting `'publish'` with `process.nextTick`                                                                    | runs after the mutation's promise has settled                     |
+| A separate `kernel.events` emitter, an `EventTarget`, `subscribe(fn)`                                           | a second object; no `events.on` / `once`; not the Node idiom      |
+| Entries, stats or views in an event                                                                             | a listener would hold shared bytes, or read stale ones            |
+| Replaying the current state to a new listener                                                                   | that is `snapshot()` and the reads                                |
+| Logging what a listener throws                                                                                  | hides the application's error; no emitter of Node does it         |
 | IPC per chunk or per pin                                                                                        | pins of current versions must stay local                          |
 | Freeing a retired version on a timeout                                                                          | reuse under a slow reader returns another file's bytes            |
 | Retirement books that free the bytes themselves                                                                 | a free starts a compaction, whose epoch only the kernel commits   |
@@ -1277,6 +1306,10 @@ workers call `attach()`.** _Why:_ preloads do not run in worker threads.
   publishes; a relocation and a commit that publishes nothing change
   neither. An entry has the same version in every thread, and never a
   wall-clock time or a `retireId`.
+- `'publish'` is emitted once per publication a thread applies, after the
+  commit, in the order of the versions; never for a relocation, never
+  once `close()` has returned. An event holds no shared bytes; `'close'`
+  comes once, last.
 - Companions never appear in `readdir`, `exists`, routing or the patched fs;
   `Place.companions(key)` enumerates them — never hand-roll key lists.
 - Kernel-internal disk I/O (kernel, the publication sink, watch pipeline,
@@ -1368,7 +1401,9 @@ stat        { size, mtimeMs } (+ sourceSize, encoding for compressed companions)
   `k.watchQueue.idle`, observe publication on the main side
   (`k.nextUpdateId`, `k.acks`, `k.retired`, `k.retirements()`), and use
   in-thread links (`test/helpers.js`: `tap`, `worker`, `nextMessage`)
-  instead of timers. Tests over real `fs.watch` events or real workers wait
+  instead of timers. A `'publish'` event is the point where a commit is
+  observed — in a worker, where its update was applied — without polling
+  the projection. Tests over real `fs.watch` events or real workers wait
   only for a condition to become true (`until`); nothing sleeps to prove
   that something did not happen. A test that reads what a port delivered
   waits for that message (`nextMessage`, or `until` over the messages),
