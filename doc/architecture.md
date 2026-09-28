@@ -751,8 +751,8 @@ raw bytes and miss virtual entries.
   `appRoot`, `disk` / `node-default` places, disk-territory files,
   unmanaged paths without strict; and the guarded APIs (`chmod`, `chown`,
   `utimes`, `truncate`, `symlink`, `readlink`, `statfs`, `watchFile`,
-  `rmdir`, `glob`, and `open` — or `readFile` — with a flag that writes)
-  once every path argument is routed.
+  `rmdir`, `mkdtemp`, `glob`, and `open` — or `readFile` — with a flag
+  that writes) once every path argument is routed.
 
 _Why:_ an application must be able to tell which calls the VFS serves, which
 it refuses and which belong to the operating system — and a new API must
@@ -912,10 +912,17 @@ is checked (`PlaceRegistry.encloses`), so unrelated paths pay nothing.
 
 **APIs the patch does not implement are guarded passthrough; a guarded
 mutation in a virtual place is `ENOTSUP`, and so is `open()` of a virtual
-entry.** _Why:_ an unimplemented API must not become a bypass; only its
-store changes a virtual place — a native `copyFile` into one left a stray
-disk file the place never showed; SAB / Map entries have no file
-descriptor.
+entry. `mkdtemp` (its disposable forms too) is a guarded mutation of the
+directory it makes: its prefix and the six characters it appends, the
+path `node:fs` names — with `XXXXXX` — in its errors.** _Why:_ an
+unimplemented API must not become a bypass; only its store changes a
+virtual place — a native `copyFile` into one left a stray disk file the
+place never showed; SAB / Map entries have no file descriptor. Unpatched,
+`mkdtemp` made directories in read-only and virtual places, and under
+strict anywhere below `appRoot`; routed by its prefix alone,
+`mkdtemp(appRoot/ro)` would be a mutation of place `ro`, while it makes
+`roXXXXXX` next to it. A virtual place's directories are implicit, so a
+temporary one would not exist once made.
 
 **A descriptor is the raw file. `open` routes its path as `readFile` does
 for what the descriptor can read — a flag with `r`, `+` or `O_RDWR`, or
