@@ -80,6 +80,7 @@ SAB segments ──────────── one physical copy ────
 | `lib/stats.js`, `lib/errors.js` | `VfsStats` / `VfsDirent`, a listing's result (`listing()`); node:fs-shaped errors                                                                         |
 | `lib/adapters/fs-patch.js`      | table-driven `node:fs` patch executing router decisions: the operation cores and their variants, guards, glob, watch, the strict root's listing, install  |
 | `lib/adapters/fs-copy.js`       | the copy engine of the patch: a copy's options, the source's raw input, the write through the destination — its store or the disk                         |
+| `lib/adapters/fs-surface.js`    | every export of `node:fs` and `node:fs/promises` the patch knows, and what it does with each: implemented, guarded, delegated, path-free                  |
 | `lib/adapters/fs-dir.js`        | `VfsDir`: the `fs.Dir` of the patch's `opendir`, over a listing taken when the directory is opened, with the `node:fs` close semantics                    |
 | `lib/adapters/module-hook.js`   | `module.registerHooks` resolve/load + `_compile` cached data                                                                                              |
 | `lib/bootstrap/*`               | `register.mjs` (main thread, `--import`), `attach.js` (workers)                                                                                           |
@@ -758,6 +759,40 @@ _Why:_ an application must be able to tell which calls the VFS serves, which
 it refuses and which belong to the operating system — and a new API must
 join a group deliberately, never by default.
 
+**The patch knows every export of `node:fs` and `node:fs/promises` of the
+supported releases, a function an export carries (`.native`) included,
+and what it does with each (`lib/adapters/fs-surface.js`): implemented,
+guarded, delegated — not wrapped, every disk access it makes going through
+patched functions of the public `node:fs` (`createWriteStream` and the
+stream classes open through `fs.open`, `exists` asks `fs.access`,
+`unwatchFile` makes none) — or path-free (descriptors, handles, classes
+over them, constants). Under strict, `install()` replaces any other
+function with one that refuses every call before it runs: `ENOTSUP`, the
+function as `syscall` (`fs.x`, `fs.promises.x`, `fs.readFile.x`), a
+rejection from `node:fs/promises`, a throw from `node:fs`; the function an
+unknown accessor gives is refused when it is read, and every function an
+unknown function carries with it (`FsRouter.unknown`). Without strict
+nothing it does not know changes. What strict cannot hold fails
+`install()`, which undoes what it did: an unknown export it cannot
+replace, and an unknown object, plain or behind an accessor, which it
+reads once to see — a namespace of functions no table knows, as
+`node:fs/promises` is one.** _Why:_ Node
+adds path-taking functions (`openAsBlob`, `glob`, the disposable
+`mkdtemp`, `Utf8Stream`, `realpath.native`, `openAsBlobSync` in 26.10);
+one the patch did not know reached the disk past routing — a silent
+strict bypass after an upgrade.
+Whether an unknown function takes a path cannot be told at run time
+without guessing its signature from its name or its arguments, and a
+wrong guess is a bypass; the form of its refusal follows its module,
+never its name. A test holds the list to the running Node — a release
+with a new export fails it until the export is classified — and holds
+each delegated export to the patch on a hidden path, so a release that
+made one reach the disk natively fails it too. Refusing strict itself on
+a Node with an unknown export would stop every strict application for an
+export perhaps path-free; refusing the function stops only its callers.
+Without strict the routing is a cache policy, not a boundary, and an
+application keeps the whole of its Node.
+
 **Every listing comes from the places: `opendir` is implemented, not
 guarded — a `Dir` over the entries `readdir` lists, taken when it is
 opened, with the `node:fs` close semantics.** That `Dir` is `VfsDir`
@@ -1133,6 +1168,8 @@ workers call `attach()`.** _Why:_ preloads do not run in worker threads.
 | A descriptor that reads and writes (`+`) a published disk-origin entry                                          | it reads the raw file where `readFile` gives the prepared content |
 | Preloading rimraf when the package is imported                                                                  | races a synchronous `install()`; disk I/O on every import         |
 | An asynchronous rimraf preload that `initialize()` waits for                                                    | a worker's `attach()` installs the patch before it could load     |
+| Telling by its name or its arguments whether an unknown `node:fs` function takes a path                         | a wrong guess is a strict bypass                                  |
+| Refusing strict on a Node whose `node:fs` has an unknown export                                                 | stops every application for an export perhaps path-free           |
 | Standalone place-level `script` domain, provider `memory`, `vfs:` URLs, metawatch, root-level `ext` / `compile` | superseded by the place / domain model; no aliases                |
 
 ## Invariants
@@ -1178,11 +1215,15 @@ workers call `attach()`.** _Why:_ preloads do not run in worker threads.
   from the public `node:fs` when it first loads): `install()` runs it
   before it replaces anything, in every thread; remove it only when every
   supported Node line removes a tree natively.
-- `install()` records every replaced `node:fs` property and `uninstall()`
-  restores them in reverse; a `.native` variant is routed as its function
-  is and restored with it; with no
-  kernel installed, and inside the native section, a wrapper is its
-  original.
+- `install()` records every replaced `node:fs` property — an accessor by
+  its descriptor — and `uninstall()` restores them in reverse; a `.native`
+  variant is routed as its function is and restored with it, any other
+  function an export carries stays on its replacement; an `install()`
+  that fails half-way undoes itself; with no kernel installed, and inside
+  the native section, a wrapper is its original.
+- Every export of `node:fs` and `node:fs/promises`, and every function
+  one carries, is in the table of `lib/adapters/fs-surface.js`; under
+  strict, any other function is refused at every call before it runs.
 - Listings are sorted and deduplicated by string name — the key's `/`
   form — before any separator or encoding is applied; only the patch asks
   for `path.sep`.
@@ -1287,6 +1328,14 @@ stat        { size, mtimeMs } (+ sourceSize, encoding for compressed companions)
   (`closeAtRest()`). `test/at-rest.test.js` runs every refusal and failure
   of the mutations, main thread and worker, facade and `node:fs`, a failed
   `initialize()` and a failed watcher publication through both.
+- `test/fs-surface.test.js` holds the table of `lib/adapters/fs-surface.js`
+  to the running Node: every export known, every export the table requires
+  there (but those some supported release lacks), what install() replaces
+  exactly what it calls implemented or guarded. Functions planted where a
+  new release would add them — in `node:fs`, in `node:fs/promises`, behind
+  an accessor, carried by an export — are refused under strict and left
+  alone without it; a delegated export is refused on a hidden path through
+  the patch it goes through.
 - Prove V8 cached-data acceptance in a worker: the per-isolate compilation
   cache masks `cachedDataRejected` in the compiling thread.
 - `npm ci` must work without git or SSH access: git dependencies are pinned
