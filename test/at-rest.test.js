@@ -19,6 +19,7 @@ const {
   activeResources,
   closeAtRest,
   until,
+  within,
 } = require('./helpers.js');
 
 // A failure, and a refusal, leave nothing behind: no allocation, no queued
@@ -333,11 +334,14 @@ describe('a kernel at rest after failures', () => {
         workerData: { vfs, from: path.join(outside, 'o.txt') },
         transferList,
       });
-      const report = await new Promise((resolve, reject) => {
-        thread.once('message', resolve);
-        thread.once('error', reject);
-        thread.once('exit', (code) => reject(new Error(`exit ${code}`)));
-      });
+      const report = await within(
+        new Promise((resolve, reject) => {
+          thread.once('message', resolve);
+          thread.once('error', reject);
+          thread.once('exit', (code) => reject(new Error(`exit ${code}`)));
+        }),
+        'the report of the worker',
+      );
       assert.deepEqual(report, {
         codes: [
           'ENOTDIR',

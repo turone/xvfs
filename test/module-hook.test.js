@@ -189,7 +189,7 @@ describe('module-hook: CommonJS', () => {
 describe('module-hook: bytecode accepted across isolates', () => {
   it('a worker attached to the snapshot compiles with cached data V8 does not reject', async () => {
     const { Worker } = require('node:worker_threads');
-    const { until } = require('./helpers.js');
+    const { until, within } = require('./helpers.js');
     const root = writeTree(tmpDir('modhook-worker'), {
       'lib/m.js': 'module.exports = [1, 2, 3].map((x) => x * 2);',
     });
@@ -225,7 +225,7 @@ describe('module-hook: bytecode accepted across isolates', () => {
       await until(() => message || errors.length);
       assert.deepEqual(errors, []);
       assert.deepEqual(message, { result: [2, 4, 6], seen: [false] });
-      await exited;
+      await within(exited, 'the exit of the worker');
     } finally {
       await worker?.terminate();
       k.close();

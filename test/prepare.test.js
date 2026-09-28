@@ -24,6 +24,7 @@ const {
   worker,
   nextMessage,
   until,
+  within,
 } = require('./helpers.js');
 
 // `prepare` is declared by one domain (fs, require, import) and prepares the
@@ -583,7 +584,10 @@ describe('prepare pipeline: every consumer sees the canonical content', () => {
         `,
         { eval: true, workerData: { vfs }, transferList },
       );
-      const [message] = await once(thread, 'message');
+      const [message] = await within(
+        once(thread, 'message'),
+        'the answer of the worker',
+      );
       assert.deepEqual(message, { value: 'PREPARED', seen: [false] });
     } finally {
       await thread?.terminate();

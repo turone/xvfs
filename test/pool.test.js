@@ -3,6 +3,7 @@
 const { describe, it } = require('node:test');
 const assert = require('node:assert/strict');
 const { pool } = require('../lib/pool.js');
+const { within } = require('./helpers.js');
 
 // pool() runs at most `limit` calls at a time. Every call waits for a gate
 // the test opens, so what has started is decided by the gates alone.
@@ -55,7 +56,7 @@ describe('pool', () => {
     await turn();
     assert.deepEqual(started, [0, 1, 2, 3, 4, 5]);
     for (const gate of gates) gate.resolve();
-    await done;
+    await within(done, 'the pool, every gate open');
     assert.equal(peak(), 3, 'never more than the limit');
     assert.deepEqual(
       calls,

@@ -99,20 +99,40 @@ const worker = (k, options = {}) => {
   return { id, kernel: w, port: vfs.port, main: k.links.get(id) };
 };
 
-// Resolves with the next `event` of `emitter`, after every listener
-// registered before this call (the kernel's own come first). The kernel
-// unrefs its link ports, and Node 22 ends an event loop that has nothing
-// else to run before a port event arrives: a timer holds it meanwhile.
-const nextEvent = (emitter, event) =>
-  new Promise((resolve) => {
-    const hold = setInterval(() => {}, 2 ** 30);
-    emitter.once(event, (value) => {
-      clearInterval(hold);
-      resolve(value);
-    });
-  });
+// Waits are bounded: what the code under test never reaches — a gate, an
+// event, a queue gone idle — fails the test within WAIT ms instead of
+// hanging it, which node --test would do without a word.
+const WAIT = 10_000;
 
-const nextMessage = (port) => nextEvent(port, 'message');
+// Settles as `promise` does, or rejects once `ms` have passed, naming
+// `what` it waited for. Its timer holds the event loop meanwhile.
+const within = (promise, what, ms = WAIT) => {
+  let late = null;
+  const deadline = new Promise((resolve, reject) => {
+    late = setTimeout(() => {
+      reject(new Error(`${what}: still pending after ${ms} ms`));
+    }, ms);
+  });
+  return Promise.race([promise, deadline]).finally(() => clearTimeout(late));
+};
+
+// Resolves with the next `event` of `emitter`, after every listener
+// registered before this call (the kernel's own come first); rejects when
+// none comes within `ms`. The kernel unrefs its link ports, and Node 22
+// ends an event loop that has nothing else to run before a port event
+// arrives: the deadline's timer holds it meanwhile.
+const nextEvent = (emitter, event, ms = WAIT) => {
+  let listener = null;
+  const next = new Promise((resolve) => {
+    listener = resolve;
+    emitter.once(event, resolve);
+  });
+  return within(next, `the next '${event}'`, ms).finally(() => {
+    emitter.off(event, listener);
+  });
+};
+
+const nextMessage = (port, ms) => nextEvent(port, 'message', ms);
 
 // The bytes of a main kernel's pool in allocations that neither a published
 // entry nor a retired version accounts for: what a failed publication left
@@ -273,6 +293,8 @@ module.exports = {
   worker,
   nextEvent,
   nextMessage,
+  within,
+  WAIT,
   diskCalls,
   leakedBytes,
   turn,

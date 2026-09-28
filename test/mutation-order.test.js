@@ -4,7 +4,7 @@ const { describe, it } = require('node:test');
 const assert = require('node:assert/strict');
 const { Worker } = require('node:worker_threads');
 const path = require('node:path');
-const { tmpDir, rm, kernel, until } = require('./helpers.js');
+const { tmpDir, rm, kernel, until, within } = require('./helpers.js');
 
 // Per-key mutation ordering on sab+virtual places: every scenario is a
 // deterministic assertion, not a printed log.
@@ -61,8 +61,9 @@ describe('mutation ordering: same key', () => {
       // Give B every chance to race ahead before releasing A.
       await new Promise((r) => setImmediate(r));
       assert.equal(order.length, 0, 'neither has published yet');
+      assert.equal(first, false, "A's publication is at its gate");
       gateA.resolve();
-      await Promise.all([a, b]);
+      await within(Promise.all([a, b]), 'A and B, the gate open');
       assert.deepEqual(order, ['A', 'B']);
       assert.equal(v.readFile('/g.txt', 'utf8'), 'B');
     } finally {
@@ -230,11 +231,14 @@ describe('mutation ordering: same key', () => {
         });
       w1 = spawn();
       w2 = spawn();
-      await Promise.all([ready(w1), ready(w2)]);
-      const [r1, r2] = await Promise.all([
-        ask(w1, { key: '/shared.txt', data: 'from-1' }),
-        ask(w2, { key: '/shared.txt', data: 'from-2' }),
-      ]);
+      await within(Promise.all([ready(w1), ready(w2)]), 'both workers ready');
+      const [r1, r2] = await within(
+        Promise.all([
+          ask(w1, { key: '/shared.txt', data: 'from-1' }),
+          ask(w2, { key: '/shared.txt', data: 'from-2' }),
+        ]),
+        'both writes answered',
+      );
       assert.equal(r1.ok, true);
       assert.equal(r2.ok, true);
       const v = k.fs('v');
@@ -283,8 +287,11 @@ describe('mutation ordering: independent keys', () => {
       const fast = v.writeFile('/fast.txt', 'y').then(() => order.push('fast'));
 
       // Prove /fast.txt is fully published and its Promise settled while
-      // /slow.txt is still gated — not just that both eventually finish.
-      await fast;
+      // /slow.txt is still gated — not just that both eventually finish. A
+      // queue that held /fast.txt behind it would not hang the test: fast
+      // is waited for within a deadline.
+      await within(fast, '/fast.txt, while /slow.txt is at its gate');
+      assert.equal(first, false, "/slow.txt's publication is at its gate");
       assert.deepEqual(
         order,
         ['fast'],
@@ -294,7 +301,7 @@ describe('mutation ordering: independent keys', () => {
       assert.equal(v.exists('/slow.txt'), false, 'slow is still unpublished');
 
       gateSlow.resolve();
-      await slow;
+      await within(slow, '/slow.txt, its gate open');
       assert.deepEqual(order, ['fast', 'slow']);
       assert.equal(v.readFile('/slow.txt', 'utf8').length, 64 * 1024);
     } finally {
@@ -431,17 +438,22 @@ describe('mutation ordering: rename and rm coordination', () => {
       const v = k.fs('v');
       await v.writeFile('/d/one.txt', '1');
       const gate = Promise.withResolvers();
+      let atGate = false;
       const original = k.publishVirtual.bind(k);
       k.publishVirtual = async (place, key, raw) => {
-        if (key === '/d/slow.txt') await gate.promise;
+        if (key === '/d/slow.txt') {
+          atGate = true;
+          await gate.promise;
+        }
         return original(place, key, raw);
       };
       const slow = v.writeFile('/d/slow.txt', 'slow');
       const removed = v.rm('/d', { recursive: true });
       // Give the removal every chance to run while the write is at its gate.
       await new Promise((r) => setImmediate(r));
+      assert.equal(atGate, true, 'the write is at its gate');
       gate.resolve();
-      await Promise.all([slow, removed]);
+      await within(Promise.all([slow, removed]), 'the write and the rm');
       assert.equal(v.exists('/d'), false, 'the write in flight went with it');
       assert.equal(k.mutations.size, 0);
     } finally {
@@ -459,9 +471,13 @@ describe('mutation ordering: rename and rm coordination', () => {
       const v = k.fs('v');
       await v.writeFile('/x', 'x');
       const gate = Promise.withResolvers();
+      let atGate = false;
       const original = k.publishVirtual.bind(k);
       k.publishVirtual = async (place, key, raw) => {
-        if (key === '/y') await gate.promise;
+        if (key === '/y') {
+          atGate = true;
+          await gate.promise;
+        }
         return original(place, key, raw);
       };
       // Asked while /x is a file, the rename waits for the unlink of /x and
@@ -469,13 +485,17 @@ describe('mutation ordering: rename and rm coordination', () => {
       const held = v.writeFile('/y', 'y');
       const gone = v.unlink('/x');
       const moved = v.rename('/x', '/y');
-      await gone;
-      await v.writeFile('/x/a', 'a');
+      await within(gone, 'the unlink of /x, with /y at its gate');
+      await within(v.writeFile('/x/a', 'a'), 'the write of /x/a');
+      assert.equal(atGate, true, 'the write of /y is at its gate');
       gate.resolve();
-      await held;
-      const err = await moved.then(
-        () => null,
-        (error) => error,
+      await within(held, 'the write of /y, its gate open');
+      const err = await within(
+        moved.then(
+          () => null,
+          (error) => error,
+        ),
+        'the rename',
       );
       assert.equal(err?.code, 'ENOENT');
       assert.equal(err.syscall, 'rename');
@@ -561,10 +581,13 @@ describe('mutation lifecycle and cleanup', () => {
       });
       const messages = [];
       worker.on('message', (m) => messages.push(m));
-      await new Promise((resolve, reject) => {
-        worker.once('exit', resolve);
-        worker.once('error', reject);
-      });
+      await within(
+        new Promise((resolve, reject) => {
+          worker.once('exit', resolve);
+          worker.once('error', reject);
+        }),
+        'the exit of the worker',
+      );
       assert.deepEqual(
         messages,
         ['settled'],
@@ -602,12 +625,18 @@ describe('mutation lifecycle and cleanup', () => {
         workerData: { vfs },
         transferList,
       });
-      await new Promise((resolve, reject) => {
-        worker.once('message', resolve);
-        worker.once('error', reject);
-      });
+      await within(
+        new Promise((resolve, reject) => {
+          worker.once('message', resolve);
+          worker.once('error', reject);
+        }),
+        'the worker ready',
+      );
       worker.postMessage('go');
-      await new Promise((resolve) => worker.once('exit', resolve));
+      await within(
+        new Promise((resolve) => worker.once('exit', resolve)),
+        'the exit of the worker',
+      );
       // Give the closed port's 'close' handler a turn to run handleWorkerExit,
       // and the request itself a turn to finish publishing on main.
       await until(() => k.links.size === 0 && k.mutations.size === 0, 2000);

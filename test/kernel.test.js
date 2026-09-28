@@ -20,6 +20,7 @@ const {
   nextEvent,
   diskCalls,
   leakedBytes,
+  within,
 } = require('./helpers.js');
 
 describe('VfsKernel: lifecycle', () => {
@@ -92,15 +93,6 @@ describe('VfsKernel: lifecycle', () => {
       appRoot: big,
       console: quiet,
     });
-    // An init still waiting for the reads held at the gate fails the test
-    // after a deadline instead of hanging it.
-    const within = (promise, ms = 4000) =>
-      new Promise((resolve, reject) => {
-        const late = setTimeout(() => {
-          reject(new Error(`still pending after ${ms} ms`));
-        }, ms);
-        promise.finally(() => clearTimeout(late)).then(resolve, reject);
-      });
     const gate = Promise.withResolvers();
     try {
       const init = k.initialize();
@@ -110,7 +102,12 @@ describe('VfsKernel: lifecycle', () => {
         if (++started === 1) throw new Error('unreadable');
         await gate.promise;
       };
-      await assert.rejects(within(init), /unreadable/);
+      // An init still waiting for the reads held at the gate fails the test
+      // after a deadline instead of hanging it.
+      await assert.rejects(
+        within(init, 'initialize(), its reads at the gate'),
+        /unreadable/,
+      );
       assert.equal(k.state, 'closed');
       assert.ok(started <= limit, `${started} reads started, limit ${limit}`);
     } finally {
@@ -191,7 +188,7 @@ describe('VfsKernel: lifecycle', () => {
           const atClose = calls.count;
           const inFlight = reads.length;
           await assert.rejects(
-            init,
+            within(init, `${what}: initialize()`),
             { message: '[vfs] kernel closed before publication' },
             what,
           );

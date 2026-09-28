@@ -14,6 +14,7 @@ const {
   worker,
   nextMessage,
   quiet,
+  within,
 } = require('./helpers.js');
 
 // kernel.diagnostics(): what the shared memory holds and why, as of the
@@ -410,8 +411,8 @@ describe('VfsKernel: diagnostics', () => {
       mutations.push(v.rm('/d', { recursive: true, force: true }));
       assert.deepEqual(queues().mutations, { keys: 0, barriers: 1 });
       gate.resolve();
-      await Promise.all(mutations);
-      await k.watchQueue.idle;
+      await within(Promise.all(mutations), 'the mutations, their gate open');
+      await within(k.watchQueue.idle, 'the epochs, their gate open');
       // Each lock goes once the task it stands for has settled.
       await new Promise(setImmediate);
       assert.deepEqual(queues(), {

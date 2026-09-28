@@ -13,6 +13,7 @@ const {
   kernel,
   worker,
   leakedBytes,
+  within,
 } = require('./helpers.js');
 
 // Bytecode flavors: fs.script.compile (bare vm.Script, PlaceFs.script()) and
@@ -28,11 +29,14 @@ const wrap = {
 };
 
 const runInWorker = (code, workerData, transferList) =>
-  new Promise((resolve, reject) => {
-    const worker = new Worker(code, { eval: true, workerData, transferList });
-    worker.once('message', resolve);
-    worker.once('error', reject);
-  });
+  within(
+    new Promise((resolve, reject) => {
+      const worker = new Worker(code, { eval: true, workerData, transferList });
+      worker.once('message', resolve);
+      worker.once('error', reject);
+    }),
+    'the answer of the worker',
+  );
 
 describe('bytecode flavors: coexistence', () => {
   it('only fs.script.compile is configured: only the script companion exists', async () => {

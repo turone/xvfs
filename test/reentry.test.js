@@ -16,6 +16,7 @@ const {
   drain,
   quiet,
   diskCalls,
+  within,
 } = require('./helpers.js');
 
 // The disk as it is, behind the patch: captured before any install.
@@ -681,11 +682,14 @@ describe("Node's rimraf keeps the node:fs it first loads with", () => {
         workerData: { vfs, site: at() },
         transferList,
       });
-      const result = await new Promise((resolve, reject) => {
-        thread.once('message', resolve);
-        thread.once('error', reject);
-        thread.once('exit', (code) => reject(new Error(`exit ${code}`)));
-      });
+      const result = await within(
+        new Promise((resolve, reject) => {
+          thread.once('message', resolve);
+          thread.once('error', reject);
+          thread.once('exit', (code) => reject(new Error(`exit ${code}`)));
+        }),
+        'the removals of the worker',
+      );
       assert.deepEqual(result, {
         loadedBefore: false,
         loadedAtAttach: true,

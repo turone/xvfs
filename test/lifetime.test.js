@@ -15,6 +15,7 @@ const {
   worker,
   nextEvent,
   nextMessage,
+  within,
 } = require('./helpers.js');
 
 // Lifetime of shared allocations: a direct consumer (stream, view lease)
@@ -409,7 +410,7 @@ describe('lifetime: worker exit', () => {
         `,
         { eval: true, workerData: { vfs }, transferList },
       );
-      await once(thread, 'message');
+      await within(once(thread, 'message'), 'the worker reading');
       const acked = nextMessage(port);
       await v.writeFile('/a.txt', 'B'.repeat(64 * 1024));
       await acked;
@@ -527,7 +528,7 @@ describe('lifetime: stream cleanup', () => {
       // Never acknowledges a write: the source pauses on backpressure.
       const sink = new Writable({ highWaterMark: 1, write() {} });
       source.pipe(sink);
-      await once(source, 'pause');
+      await within(once(source, 'pause'), 'backpressure on the source');
       const closed = once(sink, 'close');
       sink.destroy();
       await closed;
