@@ -98,6 +98,7 @@ Main → worker (`link()` port):
 {
   name: 'vfs-update',
   updateId: 7,
+  version: 9, // the kernel's version after this update; a relocation keeps it
   places: {
     static: {
       entries: [
@@ -129,6 +130,30 @@ consumer of that version is done, one `vfs-release` follows. Pinning a
 current version is local bookkeeping: no IPC per chunk, per stream or for
 a version that is never retired while in use. A worker that exits drops
 all its ACKs and holds.
+
+Worker → main, for a mutation of a `sab + virtual` place
+(`lib/mutation-rpc.js`):
+
+```js
+{ name: 'vfs-mutate', id: 3, place: 'scratch', op: 'write', key: '/note.txt',
+  data: Uint8Array, options: { exclusive: false } }
+// writeFiles: { …, op: 'writeFiles', keys, sizes, options, data } — every
+// file's bytes one after another in `data`, `sizes[i]` of them for `keys[i]`
+```
+
+Main → worker, once that mutation is decided:
+
+```js
+{ name: 'vfs-mutated', id: 3, version: 12 }             // published
+{ name: 'vfs-mutated', id: 3, error: { code: 'EROFS', … } } // refused
+```
+
+The response arrives once the new version is already published — the same
+`vfs-update` reaches every linked worker, this one included — never
+before it, and never after every worker has ACKed: ACKs only govern when
+replaced bytes are freed. `writeFiles` is one such request: `version` is
+that of the single commit that published every file of the set, or the
+response carries `error` and nothing is published.
 
 There is no `file-update` / `file-delete`. One `vfs-update` per epoch.
 Source + companions of one file are published together; a companion that

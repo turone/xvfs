@@ -1,7 +1,10 @@
 # xvfs
 
-Pooled SharedArrayBuffer virtual filesystem for Node.js `worker_threads`,
-plus `node:fs` and `module.registerHooks` adapters.
+Extended virtual filesystem for Node.js: places over the application's
+real paths, content prepared once at publication, one shared copy for
+all `worker_threads`, live updates published atomically to every
+thread, and strict routing — through `node:fs` and
+`module.registerHooks` adapters or the explicit `PlaceFs` API.
 
 Files are loaded once on the main thread into pooled SAB segments. Workers
 get zero-copy `Buffer` views over the same memory — no per-worker copies,
@@ -1494,6 +1497,16 @@ Runnable demos under [examples/](examples/):
 - [prepared-scripts/](examples/prepared-scripts/) — `prepare` +
   `fs.script`: handlers prepared once, run in a worker with V8 cached
   data, updated from the worker through `sab + virtual`.
+- [etag/](examples/etag/) — `prepare` computes a per-file ETag in `meta`,
+  the same in every worker; a framework-free `node:http` server answers
+  `If-None-Match` with 304 / 200, live-updated over `sab + virtual`.
+- [ssr/](examples/ssr/) — a template compiler in `prepare`,
+  `fs.script.compile` cached data, `vm.Script` in workers; a live
+  template update reaches already-running workers.
+- [async-worker/](examples/async-worker/) — a worker's heavy async
+  transformation publishes several related files as one atomic
+  `writeFiles`; other workers learn of it only through
+  `kernel.on('publish')`, never a partial set.
 
 Further reading: [doc/integration.md](doc/integration.md) (integration
 notes and recipes), [doc/architecture.md](doc/architecture.md) (design
