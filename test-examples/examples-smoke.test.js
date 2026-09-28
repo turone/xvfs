@@ -18,6 +18,7 @@ const SEA_STATIC_MS = 10000;
 const WORKER_STATIC_MS = 15000;
 const PREPARED_SCRIPTS_MS = 10000;
 const ETAG_MS = 15000;
+const SSR_MS = 10000;
 
 const httpRequest = (url) =>
   new Promise((resolve, reject) => {
@@ -520,6 +521,79 @@ describe('examples smoke', () => {
         assert.equal(other.headers.etag, updated.headers.etag);
         const stale = await httpGet(at(p1), { 'if-none-match': etag1 });
         assert.equal(stale.statusCode, 200);
+      } finally {
+        await stopChild(child);
+      }
+    },
+  );
+
+  it(
+    'ssr example renders prepared templates with cached data and live-updates workers',
+    { timeout: SSR_MS },
+    async () => {
+      const child = spawn(process.execPath, ['examples/ssr/run.js'], {
+        cwd: REPO,
+        env: { ...process.env },
+        stdio: ['ignore', 'pipe', 'pipe'],
+        windowsHide: true,
+      });
+      const output = attachOutput(child);
+      try {
+        const exited = await waitForExit(child, SSR_MS - 1000);
+        const stdout = output.stdout();
+        assert.equal(exited, true, `ssr example timed out\n${stdout}`);
+        assert.equal(child.exitCode, 0, output.stderr() || stdout);
+        assert.equal(output.stderr(), '');
+        const lines = stdout.split(/\r?\n/);
+
+        const round1 = lines.filter((line) => line.includes('round 1:'));
+        const round2 = lines.filter((line) => line.includes('round 2:'));
+        const round3 = lines.filter((line) => line.includes('round 3:'));
+        assert.equal(round1.length, 2, stdout);
+        assert.equal(round2.length, 2, stdout);
+        assert.equal(round3.length, 2, stdout);
+        for (const line of [...round1, ...round2, ...round3]) {
+          assert.match(line, /\(cached data accepted\)$/, stdout);
+        }
+        assert.ok(
+          round1.every((line) =>
+            line.includes('Hello, Ada! You have 3 new messages.'),
+          ),
+          stdout,
+        );
+        assert.ok(
+          round2.every((line) =>
+            line.includes('Welcome back, Ada! Your unread count is 3.'),
+          ),
+          stdout,
+        );
+        // The old (round 1) render does not remain in round 2.
+        assert.ok(!round2.some((line) => line.includes('Hello, Ada!')), stdout);
+
+        // A bad placeholder rejects the whole publication...
+        const rejectedLine = lines.find((line) =>
+          line.startsWith('bad template rejected:'),
+        );
+        assert.ok(rejectedLine, stdout);
+        assert.match(
+          rejectedLine,
+          /"\{\{ 1\.2 \}\}" is not a dotted identifier path/,
+        );
+        // ...and round 2's template is still what every worker renders.
+        assert.ok(
+          round3.every((line) =>
+            line.includes('Welcome back, Ada! Your unread count is 3.'),
+          ),
+          stdout,
+        );
+
+        const bundleLine = lines.find((line) =>
+          line.startsWith('main thread bundle'),
+        );
+        assert.ok(bundleLine, stdout);
+        assert.match(bundleLine, /meta\.template=\/greeting\.tmpl\b/);
+        assert.match(bundleLine, /scriptOptions\.filename=\S*greeting\.tmpl\b/);
+        assert.match(bundleLine, /cachedData=\d+b/);
       } finally {
         await stopChild(child);
       }
