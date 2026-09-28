@@ -453,6 +453,87 @@ describe('bytecode flavors: failure and rollback', () => {
     }
   });
 
+  // Distinct from the case above (a mocked, transient "pool is full"): a
+  // companion that is larger than one segment can never fit, whatever the
+  // pool's state — EFBIG, not ENOSPC. A segment of 64 bytes forces this
+  // for any real script: even the smallest source's V8 cached data is a
+  // few hundred bytes (fixed format overhead), no oversized source needed.
+  // The canonical source itself (well under 64 bytes) always fits, so its
+  // allocation never explains the refusal.
+  it('fs.script.compile flavor larger than one segment is EFBIG, not ENOSPC', async () => {
+    const root = tmpDir('bc-script-toobig');
+    const k = await kernel(
+      root,
+      {
+        v: {
+          origin: 'virtual',
+          fs: {
+            writable: true,
+            ext: ['txt', 'js'],
+            script: { ext: ['js'], compile: true },
+          },
+        },
+      },
+      { memory: { limit: '8 kib', segmentSize: 64, maxFileSize: 64 } },
+    );
+    const w = worker(k);
+    try {
+      const v = k.fs('v');
+      await v.writeFile('/r.txt', 'module.exports = 2;');
+      const updates = k.nextUpdateId;
+      const at = (key) => path.join(root, 'v', key);
+      const reason = 'fs.script.compile: source does not fit in SAB';
+      const refusal = (syscall, from, to) => {
+        const ends = to ? `'${at(from)}' -> '${at(to)}'` : `'${at(from)}'`;
+        return {
+          code: 'EFBIG',
+          errno: -os.constants.errno.EFBIG,
+          syscall,
+          path: at(from),
+          dest: to && at(to),
+          message: `EFBIG: file too large (${reason}), ${syscall} ${ends}`,
+        };
+      };
+      for (const [label, place] of [
+        ['main', v],
+        ['worker', w.kernel.fs('v')],
+      ]) {
+        await assert.rejects(
+          place.writeFile('/h.js', 'module.exports = 1;'),
+          (err) => {
+            assert.deepEqual(shape(err), refusal('open', '/h.js'), label);
+            return true;
+          },
+        );
+        assert.equal(v.exists('/h.js'), false, `${label}: write not published`);
+        await assert.rejects(place.rename('/r.txt', '/r.js'), (err) => {
+          assert.deepEqual(
+            shape(err),
+            refusal('rename', '/r.txt', '/r.js'),
+            label,
+          );
+          return true;
+        });
+        assert.equal(
+          v.exists('/r.js'),
+          false,
+          `${label}: rename not published`,
+        );
+        assert.equal(
+          v.readFile('/r.txt', 'utf8'),
+          'module.exports = 2;',
+          `${label}: source stays`,
+        );
+      }
+      assert.equal(k.nextUpdateId, updates, 'nothing published');
+      assert.equal(leakedBytes(k), 0, 'the source freed');
+    } finally {
+      w.kernel.close();
+      k.close();
+      rm(root);
+    }
+  });
+
   // A rename onto an extension whose script flavor does not compile is
   // refused as the rename: its call, its source and its destination, like
   // every other refusal of a rename — and nothing changes.
