@@ -553,6 +553,89 @@ describe('without strict: links answer as before', () => {
   });
 });
 
+// Under strict a rename that leaves a place moves a regular file only: a
+// directory holding a link out of the place, or a link itself, would turn
+// it into a link into appRoot from outside, which no proof sees; a place's
+// own directory never leaves either.
+describe('strict: what a rename takes out of a place', () => {
+  const RENAMES = PAIRS.filter(([, syscall]) => syscall === 'rename');
+  const MOVE_PLACES = {
+    ro: PLACES.ro,
+    d: PLACES.d,
+    d2: { provider: 'disk', fs: { writable: true } },
+  };
+  const moving = () => {
+    const base = tmpDir('links-move');
+    const root = writeTree(path.join(base, 'app'), {
+      'ro/h.bin': 'hidden',
+      'd/f.bin': 'f',
+      'd/sub/deeper/g.bin': 'g',
+      'd/in/s.bin': 's',
+      'd2/x.bin': 'x',
+    });
+    const outside = writeTree(path.join(base, 'outside'), { 'o.bin': 'o' });
+    const at = (...p) => path.join(root, ...p);
+    linkDir(at('ro'), at('d', 'sub', 'deeper', 'jro'));
+    linkDir(at('d', 'in'), at('d', 'jin'));
+    return { base, root, outside, at };
+  };
+
+  it('a directory or a link: ENOTSUP, nothing moves; a file moves', async () => {
+    const { base, root, outside, at } = moving();
+    const options = { preparers: PREPARERS };
+    const k = await kernel(root, MOVE_PLACES, { strict: true }, options);
+    const native = countNative();
+    fsPatch.install(k);
+    try {
+      const refusals = [
+        [at('d', 'sub'), path.join(outside, 'sub')],
+        [at('d'), path.join(outside, 'd')],
+        [at('d', 'jin'), path.join(outside, 'jin')],
+        [at('d', 'sub'), at('d2', 'sub')],
+      ];
+      for (const [from, to] of refusals) {
+        for (const [call, syscall, run] of RENAMES) {
+          await assert.rejects(
+            async () => run(from, to),
+            refused('ENOTSUP', syscall, from, to),
+            `${call} ${from} -> ${to}`,
+          );
+        }
+      }
+      assert.deepEqual(native.calls, []);
+      assert.deepEqual(listDisk(outside), ['o.bin']);
+      assert.ok(onDisk(at('d', 'sub', 'deeper', 'jro', 'h.bin')));
+      fs.renameSync(at('d', 'f.bin'), path.join(outside, 'f.bin'));
+      assert.equal(readDisk(path.join(outside, 'f.bin'), 'utf8'), 'f');
+      fs.renameSync(at('d', 'sub'), at('d', 'moved'));
+      assert.ok(onDisk(at('d', 'moved', 'deeper', 'g.bin')));
+      const into = writeTree(path.join(outside, 'into'), { 'i.bin': 'i' });
+      fs.renameSync(into, at('d', 'into'));
+      assert.equal(readDisk(at('d', 'into', 'i.bin'), 'utf8'), 'i');
+    } finally {
+      fsPatch.uninstall();
+      native.restore();
+      k.close();
+      rm(base);
+    }
+  });
+
+  it('without strict: as before', async () => {
+    const { base, root, outside, at } = moving();
+    const k = await kernel(root, MOVE_PLACES, {}, { preparers: PREPARERS });
+    fsPatch.install(k);
+    try {
+      fs.renameSync(at('d', 'sub'), path.join(outside, 'sub'));
+      const moved = path.join(outside, 'sub', 'deeper', 'jro', 'h.bin');
+      assert.equal(readDisk(moved, 'utf8'), 'hidden');
+    } finally {
+      fsPatch.uninstall();
+      k.close();
+      rm(base);
+    }
+  });
+});
+
 // A place's directory may itself be a link. Out of appRoot — a media store
 // elsewhere — it is the place's own disk. Into the territory appRoot
 // manages — another place, appRoot, a directory above it — its scan,

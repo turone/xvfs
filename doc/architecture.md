@@ -1159,7 +1159,10 @@ watchers then drop the old canonical entry and publish the new key by the
 policy of its place and extension. A directory moves natively only within
 one disk-origin place; across a place's boundary, as a place's root, or as
 a tree that holds places it is `ENOTSUP` (`FsRouter.rename`: `crossing`,
-`unsupported`).** In a virtual place the store moves an ordinary entry
+`unsupported`). Under strict a rename that leaves any place — a `disk` or
+`node-default` one too — or enters an indexed one moves a regular file
+only (`crossing` with `file`): a directory, the place's own included, or a
+link is `ENOTSUP`.** In a virtual place the store moves an ordinary entry
 atomically and keeps its mtime — the preparer of a new extension runs
 once — and refuses a prepared one (`ENOTSUP`); a directory moves as a
 raw-only subtree (below); across a virtual boundary a rename is `EXDEV`. _Why:_ the raw file is a disk-origin
@@ -1173,7 +1176,11 @@ readable before it moved; strict routing decides which paths are served, and
 a preparer is a publication step, not an access boundary. Within one
 disk-origin place a directory keeps its policy, and the watcher republishes
 its tree; across a boundary it would change the policy of all its
-descendants at once, hidden files included, with nothing routed. A prepared
+descendants at once, hidden files included, with nothing routed. Under
+strict the links of a place's disk are proven where they lie; a directory
+or a link that leaves the place takes them out of it, where a link into
+`appRoot` from outside is seen by nothing — `d\sub` holding
+`deeper\jro` → `ro` moved out of `appRoot` read what `ro` hides. A prepared
 virtual entry has no raw input, and its bundle may embed the old key
 (`scriptOptions.filename`, `meta`, bytecode). A copy and a delete across
 places would not be atomic, and a virtual place is a filesystem of its own.

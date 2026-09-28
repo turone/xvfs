@@ -343,6 +343,38 @@ describe('FsRouter under strict: the disk of a place names the place', () => {
     assert.deepEqual(router.copy('/app/d', true), passthrough);
   });
 
+  // A rename that leaves any place — or enters an indexed one — crosses
+  // under strict, and then moves a regular file only: a directory or a
+  // link would take a link of the place's disk out of it.
+  it('strict: a rename that leaves a place crosses, a regular file only', () => {
+    const { router } = routerOf(true);
+    const crossing = { kind: 'crossing', file: true };
+    const leaving = [
+      ['/app/d/sub', '/elsewhere/sub'],
+      ['/app/d', '/elsewhere/d'],
+      ['/app/d/a', '/app/nd/a'],
+      ['/app/site/x.bin', '/elsewhere/x.bin'],
+      ['/elsewhere/x', '/app/site/x.txt'],
+    ];
+    for (const [from, to] of leaving) {
+      assert.deepEqual(router.rename(from, to), crossing, `${from} ${to}`);
+    }
+    const passthrough = { kind: 'passthrough' };
+    const staying = [
+      ['/app/d/a', '/app/d/b'],
+      ['/elsewhere/x', '/app/d/x'],
+      ['/elsewhere/x', '/elsewhere/y'],
+    ];
+    for (const [from, to] of staying) {
+      assert.deepEqual(router.rename(from, to), passthrough, `${from} ${to}`);
+    }
+    const { router: loose } = routerOf(false);
+    assert.deepEqual(loose.rename('/app/d/sub', '/elsewhere/sub'), passthrough);
+    assert.deepEqual(loose.rename('/app/site/x.bin', '/elsewhere/x.bin'), {
+      kind: 'crossing',
+    });
+  });
+
   // No new link names managed territory under strict: a symbolic link's
   // target, a hard link's file.
   it('strict: a link to managed territory is refused', () => {
