@@ -1,7 +1,9 @@
 // Types of kernel.js: VfsKernel, the orchestrator of the main thread and
 // the projection of a worker. README, "VfsKernel (main thread)",
-// "Diagnostics", "Adapter API" and "VfsKernel (worker)".
+// "Versions", "Publication events", "Diagnostics", "Adapter API" and
+// "VfsKernel (worker)".
 
+import { EventEmitter } from 'node:events';
 import type { MessagePort } from 'node:worker_threads';
 import type { PoolUsage, ProjectedFile, VfsSnapshot } from './cache.js';
 import type {
@@ -172,14 +174,48 @@ export type ModuleResolution =
   | { readonly denied: true }
   | null;
 
+/** What one publication changed in one place: source keys, no companion. */
+export interface PlaceChanges {
+  /** Keys that had no file before. */
+  readonly created: readonly string[];
+  /** Keys whose file it replaced. */
+  readonly replaced: readonly string[];
+  readonly removed: readonly string[];
+}
+
+/**
+ * A publication this thread applied, after its commit: its version and
+ * what it changed, by place. Frozen, strings and numbers only — it holds
+ * no shared bytes; what a key holds now is read through `kernel.fs()`,
+ * and may be newer already.
+ */
+export interface PublishEvent {
+  readonly version: number;
+  readonly places: { readonly [name: string]: PlaceChanges };
+}
+
+/**
+ * The events of a kernel, in every thread: `'publish'` once per
+ * publication it applies, in the order of their versions — shared places
+ * only; `'close'` once, last. Never `'error'`.
+ */
+export interface VfsKernelEvents {
+  publish: [event: PublishEvent];
+  close: [];
+}
+
 /**
  * Main thread: fills the places from their origin through one publication
  * pipeline, watches disk-origin places and sends each epoch as one
  * `vfs-update` to the linked workers, freeing a replaced version only
  * after every worker ACKs and no thread still reads it. Worker thread
  * (`fromSnapshot()`, `attach()`): the same segments projected read-only.
+ * Both emit the events of `VfsKernelEvents`: `'publish'` in a microtask
+ * after the commit — before the promise of the mutation that published
+ * settles — and never once `close()` has returned; a listener that throws
+ * is an uncaught exception.
  */
-export class VfsKernel {
+export class VfsKernel extends EventEmitter<VfsKernelEvents> {
   #private;
   /** Published by `--import shared-memory-fs/register` or `attach()`. */
   static get current(): VfsKernel | null;
@@ -220,6 +256,8 @@ export class VfsKernel {
   /**
    * Final: stops the watcher and every stream (`ERR_VFS_CLOSED`), rejects
    * queued mutations and those still publishing, drops every projection.
+   * The first call emits `'close'` in a microtask, then drops every
+   * listener.
    */
   close(): void;
   /** The `PlaceFs` of an indexed place with an fs domain; throws otherwise. */

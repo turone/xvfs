@@ -52,6 +52,8 @@ is unsupported.
 - **Versions** — every publication has a number, the same in every
   thread: `files.version(key)` for a file, `kernel.version` for the
   published state, `kernel.instance` for the process that owns it.
+- **Publication events** — `kernel.on('publish', …)` in every thread:
+  what each publication changed, once it is committed.
 - **Five providers** — `sab`, `map`, `sea`, `disk`, `node-default`.
 - **Strict routing** — `strict: true` makes `appRoot` the routing
   boundary (a policy, not OS-level isolation).
@@ -706,6 +708,7 @@ published.
 | -------------------- | ------------------------------------------------------------------------------------------------------------------------------------ |
 | `await initialize()` | Scan / SEA / map through the publication pipeline: preparers, bytecode, compression                                                  |
 | `fs(name)`           | `PlaceFs` for an indexed fs place                                                                                                    |
+| `on('publish', fn)`  | What each publication changed, after its commit — [Publication events](#publication-events); `'close'` once, last                    |
 | `version`            | The version of the last publication this thread committed or applied; 0 before the first — [Versions](#versions)                     |
 | `instance`           | The main kernel's random id, the same in every thread linked to it                                                                   |
 | `snapshot()`         | `{ segments, places, version, instance }` — published entries only                                                                   |
@@ -764,6 +767,57 @@ kernel.version; // 9: the last publication this thread has seen
   each publication of the file. One that stays equal for equal content,
   whatever process published it, is a hash of the content, which a
   preparer can compute once and return in `meta`.
+
+#### Publication events
+
+`VfsKernel` is an `EventEmitter`, in the main thread and in every worker
+(`attach()` returns the worker's kernel):
+
+```js
+kernel.on('publish', ({ version, places }) => {
+  for (const [name, { created, replaced, removed }] of Object.entries(places)) {
+    // the source keys of place `name` this publication created, replaced
+    // or removed
+  }
+});
+```
+
+- **`'publish'`** comes once per publication a thread applies — one
+  commit: `initialize()`, a watcher epoch, a mutation of a `sab + virtual`
+  place — with its version and the source keys it changed, by place:
+  `created` (no file there before), `replaced`, `removed`. A rename is its
+  old key `removed` and its new one `created` or `replaced`, in one event;
+  companions are never named. What publishes nothing is not announced,
+  nor is a compaction.
+- **When.** After the commit, in a microtask of its own — never inside
+  it: the index and the projection hold the publication already. On the
+  main thread, and in a worker for its own mutation, the listeners run
+  before the mutation's promise settles. A worker announces an update when
+  it applies it, and ACKs it without waiting for the listeners. Events come
+  in the order of their versions. A listener there before `initialize()`
+  gets the init publication, every key it published; the lists are built
+  only when there is a listener.
+- **What.** A frozen object of strings and numbers — no Buffer, no entry,
+  no view: a listener holds no shared bytes and delays no free. It says
+  what changed; what a key holds is read through `kernel.fs(name)` and may
+  be newer already — compare `files.version(key)` with `event.version`.
+- **Shared places only.** A `map` place is each thread's own: its writes
+  publish nothing and announce nothing.
+- **Errors.** What a listener throws is an uncaught exception, as from any
+  emitter; the publication, its ACK and the mutation's promise are done by
+  then. An async listener's rejection is its own. The kernel never emits
+  `'error'`.
+- **`'close'`** comes once, last, in a microtask after the first
+  `close()`, which then drops every listener. Once `close()` has
+  returned, no `'publish'` listener is called — not even for a
+  publication committed before it. Iterated with
+  `events.on(kernel, 'publish', { close: ['close'] })`, the events end
+  there; `events.on` and `events.once` take an `AbortSignal` too — an
+  `events.once(kernel, 'publish')` still waiting at `close()` never
+  settles without one.
+- Events report publications, whatever their origin — never raw disk
+  events: they are no `fs.watch`, which stays `ENOTSUP` for managed
+  territory in the patched `node:fs`.
 
 #### Diagnostics
 
@@ -859,7 +913,8 @@ code should use `kernel.fs(name)`.
 `attach({ link = workerData.vfs, preparers } = {})` projects the
 snapshot — at its `version`, with the main kernel's `instance` — installs
 hooks the config asks for, applies `vfs-update` from the link port, each
-with its version, and ACKs **those — and only those** — back, with the
+with its version, announcing each publication to its own `'publish'`
+listeners, and ACKs **those — and only those** — back, with the
 retired versions its streams and leases still read. Publishes
 `VfsKernel.current` (also the `kernel` getter of the package's CommonJS
 entry — not an ES module named export: from ESM read `VfsKernel.current`,

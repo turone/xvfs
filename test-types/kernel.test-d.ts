@@ -2,6 +2,7 @@
 // diagnostics(), retirements() and the adapter API, leaf by leaf; what must
 // not compile.
 
+import { EventEmitter, on, once } from 'node:events';
 import { Worker } from 'node:worker_threads';
 import type { MessagePort } from 'node:worker_threads';
 import { VfsConfig, VfsKernel } from 'shared-memory-fs';
@@ -11,9 +12,11 @@ import type {
   DeepReadonly,
   FileStat,
   Place,
+  PlaceChanges,
   Preparer,
   PreparerFile,
   ProjectedFile,
+  PublishEvent,
   ResolvedPlace,
   ScriptOptions,
   VfsRawConfig,
@@ -94,6 +97,40 @@ const main = async () => {
   expectType<VfsKernel | null>()(pkg.kernel);
 };
 void main;
+
+// --- Events ---
+
+const onPublish = (event: PublishEvent) => {
+  expectType<{
+    readonly version: number;
+    readonly places: {
+      readonly [name: string]: {
+        readonly created: readonly string[];
+        readonly replaced: readonly string[];
+        readonly removed: readonly string[];
+      };
+    };
+  }>()(event);
+  for (const [name, changes] of Object.entries(event.places)) {
+    expectType<string>()(name);
+    expectType<PlaceChanges>()(changes);
+  }
+};
+expectType<VfsKernel>()(kernel.on('publish', onPublish));
+kernel.on('publish', (event) => expectType<PublishEvent>()(event));
+kernel.once('close', () => {});
+kernel.off('publish', onPublish);
+expectType<number>()(kernel.listenerCount('publish'));
+const emitter: EventEmitter = kernel;
+void emitter;
+const listen = async () => {
+  const [event] = await once(kernel, 'publish');
+  void event;
+  for await (const [event] of on(kernel, 'publish', { close: ['close'] })) {
+    void event;
+  }
+};
+void listen;
 
 // --- snapshot() and link() into a Worker ---
 
@@ -310,6 +347,18 @@ kernel.fs(config.places[0]);
 kernel.state = 'ready';
 // @ts-expect-error read-only
 kernel.appRoot = '/elsewhere';
+// @ts-expect-error no such event
+kernel.on('published', () => {});
+// @ts-expect-error a 'publish' listener gets the event
+kernel.on('publish', (event: string) => void event);
+// @ts-expect-error 'close' has no argument
+kernel.on('close', (reason: Error) => void reason);
+kernel.on('publish', (event) => {
+  // @ts-expect-error an event is frozen
+  event.version = 0;
+  // @ts-expect-error an event is frozen
+  event.places['static']?.created.push('/x');
+});
 // @ts-expect-error the kernel's own count
 kernel.version = 7;
 // @ts-expect-error the main kernel's id
