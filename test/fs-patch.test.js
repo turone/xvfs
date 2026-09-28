@@ -7,6 +7,7 @@ const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
 const { finished } = require('node:stream/promises');
+const { pathToFileURL } = require('node:url');
 const fsPatch = require('../lib/adapters/fs-patch.js');
 const {
   tmpDir,
@@ -26,6 +27,7 @@ const {
   realpathSync: realpathDisk,
   realpath: realpathDiskCb,
   openAsBlob: openAsBlobDisk,
+  rmdirSync: rmdirDisk,
 } = fs;
 
 // fs-patch executes router decisions; these tests exercise node:fs itself
@@ -1402,6 +1404,230 @@ describe('fs-patch under strict: readFile with a flag that writes', () => {
       detail: 'virtual file',
     });
     assert.equal(readDisk(at('up', 'a.txt'), 'utf8'), 'published');
+  });
+});
+
+// mkdtemp makes a directory named as its prefix and six characters, which
+// node:fs names XXXXXX in its errors. Unpatched, it made one in read-only
+// and virtual places and, under strict, anywhere under appRoot. That path
+// takes the mutation routing, in every form.
+
+// Each form of mkdtemp there is — sync, callback, promise and, from Node
+// 24, the disposable sync and promise forms — over `prefix`: 'made' for a
+// directory made next to the prefix (removed at once, through the remover
+// of a disposable form), or the error; and the asynchronous disk calls of
+// the forms that failed.
+const mkdtempEach = async (prefix) => {
+  // Each form: what it made, and how to remove it.
+  const plain = (dir) => ({ dir, remove: () => rmdirDisk(dir) });
+  const disposable = ({ path: dir, remove }) => ({ dir, remove });
+  const forms = [
+    () => plain(fs.mkdtempSync(prefix)),
+    () =>
+      new Promise((resolve, reject) => {
+        fs.mkdtemp(prefix, (err, dir) => (err ? reject(err) : resolve(dir)));
+      }).then(plain),
+    async () => plain(await fs.promises.mkdtemp(prefix)),
+  ];
+  if (typeof fs.mkdtempDisposableSync === 'function') {
+    forms.push(() => disposable(fs.mkdtempDisposableSync(prefix)));
+  }
+  if (typeof fs.promises.mkdtempDisposable === 'function') {
+    forms.push(async () =>
+      disposable(await fs.promises.mkdtempDisposable(prefix)),
+    );
+  }
+  const outcomes = [];
+  let calls = 0;
+  for (const form of forms) {
+    const count = diskCalls();
+    let made = null;
+    try {
+      made = await form();
+    } catch (err) {
+      outcomes.push(err);
+      calls += count.count;
+      continue;
+    } finally {
+      count.stop();
+    }
+    const named = String(made.dir);
+    const fits = named.startsWith(String(prefix)) && onDisk(named);
+    outcomes.push(fits ? 'made' : `made ${named}`);
+    await made.remove();
+  }
+  return { outcomes, calls };
+};
+
+// Every form refuses `prefix` so, before any disk call, and makes nothing.
+const refusedMkdtemp = async (prefix, expected) => {
+  const parent = path.dirname(`${prefix}XXXXXX`);
+  const before = onDisk(parent) ? listDisk(parent) : null;
+  const { outcomes, calls } = await mkdtempEach(prefix);
+  const where = `${prefix}XXXXXX`;
+  for (const err of outcomes) {
+    const what = `${where}: ${err?.message ?? err}`;
+    assert.ok(err instanceof Error, what);
+    assert.equal(err.code, expected.code, what);
+    assert.equal(err.syscall, 'mkdtemp', what);
+    assert.equal(err.path, where, what);
+    if (expected.detail) {
+      assert.ok(err.message.includes(`(${expected.detail})`), what);
+    }
+  }
+  assert.equal(calls, 0, `${where}: no disk call`);
+  assert.deepEqual(onDisk(parent) ? listDisk(parent) : null, before, where);
+};
+
+// Every form makes its directory natively, and removes it.
+const madeMkdtemp = async (prefix) => {
+  const { outcomes } = await mkdtempEach(prefix);
+  assert.deepEqual(
+    outcomes.map((o) => o.code ?? o),
+    Array(outcomes.length).fill('made'),
+    prefix,
+  );
+};
+
+describe('fs-patch: mkdtemp takes the mutation routing', () => {
+  let root;
+  let outside;
+  let k;
+  const at = (...p) => path.join(root, ...p);
+
+  before(async () => {
+    outside = tmpDir('fspatch-mkdtemp-out');
+    root = writeTree(tmpDir('fspatch-mkdtemp'), {
+      'ro/a.txt': 'published',
+      'site/a.txt': 'published',
+      'drive/d.txt': 'disk',
+    });
+    // The directories of the virtual places exist on disk: node:fs would
+    // make a directory there.
+    fs.mkdirSync(at('v'));
+    fs.mkdirSync(at('m'));
+    k = await kernel(
+      root,
+      {
+        ro: { fs: { ext: ['txt'] } },
+        site: { fs: { ext: ['txt'], writable: true } },
+        drive: { provider: 'disk', fs: true },
+        v: { origin: 'virtual', fs: { writable: true } },
+        m: { provider: 'map', origin: 'virtual', fs: { writable: true } },
+      },
+      { watchTimeout: 60000 },
+    );
+    fsPatch.install(k);
+  });
+
+  after(() => {
+    fsPatch.uninstall();
+    k.close();
+    rm(root);
+    rm(outside);
+  });
+
+  it('a read-only place is EROFS', async () => {
+    await refusedMkdtemp(at('ro', 'tmp-'), { code: 'EROFS' });
+    await refusedMkdtemp(at('drive', 'tmp-'), { code: 'EROFS' });
+    // A Buffer or a file URL names the same place.
+    const forms = [
+      () => fs.mkdtempSync(Buffer.from(at('ro', 'tmp-'))),
+      () => fs.mkdtempSync(pathToFileURL(at('ro', 'tmp-'))),
+    ];
+    for (const form of forms) {
+      assert.throws(form, {
+        code: 'EROFS',
+        syscall: 'mkdtemp',
+        path: `${at('ro', 'tmp-')}XXXXXX`,
+      });
+    }
+    assert.deepEqual(listDisk(at('ro')), ['a.txt']);
+  });
+
+  it('a virtual place is ENOTSUP: no directory on disk', async () => {
+    for (const prefix of [
+      at('v', 'tmp-'),
+      at('m', 'tmp-'),
+      `${at('v')}${path.sep}`, // v/XXXXXX: in the place's own directory
+    ]) {
+      await refusedMkdtemp(prefix, {
+        code: 'ENOTSUP',
+        detail: 'virtual place',
+      });
+    }
+    assert.deepEqual(listDisk(at('v')), []);
+    assert.deepEqual(listDisk(at('m')), []);
+  });
+
+  it('a writable disk-origin place, and what no place owns, make it natively', async () => {
+    await madeMkdtemp(at('site', 'tmp-'));
+    // Next to a place, not in it; and outside appRoot.
+    await madeMkdtemp(at('ro'));
+    await madeMkdtemp(path.join(outside, 'tmp-'));
+    assert.deepEqual(listDisk(at('site')), ['a.txt']);
+    assert.deepEqual(listDisk(outside), []);
+  });
+});
+
+describe('fs-patch under strict: mkdtemp takes the mutation routing', () => {
+  let root;
+  let k;
+  const at = (...p) => path.join(root, ...p);
+
+  before(async () => {
+    root = writeTree(tmpDir('fspatch-mkdtemp-strict'), {
+      'ro/a.txt': 'published',
+      'up/a.txt': 'published',
+      'stray/s.txt': 'unmanaged',
+    });
+    fs.mkdirSync(at('m'));
+    k = await kernel(
+      root,
+      {
+        ro: { fs: { ext: ['txt'] } },
+        up: { fs: { ext: ['txt'], writable: true } },
+        m: { provider: 'map', origin: 'virtual', fs: { writable: true } },
+      },
+      { strict: true, watchTimeout: 60000 },
+    );
+    fsPatch.install(k);
+  });
+
+  after(() => {
+    fsPatch.uninstall();
+    k.close();
+    rm(root);
+  });
+
+  it('what no place owns under appRoot is EACCES; appRoot itself too', async () => {
+    for (const prefix of [
+      at('tmp-'),
+      at('stray', 'tmp-'),
+      at('ro'), // roXXXXXX: next to the place, not in it
+      `${root}${path.sep}`,
+    ]) {
+      await refusedMkdtemp(prefix, { code: 'EACCES' });
+    }
+    assert.deepEqual(listDisk(root).sort(), ['m', 'ro', 'stray', 'up']);
+    assert.deepEqual(listDisk(at('stray')), ['s.txt']);
+  });
+
+  it("a read-only 'deny' place is EROFS, a virtual one ENOTSUP", async () => {
+    await refusedMkdtemp(at('ro', 'tmp-'), { code: 'EROFS' });
+    await refusedMkdtemp(at('m', 'tmp-'), {
+      code: 'ENOTSUP',
+      detail: 'virtual place',
+    });
+    assert.deepEqual(listDisk(at('ro')), ['a.txt']);
+    assert.deepEqual(listDisk(at('m')), []);
+  });
+
+  it('a writable disk-origin place makes it natively; outside appRoot too', async () => {
+    await madeMkdtemp(at('up', 'tmp-'));
+    assert.deepEqual(listDisk(at('up')), ['a.txt']);
+    // appRoot as the prefix names a sibling of it.
+    await madeMkdtemp(root);
   });
 });
 

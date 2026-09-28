@@ -95,21 +95,6 @@ serves or that enclose `appRoot`, refuse links in disk territory, or check
 the real path of passthrough reads) is implemented with tests on Linux and
 Windows.
 
-## P2 — Writes that bypass the mutation routing
-
-**Problem.** `fs.mkdtemp*` is not patched and creates directories in
-read-only and virtual places — under strict `mkdtempSync(appRoot/ro/tmp-)`
-in a read-only `'deny'` place creates `ro/tmp-XXXXXX` on disk — and so do
-`mkdtempDisposableSync` / `promises.mkdtempDisposable` (Node 24+).
-
-**Done when.** These pass the mutation routing as `open` with a writing
-flag does, with tests of all three forms. Since `open` with a flag that
-only writes follows the mutation routing alone, the routes are in place:
-`mkdtemp` needs them over its prefix plus the six characters it appends
-(the path `node:fs` names in its errors) — `EROFS`, `EACCES`, `ENOTSUP`
-in a virtual place (its directories are implicit, so a temporary one
-would not exist once made), native in a writable disk-origin place.
-
 ## P2 — A write resolves without publishing when `close()` comes first
 
 **Problem.** A virtual write whose kernel is closed after the publication

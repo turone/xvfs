@@ -982,9 +982,13 @@ read or written:
 - the guarded APIs, once the routing of every path argument allows them:
   `chmod` / `lchmod`, `chown` / `lchown`, `utimes` / `lutimes`,
   `truncate`, `symlink`, `readlink`, `statfs`, `watchFile`, `rmdir`
-  (without `recursive`). A denied path stays `EACCES` / `EROFS`, so it
-  cannot be read, listed, copied or probed through them, and the strict
-  `appRoot` itself is refused.
+  (without `recursive`), `mkdtemp` — its disposable forms too — whose
+  path is the directory it makes: its prefix and the six characters it
+  appends, `XXXXXX` in its errors, as in `node:fs`'s. A denied path stays
+  `EACCES` / `EROFS`, so it cannot be read, listed, copied or probed
+  through them, and the strict `appRoot` itself is refused; in a virtual
+  place a directory is implicit, so `mkdtemp` there is `ENOTSUP`, like
+  any guarded mutation.
 - `glob`, which walks with the `node:fs` functions it captured when Node
   loaded it: `install()` loads it, so it walks through the patch — every
   directory read and stat routed, so it lists what the places list at
