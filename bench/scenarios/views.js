@@ -7,8 +7,8 @@ const { tmpDir, writeTree, cleanup, kernel, memory } = require('../lib.js');
 // releases), the no-update fast path (acquire + release with nothing
 // retired in between: local bookkeeping, no message), access to the bytes
 // through a lease view against an owned copy of the same size, and
-// withFileView with a synchronous and an async callback, against the
-// manual pair.
+// withFileView with a synchronous and an async callback — at 1 KiB and at
+// 1 MiB, against the manual pair.
 
 const N = 2e4; // leases per phase round
 
@@ -73,6 +73,14 @@ module.exports = async (b) => {
     );
     await b.opsAsync('views.withFileView.async', () =>
       site.withFileView('/small.txt', lengthAsync),
+    );
+    // The same, over the 1 MiB file: withFileView's own cost (a lease, the
+    // callback, a release) does not scale with what it views.
+    await b.opsAsync('views.withFileView.sync.1m', () =>
+      site.withFileView('/large.bin', length),
+    );
+    await b.opsAsync('views.withFileView.async.1m', () =>
+      site.withFileView('/large.bin', lengthAsync),
     );
     await b.opsAsync('views.manual.async', async () => {
       const l = site.readFileView('/small.txt');

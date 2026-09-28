@@ -31,6 +31,8 @@ const SCENARIOS = [
   'require',
   'init',
   'pool',
+  'batch',
+  'events',
 ];
 
 const ROOT = path.join(__dirname, '..');
