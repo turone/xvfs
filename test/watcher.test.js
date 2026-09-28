@@ -117,18 +117,25 @@ describe('watcher pipeline', () => {
     for (const m of msgs.slice(n)) k.handleAck(m.updateId, w.id);
   });
 
+  // The tests below read the updates the port delivers, so they wait for
+  // those, not for the projection: #flush applies an update to the main
+  // thread's projection before it posts it, and the port delivers it later.
+
   it('syntax error: source published, stale bytecode removed in the same message', async () => {
     const n = msgs.length;
-    fs.writeFileSync(at('a.js'), 'module.exports = (;');
-    await until(
-      () => site.readFile('/a.js', 'utf8') === 'module.exports = (;',
-      4000,
-    );
-    const msg = msgs
-      .slice(n)
-      .findLast((m) => m.places.site.entries.some(([key]) => key === '/a.js'));
-    assert.ok(msg.places.site.entries.some(([key]) => key === '/a.js'));
+    const source = 'module.exports = (;';
+    fs.writeFileSync(at('a.js'), source);
+    // The update of this source: the first to carry it — an epoch that
+    // publishes it again (one more event) removes nothing.
+    const publishes = (m) =>
+      m.places.site?.entries.some(
+        ([key, entry]) => key === '/a.js' && entry.stat.size === source.length,
+      );
+    const arrived = await until(() => msgs.slice(n).some(publishes), 4000);
+    assert.ok(arrived, 'the update of /a.js arrived');
+    const msg = msgs.slice(n).find(publishes);
     assert.ok(msg.places.site.removals.includes(bytecodeKey('/a.js')));
+    assert.equal(site.readFile('/a.js', 'utf8'), source);
     assert.ok(!place().files.has(bytecodeKey('/a.js')));
     assert.deepEqual(site.storedEncodings('/a.js'), ['raw', 'gzip']);
     for (const m of msgs.slice(n)) k.handleAck(m.updateId, w.id);
@@ -137,11 +144,25 @@ describe('watcher pipeline', () => {
   it('deleting a directory removes sources and companions in one message', async () => {
     const n = msgs.length;
     fs.rmSync(at('mod'), { recursive: true });
-    await until(() => !site.exists('/mod'), 4000);
-    const removals = msgs.slice(n).flatMap((m) => m.places.site.removals);
-    assert.ok(removals.includes('/mod/deep/x.js'));
-    assert.ok(removals.includes(bytecodeKey('/mod/deep/x.js')));
-    assert.ok(removals.includes(compressedKey('/mod/y.html', 'gzip')));
+    // Each source, and the message that removes it.
+    const removing = (key) =>
+      msgs.slice(n).find((m) => m.places.site?.removals.includes(key));
+    const sources = ['/mod/deep/x.js', '/mod/y.html'];
+    const arrived = await until(() => sources.every(removing), 4000);
+    assert.ok(arrived, 'the removals of both sources arrived');
+    const companions = {
+      '/mod/deep/x.js': [
+        bytecodeKey('/mod/deep/x.js'),
+        compressedKey('/mod/deep/x.js', 'gzip'),
+      ],
+      '/mod/y.html': [compressedKey('/mod/y.html', 'gzip')],
+    };
+    for (const source of sources) {
+      const { removals } = removing(source).places.site;
+      for (const companion of companions[source]) {
+        assert.ok(removals.includes(companion), `${companion} with ${source}`);
+      }
+    }
     assert.ok(!place().files.has(bytecodeKey('/mod/deep/x.js')));
     assert.deepEqual(site.readdir('/'), ['a.js', 'page.html']);
     for (const m of msgs.slice(n)) k.handleAck(m.updateId, w.id);

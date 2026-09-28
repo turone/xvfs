@@ -105,19 +105,6 @@ kernel, so the caller sees success for a write that did not happen.
 **Done when.** Such a write rejects with the closed-kernel error, with a
 test that closes the kernel between the sink and the commit.
 
-## P2 — Two watcher tests race the delivery of the update
-
-**Problem.** `watcher.test.js` «syntax error: source published, stale
-bytecode removed…» and «deleting a directory removes sources and
-companions in one message» wait until the main thread's projection shows
-the change, then read the messages of the `tap` port. `#flush` updates
-the projection synchronously and only then posts the update, and the
-port's message can arrive after the `until` timer fires: about 1 run in 12
-fails.
-
-**Done when.** Both tests wait for the message they read (`nextMessage`,
-or `until` over the port's messages), and 50 runs under load pass.
-
 ## After the next Node.js 26.x release — `doc/alternatives.md`
 
 **Problem.** The comparison describes Node v26.10.0; `main` already removes

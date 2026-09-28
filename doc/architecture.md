@@ -1231,7 +1231,11 @@ stat        { size, mtimeMs } (+ sourceSize, encoding for compressed companions)
   in-thread links (`test/helpers.js`: `tap`, `worker`, `nextMessage`)
   instead of timers. Tests over real `fs.watch` events or real workers wait
   only for a condition to become true (`until`); nothing sleeps to prove
-  that something did not happen. The disk calls a closed kernel starts are
+  that something did not happen. A test that reads what a port delivered
+  waits for that message (`nextMessage`, or `until` over the messages),
+  never for the projection alone: `#flush` applies an update to the main
+  thread's projection before it posts it, and the port delivers it later.
+  The disk calls a closed kernel starts are
   counted with async_hooks (`diskCalls()`), which sees the functions the
   library captured as well. A filesystem that reports no entry types is
   simulated by the fs binding (`process.binding('fs').readdir` reporting
