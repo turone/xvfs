@@ -17,6 +17,7 @@ const MULTI_TENANT_MS = 10000;
 const SEA_STATIC_MS = 10000;
 const WORKER_STATIC_MS = 15000;
 const PREPARED_SCRIPTS_MS = 10000;
+const ETAG_MS = 15000;
 
 const httpRequest = (url) =>
   new Promise((resolve, reject) => {
@@ -458,6 +459,67 @@ describe('examples smoke', () => {
           ),
           stdout,
         );
+      } finally {
+        await stopChild(child);
+      }
+    },
+  );
+
+  it(
+    'etag example shares one ETag across workers and answers If-None-Match',
+    { timeout: ETAG_MS },
+    async () => {
+      const child = spawn(process.execPath, ['examples/etag/server.js'], {
+        cwd: REPO,
+        env: { ...process.env, PORT: '0', WORKERS: '2' },
+        stdio: ['ignore', 'pipe', 'pipe'],
+        windowsHide: true,
+      });
+      try {
+        const [p1, p2] = await waitForWorkers(child, 2);
+        const at = (port) => `http://127.0.0.1:${port}/hello.txt`;
+
+        const one = await httpGet(at(p1));
+        const two = await httpGet(at(p2));
+        assert.equal(one.statusCode, 200);
+        assert.equal(two.statusCode, 200);
+        assert.match(String(one.headers.etag), /^"[A-Za-z0-9_-]+"$/);
+        assert.equal(
+          one.headers.etag,
+          two.headers.etag,
+          'same ETag from both workers',
+        );
+        assert.deepEqual(one.body, two.body);
+
+        const etag1 = one.headers.etag;
+        const cached = await httpGet(at(p1), { 'if-none-match': etag1 });
+        assert.equal(cached.statusCode, 304);
+        assert.equal(cached.body.length, 0);
+        assert.equal(cached.headers.etag, etag1);
+
+        // RFC 9110: a comma-separated list matches if any entry matches...
+        const listed = await httpGet(at(p1), {
+          'if-none-match': `"not-the-one", ${etag1}`,
+        });
+        assert.equal(listed.statusCode, 304);
+        // ...and so does a weak (`W/`) form of our own strong ETag.
+        const weak = await httpGet(at(p1), {
+          'if-none-match': `W/${etag1}`,
+        });
+        assert.equal(weak.statusCode, 304);
+
+        const updated = await waitForUrl(
+          at(p2),
+          (res) => res.statusCode === 200 && res.headers.etag !== etag1,
+        );
+        assert.notEqual(updated.headers.etag, etag1);
+        assert.match(updated.body, /updated/);
+
+        // Both workers converge on the new ETag; the stale one now misses.
+        const other = await httpGet(at(p1));
+        assert.equal(other.headers.etag, updated.headers.etag);
+        const stale = await httpGet(at(p1), { 'if-none-match': etag1 });
+        assert.equal(stale.statusCode, 200);
       } finally {
         await stopChild(child);
       }
