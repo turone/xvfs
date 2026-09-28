@@ -561,15 +561,20 @@ state without serializing unrelated keys.
 `#commit`, which refuses a kernel closed after the publication's last step
 with the closed-kernel error (`[vfs] kernel closed before publication`).
 The watch pipeline, compaction and `initialize()` commit through `#flush`
-alone. That error has the `code` of a stream `close()` stops,
-`ERR_VFS_CLOSED`, wherever a publication stops at `close()`.** _Why:_
-`close()` is synchronous and a publication is not; `#flush` publishes
-nothing on a closed kernel, and returned silently, so a write whose kernel
-closed in the last `await` before its commit resolved though nothing was
-published. A watcher epoch or a relocation has no caller to tell, and
-`initialize()` checks the kernel right before its commit. One code tells
-an application that `close()` stopped what it asked for, stream or
-publication, without matching a message.
+alone. Every refusal a `close()` causes has the `code` of a stream it
+stops, `ERR_VFS_CLOSED`: a publication it cuts short, a mutation it finds
+queued (`requires a ready kernel`), and a worker's request whose link
+closed before its answer — which says the mutation may or may not have
+been published.** _Why:_ `close()` is synchronous and a publication is
+not; `#flush` publishes nothing on a closed kernel, and returned silently,
+so a write whose kernel closed in the last `await` before its commit
+resolved though nothing was published. A watcher epoch or a relocation
+has no caller to tell, and `initialize()` checks the kernel right before
+its commit. One code tells an application that `close()` stopped what it
+asked for — stream, publication or queued mutation, in any thread —
+without matching a message. A worker whose link closes cannot know whether
+the main kernel committed its mutation before it closed: the answer is
+what never came.
 
 **The semantics of a virtual place's mutations is written once
 (`VirtualStore`): which checks run, in which order, and what each refusal

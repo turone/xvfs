@@ -10,14 +10,18 @@
  * as node:fs sets them and `dest` for copies, links and renames; a copy
  * refused by its destination carries the write's error as `cause`. A
  * stream stopped by `kernel.close()` errors with `code` `ERR_VFS_CLOSED`
- * and no `errno`, `syscall` or `path`, and so does a publication it cuts
- * short (`[vfs] kernel closed before publication`): `initialize()`, a
- * mutation still publishing, a worker's mutation its own kernel's
- * `close()` finds waiting or that is asked afterwards. `ERR_FS_EISDIR` and
- * `ERR_FS_CP_*` are node:fs's own `SystemError`; a mutation still queued
- * when a main kernel closes, or asked of it afterwards, rejects with a
- * plain `Error` (`[vfs] …`) without `code`, and so does a worker's
- * mutation whose main kernel closed.
+ * and no `errno`, `syscall` or `path`, and so does every mutation a closed
+ * kernel refuses: a publication `close()` cuts short (`[vfs] kernel closed
+ * before publication`) — `initialize()`, a mutation still publishing, a
+ * worker's mutation its own kernel's `close()` finds waiting or that is
+ * asked afterwards; a mutation still queued when a main kernel closes, or
+ * asked of it afterwards (`[vfs] mutations requires a ready kernel (state:
+ * closed)`); a worker's mutation whose link closed before its answer
+ * (`[vfs] link closed before the mutation was answered: it may or may not
+ * have been published`). `ERR_FS_EISDIR` and `ERR_FS_CP_*` are node:fs's
+ * own `SystemError`; another call that needs a ready kernel (`fs()`,
+ * `snapshot()`, `link()`, …) throws a plain `Error` (`[vfs] …`) without
+ * `code`.
  */
 export interface VfsError extends Error {
   code: string;

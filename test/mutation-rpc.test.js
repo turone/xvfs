@@ -229,6 +229,42 @@ describe('mutation RPC', () => {
     }
   });
 
+  // The main kernel closes with a worker's request unanswered: before it
+  // published the mutation — the request never reached it — or after, here
+  // from a 'publish' listener of its own. The worker cannot tell which.
+  it("a worker's mutation whose main kernel closes before the answer is refused as the closed kernel, published or not", async () => {
+    const refused = {
+      code: 'ERR_VFS_CLOSED',
+      message:
+        '[vfs] link closed before the mutation was answered: ' +
+        'it may or may not have been published',
+    };
+    for (const published of [false, true]) {
+      const root = tmpDir('vfs-rpc');
+      const k = await kernel(root, {
+        v: { origin: 'virtual', fs: { writable: true } },
+      });
+      const w = worker(k);
+      try {
+        let content = null;
+        k.on('publish', () => {
+          content = k.fs('v').readFile('/a.txt', 'utf8');
+          k.close();
+        });
+        const v = w.kernel.fs('v');
+        const pending = v.writeFile('/a.txt', 'a');
+        if (!published) k.close();
+        await assert.rejects(pending, refused, `published: ${published}`);
+        assert.equal(content, published ? 'a' : null);
+        await assert.rejects(v.unlink('/a.txt'), refused, 'asked afterwards');
+      } finally {
+        w.kernel.close();
+        k.close();
+        rm(root);
+      }
+    }
+  });
+
   it('an accepted request: its key made canonical, its options booleans, its update before its response', async () => {
     const root = tmpDir('vfs-rpc');
     const k = await kernel(root, {
