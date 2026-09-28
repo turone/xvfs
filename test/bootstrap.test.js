@@ -3,8 +3,10 @@
 const { describe, it } = require('node:test');
 const assert = require('node:assert/strict');
 const { spawnSync } = require('node:child_process');
+const fs = require('node:fs');
 const path = require('node:path');
 const { pathToFileURL } = require('node:url');
+const { tmpDir, rm } = require('./helpers.js');
 
 // The bootstrap installs process-wide hooks, so it runs in child processes.
 
@@ -83,6 +85,30 @@ describe('bootstrap: --import shared-memory-fs/register', () => {
     assert.notEqual(r.code, 0);
     assert.match(r.stderr, /\[vfs config\]/);
     assert.doesNotMatch(r.stdout, /OK/);
+  });
+
+  // Editors and Windows tools commonly save vfs.config.json with a leading
+  // UTF-8 BOM (U+FEFF); JSON.parse treats it as invalid input, not
+  // whitespace, so it must be stripped before parsing.
+  it('a BOM at the start of vfs.config.json does not break loading', () => {
+    const dir = tmpDir('smfs-sonnet-P3-bootstrap-bom');
+    try {
+      fs.writeFileSync(
+        path.join(dir, 'vfs.config.json'),
+        '﻿' + JSON.stringify({ defaults: { strict: false } }),
+      );
+      fs.writeFileSync(path.join(dir, 'entry.cjs'), "console.log('OK bom');");
+      const r = runIn(
+        dir,
+        path.join(dir, 'entry.cjs'),
+        `--vfs.config=${path.join(dir, 'vfs.config.json')}`,
+      );
+      assert.equal(r.code, 0, r.stderr);
+      assert.match(r.stdout, /OK bom/);
+      assert.doesNotMatch(r.stderr, /failed to load config/);
+    } finally {
+      rm(dir);
+    }
   });
 
   it('attach() outside a worker explains itself', () => {
