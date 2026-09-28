@@ -556,6 +556,90 @@ describe('mutation lifecycle and cleanup', () => {
     }
   });
 
+  // A mutation whose kernel closes after its publication's last step and
+  // before the commit published nothing: it rejects as the closed kernel,
+  // never resolves. The seam: #publishEntry records the source of a
+  // disk-origin place (`sources`) once it staged the file, the last step
+  // before the commit; a virtual place has no record there, so the test
+  // puts one that closes the kernel.
+  it('a mutation whose kernel closes before its commit rejects as the closed kernel', async () => {
+    const mutations = [
+      ['writeFile', (v) => v.writeFile('/b.txt', 'b')],
+      ['appendFile', (v) => v.appendFile('/a.txt', '+')],
+      ['rename', (v) => v.rename('/a.txt', '/c.txt')],
+    ];
+    for (const [what, mutate] of mutations) {
+      const root = tmpDir('vfs-order');
+      const k = await kernel(root, {
+        v: { origin: 'virtual', fs: { writable: true } },
+      });
+      try {
+        const v = k.fs('v');
+        await v.writeFile('/a.txt', 'a');
+        const updates = k.nextUpdateId;
+        let closed = 0;
+        k.sources.set('v', {
+          set: () => {
+            closed++;
+            k.close();
+          },
+        });
+        await assert.rejects(
+          mutate(v),
+          { message: '[vfs] kernel closed before publication' },
+          what,
+        );
+        assert.equal(closed, 1, `${what}: closed before its commit`);
+        assert.equal(k.nextUpdateId, updates, `${what}: nothing published`);
+        assert.equal(k.mutations.size, 0);
+      } finally {
+        k.close();
+        rm(root);
+      }
+    }
+  });
+
+  // The rename of a subtree copies its sources, checks the kernel after
+  // each copy, then commits the copies in a later microtask. The last copy
+  // hands its entry over through a thenable that closes the kernel in the
+  // microtask right after the one that goes on with it: after that check,
+  // before the commit.
+  it('a subtree rename whose kernel closes before its commit rejects as the closed kernel', async () => {
+    const root = tmpDir('vfs-order');
+    const k = await kernel(root, {
+      v: { origin: 'virtual', fs: { writable: true } },
+    });
+    try {
+      const v = k.fs('v');
+      await v.writeFile('/d/a.txt', 'a');
+      await v.writeFile('/d/b.txt', 'b');
+      const updates = k.nextUpdateId;
+      const allocate = k.cache.allocate.bind(k.cache);
+      let copies = 0;
+      k.cache.allocate = (file, options) => {
+        const entry = allocate(file, options);
+        if (++copies < 2) return entry;
+        return {
+          then(resolve, reject) {
+            entry.then((value) => {
+              resolve(value);
+              queueMicrotask(() => k.close());
+            }, reject);
+          },
+        };
+      };
+      await assert.rejects(v.rename('/d', '/e'), {
+        message: '[vfs] kernel closed before publication',
+      });
+      assert.equal(copies, 2, 'both sources copied');
+      assert.equal(k.nextUpdateId, updates, 'nothing published');
+      assert.equal(k.mutations.size, 0);
+    } finally {
+      k.close();
+      rm(root);
+    }
+  });
+
   // Regression: the link port is unref'd, so a worker with nothing else to
   // do used to exit before its own write settled.
   it('a pending worker mutation keeps the worker alive until it settles', async () => {

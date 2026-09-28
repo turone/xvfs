@@ -95,16 +95,6 @@ serves or that enclose `appRoot`, refuse links in disk territory, or check
 the real path of passthrough reads) is implemented with tests on Linux and
 Windows.
 
-## P2 — A write resolves without publishing when `close()` comes first
-
-**Problem.** A virtual write whose kernel is closed after the publication
-sink's last `alive()` check and before `#flush` resolves successfully,
-though nothing was published: `#flush` returns silently on a closed
-kernel, so the caller sees success for a write that did not happen.
-
-**Done when.** Such a write rejects with the closed-kernel error, with a
-test that closes the kernel between the sink and the commit.
-
 ## After the next Node.js 26.x release — `doc/alternatives.md`
 
 **Problem.** The comparison describes Node v26.10.0; `main` already removes

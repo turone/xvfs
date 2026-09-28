@@ -692,7 +692,9 @@ States: `new → initializing → ready → closed` (final). `fs()`,
 `snapshot()`, `watch()`, `link()` require `ready`. `initialize()`
 failure closes the kernel; a `close()` while it runs makes it reject with
 `[vfs] kernel closed before publication` — the file reads it began
-finish, and nothing else starts: no read, no preparer.
+finish, and nothing else starts: no read, no preparer. A mutation of a
+virtual place still publishing when `close()` comes rejects with the same
+error: it never resolves without having published.
 
 | Method               | Description                                                                                                                          |
 | -------------------- | ------------------------------------------------------------------------------------------------------------------------------------ |
@@ -703,7 +705,7 @@ finish, and nothing else starts: no read, no preparer.
 | `watch()`            | Start `DirWatcher` (also auto if writable disk-origin)                                                                               |
 | `diagnostics()`      | Read-only picture of the shared memory: pool, bytes waiting to be freed, each worker's ACKs and holds — [Diagnostics](#diagnostics)  |
 | `retirements()`      | Internal diagnostics (debugging, tests; not a stable API): retired versions still held — representation, bytes, age, ACKs or holders |
-| `close()`            | Stop watcher and streams, reject queued mutations, drop projections, collectable SAB                                                 |
+| `close()`            | Stop watcher and streams, reject queued and publishing mutations, drop projections, collectable SAB                                  |
 
 `link()` returns `{ vfs: { snapshot, config: raw, appRoot, port },
 transferList }`. The kernel posts every `vfs-update` to the port, reads

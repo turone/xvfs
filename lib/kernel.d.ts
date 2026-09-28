@@ -207,7 +207,7 @@ export class VfsKernel {
   initialize(): Promise<void>;
   /**
    * Final: stops the watcher and every stream (`ERR_VFS_CLOSED`), rejects
-   * queued mutations, drops every projection.
+   * queued mutations and those still publishing, drops every projection.
    */
   close(): void;
   /** The `PlaceFs` of an indexed place with an fs domain; throws otherwise. */
