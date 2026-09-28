@@ -152,6 +152,27 @@ describe('fs-surface: the exports the patch knows', () => {
   });
 });
 
+// The named exports of the ES modules are bound when a module first
+// imports them: one bound before install() follows the patch, and the
+// originals again after uninstall().
+describe('fs-patch: the ES module exports of node:fs', () => {
+  it('follow install() and uninstall()', async () => {
+    const esm = await import('node:fs');
+    const esmPromises = await import('node:fs/promises');
+    const { readFileSync } = fs;
+    const { readFile } = fs.promises;
+    assert.equal(esm.readFileSync, readFileSync);
+    await withPatch(true, () => {
+      assert.notEqual(esm.readFileSync, readFileSync, 'the patch');
+      assert.equal(esm.readFileSync, fs.readFileSync);
+      assert.equal(esmPromises.readFile, fs.promises.readFile);
+      assert.equal(esm.default.readFileSync, fs.readFileSync);
+    });
+    assert.equal(esm.readFileSync, readFileSync, 'the original again');
+    assert.equal(esmPromises.readFile, readFile);
+  });
+});
+
 describe('fs-patch: a function the table does not know', () => {
   it('under strict is refused at every call, before it runs; uninstall() restores it', async () => {
     const { calls, planted, unplant } = plant();

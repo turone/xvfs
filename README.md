@@ -959,7 +959,13 @@ key, so every platform lists them in the same order too. Unlike native
 A reference to a patched function taken while the patch is installed
 (`const { readFile } = require('node:fs')`, or glob's own walk) keeps
 working after `uninstall()`: with no kernel installed it is the original
-`node:fs` function again.
+`node:fs` function again. A named import (`import { readFileSync } from
+'node:fs'`, or from `node:fs/promises`) follows `install()` and
+`uninstall()` whenever it was bound — by a preload before the bootstrap
+too: both update the named exports of the ES modules. A reference taken
+before `install()` in any other way, as `const { readFile } = fs` then,
+stays the original function: take references from `node:fs` once the
+kernel is wired, or call through the module (`fs.readFile`).
 
 **2. Recognized but unsupported for managed territory** — `ENOTSUP` with
 `syscall`, `path` and, for copies, links and renames, `dest`; nothing is
