@@ -195,7 +195,8 @@ against `readFileSync` of the same files through `node:fs`, ns per call.
 | 1m   |       198923 |       94 |       155282 |       51 |            206488 |
 | 8m   |      1324897 |       89 |       837028 |       43 |           1725572 |
 
-`stat` 55 ns, `exists` 18 ns, `readdir` of 100 entries 51 µs.
+`stat` 55 ns, `version` 21–23 ns (a Map lookup next to stat — no `Stats`
+object to build), `exists` 18 ns, `readdir` of 100 entries 51 µs.
 
 A lease (`view`) costs ~100 ns whatever the size; an owned copy
 (`readFile`) is a memcpy, 374 ns for 1 KiB, 1.3 ms for 8 MiB — and a
@@ -240,6 +241,8 @@ per call.
 | `views.acquireRelease` — acquire + release, nothing retired in between |   109 |
 | `views.withFileView.sync` — `withFileView`, synchronous callback       |   171 |
 | `views.withFileView.async` — `withFileView`, async callback            |   182 |
+| `views.withFileView.sync.1m` — the same, over the 1 MiB file           |   178 |
+| `views.withFileView.async.1m` — the same, over the 1 MiB file          |   191 |
 | `views.manual.async` — `readFileView` + release in an async function   |   138 |
 | `views.access.1m.memcmp.view` — `Buffer.equals` over a 1 MiB view      | 17476 |
 | `views.access.1m.memcmp.owned` — the same over an owned copy           | 17572 |
@@ -250,7 +253,10 @@ The no-update fast path — a lease taken and released while nothing
 retires its version — is local bookkeeping: ~100 ns, no message.
 `withFileView` costs one promise more than the manual pair, the async
 callback one more still. Reading through a view costs what reading an
-owned Buffer costs, natively and from JavaScript alike.
+owned Buffer costs, natively and from JavaScript alike. At 1 MiB,
+`withFileView` costs the same as at 1 KiB (178 / 191 ns against 171 /
+182 ns): the lease, the callback and the release set its cost, not the
+bytes under the view.
 
 ## Updates under active leases
 
@@ -424,3 +430,127 @@ of the disk territory got cheaper: the facade no longer stats a directory
 it is about to list (+23 %). Where this cost matters, the application
 keeps such content in the VFS — a cached extension, a virtual place — or
 runs without strict.
+
+## Atomic `writeFiles`: a batch against a series
+
+`bench/scenarios/batch.js`: one `writeFiles` of n keys against
+`Promise.all` of n independent `writeFile` calls, in a `sab + virtual`
+place, 1 KiB each — the latency from the call to its version being
+published, with 0 links and with 1 in-thread link that ACKs (never
+awaited, so the figure is the call's own, not the round to the free).
+Every n keeps its own n keys: an untimed call creates them first, so
+every timed call — the warm-up included — replaces and retires. Figures
+below are medians of 4 alternating `bench:ab HEAD worktree` runs (an A/A:
+the code is identical on both sides, so this is this page's noise band
+for these rows), µs, p50 (p95, p99).
+
+### 0 links
+
+|   n |       writeFiles |            series | updates: writeFiles / series |
+| --: | ---------------: | ----------------: | :--------------------------- |
+|   1 |     5.9 (17, 84) |     4.5 (6.7, 24) | 1 / 1                        |
+|   8 |      15 (33, 92) |       28 (36, 65) | 1 / 8                        |
+|  64 |    96 (213, 299) |    205 (334, 530) | 1 / 64                       |
+| 512 | 791 (1635, 1759) | 1887 (3270, 3603) | 1 / 512                      |
+
+### 1 in-thread link
+
+|   n |        writeFiles |            series |
+| --: | ----------------: | ----------------: |
+|   1 |     4.8 (8.6, 21) |     5.0 (6.5, 17) |
+|   8 |       17 (24, 62) |      40 (77, 156) |
+|  64 |    135 (239, 369) |   359 (526, 1641) |
+| 512 | 1036 (2061, 4150) | 3102 (5438, 5947) |
+
+`writeFiles` sends one `vfs-update` whatever n is; the series sends n —
+one per `writeFile`'s own commit (`nextUpdateId`, exact across every run
+here: ± 0 %). At n = 1 the series is a little faster (4.5 against 5.9 µs):
+`writeFiles` checks a set of one file the same way as any set, which a
+lone `writeFile` does not — a small, roughly constant tax that batching's
+win outgrows by n = 8. From there the series costs 1.8–2.4× the batch
+without a link and 2.3–3× with one: the link makes the series pay for n
+message round trips where the batch pays for one — the same shape
+retain.js's own worker rows show for a single update. p99 does not add to
+this: at this pair count its own spread reaches ±150 % (n = 64), too
+noisy to say more than that p50 already shows the same direction in
+every pair.
+
+### Rollback
+
+`batch.rollback.<n>`: a preparer that throws while preparing the last key
+of the set — the latency of the rejection, nothing ever published. µs,
+p50 (p95, p99):
+
+|   n |          rollback |
+| --: | ----------------: |
+|   1 |       15 (21, 59) |
+|   8 |       30 (43, 87) |
+|  64 |    154 (250, 479) |
+| 512 | 1209 (1740, 2342) |
+
+A rejection on the last key still prepares every key before it: the
+figure tracks the batch's own size, 1.5–2.5× it and closer to 1.5× as n
+grows — the extra gap at small n is the place's preparer itself, which
+the plain `writeFiles` and series rows above do not pay (a set that can
+fail needs one configured). Rolling back costs about what publishing the
+same set would have, not less.
+
+### Memory: a batch against as many singles
+
+`batch.memory.*`: RSS and the pool, settled, after 1000 batches of 64
+files (`writeFiles`) against 64 000 single `writeFile` calls — the same
+64 000 files, 256 B each, all distinct keys. MiB:
+
+|               | batched (1000 × 64) | singles (64 000) |
+| ------------- | ------------------: | ---------------: |
+| RSS           |           321.6 ±3% |        320.8 ±3% |
+| pool used     |                15.6 |             15.6 |
+| pool reserved |                  32 |               32 |
+
+The pool figures are exact matches across every run (retirement and
+reservation do not care how the files arrived); RSS sits inside the
+run-to-run noise this page uses elsewhere. Batching leaves nothing of its
+own behind.
+
+## Publication events
+
+`bench/scenarios/events.js`: the cost `#apply` pays to build and deliver
+a `'publish'` event — nothing is built with no listener
+(`listenerCount('publish') === 0`); with some, one frozen event is built
+once and delivered to each.
+
+### Listener count against one write
+
+`events.publish.<n>`: `publish.sab.raw`'s own write (a 1 KiB `writeFile`
+into a `sab + virtual` place, keys rotating over a 64-name pool) with 0,
+1 and 8 no-op listeners on `'publish'`. Medians of the same 4 A/A runs as
+above, µs, p50:
+
+| listeners |       p50 |
+| --------: | --------: |
+|         0 | 4.95 ±12% |
+|         1 |  4.85 ±1% |
+|         8 |  4.65 ±2% |
+
+No measurable cost from 0 to 8 listeners: the gap between the rows (at
+most 0.3 µs) sits inside every row's own noise. Building and delivering a
+one-key event to a handful of listeners does not show up against a 1 KiB
+write's own latency (p95 and p99 move both ways across the three rows —
+noisier than p50 here, and not in a direction either way).
+
+### `initialize()` with and without a subscriber
+
+`events.init.<listener|none>.2000`: `init.js`'s own sab scan of 2000
+files — `initialize()`'s commit announces every scanned key as
+`'created'`, an array built only for a subscriber. ms, p50:
+
+|              | with a listener |   without |
+| ------------ | --------------: | --------: |
+| init of 2000 |       80.1 ±21% | 78.0 ±44% |
+
+Directionally the listener costs a little more — it is the only row of
+this scenario where the array is built at all, over 2000 keys — but at 5
+samples per run the noise (±21–44 %) is wider than the ~3 % gap: not a
+figure this page can stand behind. The mechanism is not in question (the
+array is built only when `listenerCount('publish') > 0`, `#apply` in
+`lib/kernel.js`); its cost at this N is not resolved at this sample size.
