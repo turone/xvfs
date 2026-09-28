@@ -586,7 +586,10 @@ describe('mutation lifecycle and cleanup', () => {
         });
         await assert.rejects(
           mutate(v),
-          { message: '[vfs] kernel closed before publication' },
+          {
+            code: 'ERR_VFS_CLOSED',
+            message: '[vfs] kernel closed before publication',
+          },
           what,
         );
         assert.equal(closed, 1, `${what}: closed before its commit`);
@@ -629,6 +632,7 @@ describe('mutation lifecycle and cleanup', () => {
         };
       };
       await assert.rejects(v.rename('/d', '/e'), {
+        code: 'ERR_VFS_CLOSED',
         message: '[vfs] kernel closed before publication',
       });
       assert.equal(copies, 2, 'both sources copied');

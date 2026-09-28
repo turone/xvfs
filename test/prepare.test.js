@@ -865,10 +865,10 @@ describe('prepare pipeline: the preparer contract', () => {
     });
     try {
       kernel = k;
-      await assert.rejects(
-        v.writeFile('/a.js', 'x'),
-        /kernel closed before publication/,
-      );
+      await assert.rejects(v.writeFile('/a.js', 'x'), {
+        code: 'ERR_VFS_CLOSED',
+        message: '[vfs] kernel closed before publication',
+      });
       assert.equal(k.state, 'closed');
     } finally {
       done();

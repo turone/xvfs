@@ -189,7 +189,10 @@ describe('VfsKernel: lifecycle', () => {
           const inFlight = reads.length;
           await assert.rejects(
             within(init, `${what}: initialize()`),
-            { message: '[vfs] kernel closed before publication' },
+            {
+              code: 'ERR_VFS_CLOSED',
+              message: '[vfs] kernel closed before publication',
+            },
             what,
           );
           await Promise.all(reads);
@@ -243,6 +246,7 @@ describe('VfsKernel: lifecycle', () => {
       closed = true;
       k.close();
       await assert.rejects(init, {
+        code: 'ERR_VFS_CLOSED',
         message: '[vfs] kernel closed before publication',
       });
       assert.equal(prepared, 0, 'no preparer after close()');
@@ -259,6 +263,7 @@ describe('VfsKernel: lifecycle', () => {
       const init = k.initialize();
       k.close();
       await assert.rejects(init, {
+        code: 'ERR_VFS_CLOSED',
         message: '[vfs] kernel closed before publication',
       });
       assert.equal(k.state, 'closed');
