@@ -685,6 +685,82 @@ describe('writeFiles: among other mutations', () => {
     }
   });
 
+  // Keys in flight are indexed by the directories above them (KeysInFlight):
+  // a write in flight three levels down makes each directory above it one,
+  // for writes and sets alike, as long as a key in flight is below it.
+  it('a key in flight makes every directory above it one, until the last below it settles', async () => {
+    const root = tmpDir('vfs-batch');
+    const k = await kernel(root, VIRTUAL);
+    try {
+      const v = k.fs('v');
+      const { creating } = k.registry.get('v').store;
+      const gates = new Map(); // key → { reached, open }
+      const hold = (key) => {
+        const gate = { reached: Promise.withResolvers(), open: null };
+        const open = Promise.withResolvers();
+        gate.open = open.resolve;
+        gate.opened = open.promise;
+        gates.set(key, gate);
+        return gate;
+      };
+      const original = k.publishVirtual.bind(k);
+      k.publishVirtual = async (place, key, raw) => {
+        const gate = gates.get(key);
+        if (gate) {
+          gate.reached.resolve();
+          await gate.opened;
+        }
+        return original(place, key, raw);
+      };
+      const deep = hold('/d/x/y');
+      const held = v.writeFile('/d/x/y', 'y');
+      await within(deep.reached.promise, 'the publication of /d/x/y');
+      for (const key of ['/d', '/d/x']) {
+        await assert.rejects(
+          v.writeFile(key, 'f'),
+          { code: 'EISDIR', path: v.pathOf(key) },
+          key,
+        );
+        await assert.rejects(
+          v.writeFiles([[key, 'f']]),
+          refused(v, 'EISDIR', key),
+          key,
+        );
+      }
+      await assert.rejects(v.writeFile('/d/x/y/z', 'z'), {
+        code: 'ENOTDIR',
+        path: v.pathOf('/d/x/y/z'),
+      });
+      await v.writeFile('/d/z', 'z');
+      deep.open();
+      await held;
+      await v.unlink('/d/x/y');
+      await v.unlink('/d/z');
+      assert.equal(creating.size, 0);
+      assert.equal(creating.below('/d'), false, 'nothing below /d any more');
+      await v.writeFile('/d', 'a file now');
+      // Two keys in flight below one directory: it stays one until both
+      // have settled.
+      const first = hold('/q/a');
+      const second = hold('/q/b');
+      const a = v.writeFile('/q/a', 'a');
+      const b = v.writeFile('/q/b', 'b');
+      await within(first.reached.promise, 'the publication of /q/a');
+      await within(second.reached.promise, 'the publication of /q/b');
+      first.open();
+      await a;
+      assert.equal(creating.below('/q'), true, '/q/b is still in flight');
+      await v.unlink('/q/a');
+      await assert.rejects(v.writeFile('/q', 'q'), { code: 'EISDIR' });
+      second.open();
+      await b;
+      assert.equal(creating.below('/q'), false);
+    } finally {
+      k.close();
+      rm(root);
+    }
+  });
+
   it('a set under a directory a recursive rm is removing comes after it', async () => {
     const root = tmpDir('vfs-batch');
     const k = await kernel(root, VIRTUAL);
