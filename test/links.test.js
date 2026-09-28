@@ -553,6 +553,105 @@ describe('without strict: links answer as before', () => {
   });
 });
 
+// A place's directory may itself be a link. Out of appRoot — a media store
+// elsewhere — it is the place's own disk. Into the territory appRoot
+// manages — another place, appRoot, a directory above it — its scan,
+// watcher and native calls would serve that territory under the place's
+// name and policy: under strict initialize() refuses it, before anything
+// is read.
+describe('strict: a place whose directory is a link', () => {
+  const HOME = {
+    ro: PLACES.ro,
+    dj: { provider: 'disk', fs: { writable: true } },
+    tj: { fs: { ext: ['txt'], fallback: 'disk', prepare: { up: ['txt'] } } },
+  };
+  const homed = (prefix) => {
+    const base = tmpDir(prefix);
+    const root = writeTree(path.join(base, 'app'), {
+      'ro/a.txt': 'raw',
+      'ro/h.bin': 'hidden',
+    });
+    const outside = writeTree(path.join(base, 'outside'), { 'o.bin': 'o' });
+    return { base, root, outside, at: (...p) => path.join(root, ...p) };
+  };
+
+  it('into another place, appRoot or above it: initialize() refuses it', async () => {
+    for (const name of ['dj', 'tj']) {
+      const { base, root, at } = homed(`links-home-${name}`);
+      const targets = [at('ro'), root, base];
+      try {
+        for (const target of targets) {
+          linkDir(target, at(name));
+          try {
+            const places = { ro: HOME.ro, [name]: HOME[name] };
+            const options = { preparers: PREPARERS };
+            await assert.rejects(
+              kernel(root, places, { strict: true }, options),
+              (err) => {
+                assert.match(err.message, /^\[vfs config\] places\./);
+                assert.ok(err.message.includes(`places.${name}:`));
+                return true;
+              },
+              `${name} -> ${target}`,
+            );
+          } finally {
+            unlinkDir(at(name));
+          }
+        }
+        assert.deepEqual(listDisk(at('ro')), ['a.txt', 'h.bin']);
+      } finally {
+        rm(base);
+      }
+    }
+  });
+
+  it('out of appRoot: the place serves it, and nothing through it', async () => {
+    const { base, root, outside, at } = homed('links-home-out');
+    linkDir(outside, at('dj'));
+    linkDir(at('ro'), path.join(outside, 'jro'));
+    const places = { ro: HOME.ro, dj: HOME.dj };
+    const k = await kernel(
+      root,
+      places,
+      { strict: true },
+      { preparers: PREPARERS },
+    );
+    fsPatch.install(k);
+    try {
+      assert.equal(fs.readFileSync(at('dj', 'o.bin'), 'utf8'), 'o');
+      fs.writeFileSync(at('dj', 'w.bin'), 'w');
+      assert.equal(readDisk(path.join(outside, 'w.bin'), 'utf8'), 'w');
+      const hidden = at('dj', 'jro', 'h.bin');
+      assert.throws(
+        () => fs.readFileSync(hidden),
+        refused('EACCES', 'open', hidden),
+      );
+    } finally {
+      fsPatch.uninstall();
+      k.close();
+      unlinkDir(path.join(outside, 'jro'));
+      unlinkDir(at('dj'));
+      rm(base);
+    }
+  });
+
+  it('without strict: as before', async () => {
+    const { base, root, at } = homed('links-home-open');
+    linkDir(at('ro'), at('dj'));
+    const places = { ro: HOME.ro, dj: HOME.dj };
+    const k = await kernel(root, places, {}, { preparers: PREPARERS });
+    fsPatch.install(k);
+    try {
+      assert.equal(fs.readFileSync(at('dj', 'h.bin'), 'utf8'), 'hidden');
+    } finally {
+      fsPatch.uninstall();
+      k.close();
+      unlinkDir(at('dj'));
+      rm(base);
+    }
+  });
+});
+
 // The scan at initialize() never enters a link to a directory, and under
 // strict takes no link to a file; the watcher's epochs keep to the same. A
 // link made later in a disk-origin place publishes nothing of its target,

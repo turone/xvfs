@@ -522,7 +522,12 @@ the patched `node:fs` replace the operating system's isolation.
   `withFileTypes` — and a recursive `cp` of or into it is `ENOTSUP`. The
   `PlaceFs` facade serves its disk territory the same way. Each such call
   costs one `realpath` more; a link swapped in between the answer and the
-  call is not seen.
+  call is not seen. A place's directory may itself be a link out of
+  `appRoot` — a media store elsewhere — and is then the place's own disk;
+  one that resolves into the territory `appRoot` manages — another place,
+  `appRoot`, a directory above it — is a configuration error under
+  strict: `initialize()` rejects (`[vfs config] places.<name>: …`) before
+  anything is read.
 - Under strict the patch makes no link to managed territory: a `symlink`
   whose target — resolved from the link's directory, as the OS resolves
   it — lies below `appRoot`, is `appRoot` or a directory above it, and a

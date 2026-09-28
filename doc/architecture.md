@@ -850,6 +850,22 @@ call on a place's disk pays one `realpath` (tens of microseconds on
 Windows; doc/benchmarks.md); a link swapped in between the answer and the
 call is not seen, as no path-based check can see it.
 
+**A place's directory is its own where its real path lies off `appRoot`'s
+real line — a link out of `appRoot`, a media store elsewhere — or at
+`appRoot`'s real path and the place's name. Under strict one that resolves
+anywhere else on that line — another place, `appRoot`, a directory above
+it — is a configuration error: `initialize()` rejects
+(`[vfs config] places.<name>: …`) before anything is read
+(`VfsKernel#homed`, `Aliases.misplaced`), and the proof takes nothing as
+that place's own (`Aliases#owns`).** _Why:_ the proof asked where a path
+lies against the place's real directory; a place `dj` whose directory was
+a junction to `ro` had `ro` for its own, so native calls read what `ro`
+hides and wrote into it, and a disk-origin place so linked scanned and
+watched `ro`'s files under its own keys. A place's directory is the
+deployer's configuration, not a path code under strict can make (no link
+into managed territory is created through the patch), so it is refused as
+configuration, where it is found, once.
+
 **Under strict the patch makes no link to managed territory
 (`FsRouter.linksInto`): a `symlink` whose target, resolved from the link's
 directory as the OS resolves it, the registry places below `appRoot`, at

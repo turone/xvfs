@@ -191,6 +191,10 @@ describe('Aliases: where a native call on a place disk lands', () => {
     'C:\\app\\m': 'D:\\media',
     'C:\\app\\m\\jro': 'C:\\app\\ro',
     'C:\\app\\wide': 'C:\\',
+    'C:\\app\\dj': 'C:\\app\\ro',
+    'C:\\app\\dj\\h.bin': 'C:\\app\\ro\\h.bin',
+    'C:\\app\\up': 'C:\\app',
+    'C:\\app\\cs': 'C:\\app\\CS',
   });
   const aliases = new Aliases('C:\\app', path.win32, win32);
   const d = 'C:\\app\\d';
@@ -235,6 +239,34 @@ describe('Aliases: where a native call on a place disk lands', () => {
     assert.equal(aliases.territory(wide, back), null);
     const other = aliases.territory(wide, 'C:\\app\\wide\\other');
     assert.equal(other, 'C:\\other');
+  });
+
+  // A place directory that is a link into managed territory — another
+  // place, appRoot, above it — is none of the place's own: nothing is
+  // proven through it but what lies off appRoot's line, and the kernel
+  // refuses it at initialize() (misplaced).
+  it("a place directory on appRoot's line, not at its own name, is not the place's", () => {
+    const dj = 'C:\\app\\dj';
+    assert.equal(aliases.territory(dj, 'C:\\app\\dj\\h.bin'), null);
+    assert.equal(aliases.territory(dj, dj), null);
+    const misplaced = [
+      [dj, 'C:\\app\\ro'],
+      ['C:\\app\\up', 'C:\\app'],
+      ['C:\\app\\wide', 'C:\\'],
+    ];
+    for (const [root, real] of misplaced) {
+      assert.equal(aliases.misplaced(root), real, root);
+    }
+    for (const root of [
+      'C:\\app\\d',
+      'C:\\app\\m',
+      'C:\\app\\cs',
+      'C:\\app\\no',
+    ]) {
+      assert.equal(aliases.misplaced(root), null, root);
+    }
+    const cs = aliases.territory('C:\\app\\cs', 'C:\\app\\cs\\new.txt');
+    assert.equal(cs, 'C:\\app\\CS\\new.txt');
   });
 
   it("asks realpath for the place's directory once", () => {
