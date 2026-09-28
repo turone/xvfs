@@ -691,10 +691,11 @@ node app.js -- --vfs.defaults.memory.limit=512mib \
 States: `new → initializing → ready → closed` (final). `fs()`,
 `snapshot()`, `watch()`, `link()` require `ready`. `initialize()`
 failure closes the kernel; a `close()` while it runs makes it reject with
-`[vfs] kernel closed before publication` — the file reads it began
-finish, and nothing else starts: no read, no preparer. A mutation of a
-virtual place still publishing when `close()` comes rejects with the same
-error: it never resolves without having published.
+`[vfs] kernel closed before publication` (`code` `ERR_VFS_CLOSED`) — the
+file reads it began finish, and nothing else starts: no read, no
+preparer. A mutation of a virtual place still publishing when `close()`
+comes rejects with the same error: it never resolves without having
+published.
 
 | Method               | Description                                                                                                                          |
 | -------------------- | ------------------------------------------------------------------------------------------------------------------------------------ |
@@ -1147,7 +1148,10 @@ not a raw-preserving copy.
 
 Errors carry the same `code`, `errno`, `syscall` and `path` fields as
 `node:fs`, and `dest` for copies, links and renames. A stream stopped by
-`kernel.close()` errors with `ERR_VFS_CLOSED`.
+`kernel.close()` errors with `ERR_VFS_CLOSED`, and so does a publication
+it cuts short — `initialize()`, a mutation still publishing, a worker's
+mutation its own kernel's `close()` finds waiting: `[vfs] kernel closed
+before publication`.
 
 ## Protocol
 

@@ -4,7 +4,15 @@ const { describe, it } = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
-const { tmpDir, writeTree, rm, kernel, tap, worker } = require('./helpers.js');
+const {
+  tmpDir,
+  writeTree,
+  rm,
+  kernel,
+  tap,
+  worker,
+  nextEvent,
+} = require('./helpers.js');
 
 // A worker mutation crosses its link port as a `vfs-mutate` request. The
 // main kernel takes nothing it says on trust: the mutation, the place, its
@@ -168,6 +176,35 @@ describe('mutation RPC', () => {
       assert.deepEqual(taken, [
         ['rm', { force: true, recursive: false, directory: false }],
       ]);
+    } finally {
+      w.kernel.close();
+      k.close();
+      rm(root);
+    }
+  });
+
+  // A worker kernel's close() settles the requests it still waits for,
+  // and refuses those asked afterwards, as the closed kernel; the close of
+  // its port that follows changes neither.
+  it("a worker kernel's close() rejects its mutations in flight and later ones as the closed kernel", async () => {
+    const root = tmpDir('vfs-rpc');
+    const k = await kernel(root, {
+      v: { origin: 'virtual', fs: { writable: true } },
+    });
+    const w = worker(k);
+    try {
+      const closed = {
+        code: 'ERR_VFS_CLOSED',
+        message: '[vfs] kernel closed before publication',
+      };
+      const v = w.kernel.fs('v');
+      const pending = v.writeFile('/a.txt', 'a');
+      const portClosed = nextEvent(w.port, 'close');
+      w.kernel.close();
+      await assert.rejects(pending, closed, 'in flight');
+      await assert.rejects(v.writeFile('/b.txt', 'b'), closed, 'after');
+      await portClosed;
+      await assert.rejects(v.unlink('/a.txt'), closed, 'its port closed');
     } finally {
       w.kernel.close();
       k.close();
