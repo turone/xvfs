@@ -997,6 +997,16 @@ What Node's own implementation opens inside a call the routing passed
 through (`writeFileSync` → `openSync`) runs in the native section and is
 not routed again.
 
+**`install()` and `uninstall()` update the named exports of the ES
+modules `node:fs` and `node:fs/promises` (`syncBuiltinESMExports()`).**
+_Why:_ Node binds them from the CommonJS exports when a module first
+imports them, and again only when asked: an `import { readFileSync } from
+'node:fs'` bound before `install()` — by a preload ahead of the bootstrap
+— kept the original function and read what strict hides. A named import
+is a live binding, so once updated it follows the patch whenever it was
+made; a reference a module copied itself before `install()` cannot be
+reached, and is documented as such.
+
 **A wrapper calls its original once no kernel is installed, and each
 `install()` wraps the restored originals.** _Why:_ a reference taken while
 the patch was installed — a module's destructured `node:fs`, the functions
@@ -1220,7 +1230,8 @@ workers call `attach()`.** _Why:_ preloads do not run in worker threads.
   variant is routed as its function is and restored with it, any other
   function an export carries stays on its replacement; an `install()`
   that fails half-way undoes itself; with no kernel installed, and inside
-  the native section, a wrapper is its original.
+  the native section, a wrapper is its original; both update the named
+  exports of the ES modules `node:fs` and `node:fs/promises`.
 - Every export of `node:fs` and `node:fs/promises`, and every function
   one carries, is in the table of `lib/adapters/fs-surface.js`; under
   strict, any other function is refused at every call before it runs.
