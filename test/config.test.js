@@ -27,6 +27,38 @@ describe('VfsConfig: globals', () => {
     assert.equal(global.memory.segmentSize, 1024);
   });
 
+  // An explicit `undefined` means "this key is not set": mergeDeep() must
+  // not let it clobber the default it would otherwise merge over.
+  it('treats an explicit undefined as absent, at every depth', () => {
+    const defaults = new VfsConfig().global;
+    for (const raw of [
+      { defaults: { memory: undefined } },
+      { defaults: { memory: { limit: undefined } } },
+      { defaults: { compaction: undefined } },
+      { defaults: { hooks: undefined } },
+      {
+        defaults: {
+          memory: { limit: undefined, segmentSize: undefined },
+          compaction: undefined,
+          hooks: { fs: undefined, module: undefined },
+        },
+      },
+    ]) {
+      assert.deepEqual(
+        new VfsConfig(raw).global,
+        defaults,
+        JSON.stringify(raw),
+      );
+    }
+    // A sibling key given alongside stays effective.
+    const { global } = make(
+      {},
+      { memory: { limit: undefined, segmentSize: '32 mib' } },
+    );
+    assert.equal(global.memory.limit, 1024 ** 3, 'default limit kept');
+    assert.equal(global.memory.segmentSize, 32 * 1024 ** 2);
+  });
+
   it('rejects invalid numbers', () => {
     fails({ defaults: { memory: { limit: 0 } } }, /limit/);
     fails({ defaults: { memory: { limit: -1 } } }, /limit/);

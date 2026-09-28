@@ -209,9 +209,10 @@ export interface ResolvedPlace {
 /**
  * The resolved, validated configuration: deep-frozen after construction.
  * A wrong option throws an `Error` whose message starts with
- * `[vfs config]` — except an explicit `undefined` given for `memory`,
- * `compaction` or `hooks` of `defaults`, which today replaces the section
- * and fails as a `TypeError`.
+ * `[vfs config]`. An explicit `undefined` anywhere in `raw` — a whole
+ * section (`defaults.memory`, `defaults.compaction`, `defaults.hooks`) or
+ * one of its own keys (`memory.limit`) — is the same as the key being
+ * absent: the default applies.
  */
 export class VfsConfig {
   #private;
