@@ -69,6 +69,30 @@ describe('VfsConfig: globals', () => {
       /unknown option "other"/,
     );
   });
+
+  // Every nested section of `defaults` rejects an unknown key exactly as
+  // the top level does, so a typo (`limt` for `limit`) fails loudly instead
+  // of being silently dropped by mergeDeep.
+  it('rejects unknown keys in every nested defaults section', () => {
+    fails(
+      { defaults: { memory: { limt: '2 gib' } } },
+      /defaults\.memory: unknown option "limt"/,
+    );
+    fails(
+      { defaults: { compaction: { treshold: 0.5 } } },
+      /defaults\.compaction: unknown option "treshold"/,
+    );
+    fails(
+      { defaults: { hooks: { fss: false } } },
+      /defaults\.hooks: unknown option "fss"/,
+    );
+    fails({ defaults: { memory: 'x' } }, /defaults\.memory must be an object/);
+    fails(
+      { defaults: { compaction: 1 } },
+      /defaults\.compaction must be an object/,
+    );
+    fails({ defaults: { hooks: null } }, /defaults\.hooks must be an object/);
+  });
 });
 
 describe('VfsConfig: place names', () => {
@@ -164,6 +188,21 @@ describe('VfsConfig: domains', () => {
       /ext must be a non-empty array/,
     );
     fails({ places: { a: { fs: { ext: ['.js'] } } } }, /without dots/);
+  });
+
+  it('rejects unknown keys in require, import and fs.script', () => {
+    fails(
+      { places: { a: { require: { ext: ['js'], compiled: true } } } },
+      /unknown option "compiled"/,
+    );
+    fails(
+      { places: { a: { import: { ext: ['js'], compile: true } } } },
+      /unknown option "compile"/,
+    );
+    fails(
+      { places: { a: { fs: { script: { ext: ['js'], compiled: true } } } } },
+      /unknown option "compiled"/,
+    );
   });
 
   it('requires at least one domain', () => {
@@ -341,6 +380,14 @@ describe('VfsConfig: compress', () => {
     fails(
       { places: { a: { fs: { compress: { encodings: [] } } } } },
       /non-empty/,
+    );
+    fails(
+      {
+        places: {
+          a: { fs: { compress: { encodings: ['gzip'], quality: 5 } } },
+        },
+      },
+      /unknown option "quality"/,
     );
   });
 
