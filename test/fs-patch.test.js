@@ -16,6 +16,7 @@ const {
   kernel,
   drain,
   diskCalls,
+  within,
 } = require('./helpers.js');
 
 // The disk as it is, behind the patch: captured before any install.
@@ -29,6 +30,9 @@ const {
   openAsBlob: openAsBlobDisk,
   openAsBlobSync: openAsBlobSyncDisk,
   rmdirSync: rmdirDisk,
+  open: openDisk,
+  read: readFd,
+  close: closeFd,
 } = fs;
 
 // fs-patch executes router decisions; these tests exercise node:fs itself
@@ -1405,6 +1409,312 @@ describe('fs-patch under strict: readFile with a flag that writes', () => {
       detail: 'virtual file',
     });
     assert.equal(readDisk(at('up', 'a.txt'), 'utf8'), 'published');
+  });
+});
+
+// createReadStream opens the file with its `flags` too, and a published
+// entry was streamed from the VFS whatever they were. It is routed as
+// open() with them, as readFile is. The call returns a stream at once,
+// whatever the routing says, and a refusal is emitted on it, as node:fs
+// emits its own.
+
+// The stream createReadStream returns for `{ flags }`, taken at once — a
+// refusal never throws, nor is it emitted before the call returns — then
+// read to its end: its content ('ok:…'), or the error it emits; and the
+// asynchronous disk calls made meanwhile.
+const streamOf = async (file, flags, options = {}) => {
+  const calls = diskCalls();
+  let stream = null;
+  try {
+    stream = fs.createReadStream(file, { ...options, flags });
+    assert.equal(stream.destroyed, false, `${file} [${flags}]: after`);
+    const chunks = [];
+    try {
+      await within(
+        (async () => {
+          for await (const chunk of stream) chunks.push(chunk);
+        })(),
+        `the stream of ${file} [${flags}]`,
+      );
+      return { outcome: `ok:${Buffer.concat(chunks)}`, calls: calls.count };
+    } catch (err) {
+      return { outcome: err, calls: calls.count };
+    }
+  } finally {
+    calls.stop();
+    stream?.destroy();
+  }
+};
+
+// Every flag is refused so, on the stream, before any disk call.
+const refusedStreams = async (file, flags, expected) => {
+  for (const flag of flags) {
+    const { outcome, calls } = await streamOf(file, flag);
+    refused(outcome, { ...expected, file, args: [flag] });
+    assert.equal(calls, 0, `${file} [${flag}]: no disk call`);
+  }
+};
+
+// What node:fs streams of a plain file outside appRoot with the same flag
+// and content, and what the file holds afterwards.
+const nativeStream = async (plain, content, flag) => {
+  if (content === null) rm(plain);
+  else writeDisk(plain, content);
+  const { outcome } = await streamOf(plain, flag);
+  const after = onDisk(plain) ? readDisk(plain, 'utf8') : null;
+  return { outcome: outcome.code ?? outcome, after };
+};
+
+describe('fs-patch: createReadStream with a flag that writes', () => {
+  let root;
+  let outside;
+  let k;
+  const at = (...p) => path.join(root, ...p);
+
+  before(async () => {
+    outside = tmpDir('fspatch-streamflag-out');
+    root = writeTree(tmpDir('fspatch-streamflag'), {
+      'ro/a.txt': 'published',
+      'ro/raw.bin': 'raw', // not cached: the disk territory
+      'site/a.txt': 'published',
+      'prep/a.txt': 'published', // prepared: served upper-case
+      'drive/d.txt': 'disk',
+    });
+    fs.mkdirSync(at('v', 'sub'), { recursive: true });
+    fs.mkdirSync(at('m'));
+    k = await kernel(
+      root,
+      {
+        ro: { fs: { ext: ['txt'] } },
+        site: { fs: { ext: ['txt'], writable: true } },
+        prep: { fs: { ext: ['txt'], writable: true, prepare: 'upper' } },
+        drive: { provider: 'disk', fs: true },
+        v: { origin: 'virtual', fs: { writable: true } },
+        m: { provider: 'map', origin: 'virtual', fs: { writable: true } },
+      },
+      { watchTimeout: 60000 },
+      { preparers: { upper: (raw) => raw.toString().toUpperCase() } },
+    );
+    k.fs('m').writeFile('/p.txt', 'virtual');
+    await k.fs('v').writeFile('/p.txt', 'virtual');
+    fsPatch.install(k);
+  });
+
+  after(() => {
+    fsPatch.uninstall();
+    k.close();
+    rm(root);
+    rm(outside);
+  });
+
+  it('a published entry: a flag that can read is ENOTSUP, one that only writes routed as a mutation', async () => {
+    for (const file of [
+      at('ro', 'a.txt'),
+      at('site', 'a.txt'),
+      at('prep', 'a.txt'),
+    ]) {
+      await refusedStreams(file, READ_WRITE_FLAGS, {
+        code: 'ENOTSUP',
+        detail: 'virtual file',
+      });
+      assert.equal(readDisk(file, 'utf8'), 'published', file);
+    }
+    await refusedStreams(at('ro', 'a.txt'), WRITE_ONLY_FLAGS, {
+      code: 'EROFS',
+    });
+    for (const name of ['v', 'm']) {
+      await refusedStreams(at(name, 'p.txt'), WRITE_FLAGS, {
+        code: 'ENOTSUP',
+        detail: 'virtual file',
+      });
+      assert.equal(k.fs(name).readFile('/p.txt', 'utf8'), 'virtual', name);
+    }
+    // A flag that only reads keeps the canonical content.
+    for (const flag of READ_FLAGS) {
+      const { outcome } = await streamOf(at('prep', 'a.txt'), flag);
+      assert.equal(outcome, 'ok:PUBLISHED', `${flag}`);
+    }
+  });
+
+  it('what open() lets through streams natively, as node:fs streams a plain file', async () => {
+    const plain = path.join(outside, 'plain.txt');
+    // The raw file of a published entry of a writable place.
+    const file = at('site', 'a.txt');
+    for (const flag of WRITE_ONLY_FLAGS) {
+      writeDisk(file, 'published');
+      const native = await nativeStream(plain, 'published', flag);
+      const { outcome } = await streamOf(file, flag);
+      assert.equal(outcome.code ?? outcome, native.outcome, `${flag}`);
+      assert.equal(readDisk(file, 'utf8'), native.after, `${flag}`);
+    }
+    // A new file there, and one outside appRoot, with any flag that writes.
+    for (const flag of WRITE_FLAGS) {
+      const fresh = at('site', 'fresh.txt');
+      rm(fresh);
+      const native = await nativeStream(plain, null, flag);
+      const { outcome } = await streamOf(fresh, flag);
+      assert.equal(outcome.code ?? outcome, native.outcome, `${flag}`);
+      const after = onDisk(fresh) ? readDisk(fresh, 'utf8') : null;
+      assert.equal(after, native.after, `${flag}`);
+    }
+  });
+
+  // The refusal comes before the stream opens anything, whatever `fs` it is
+  // given: its own functions, which no routing sees, open nothing.
+  it('a refusal opens nothing, whatever fs the stream is given', async () => {
+    const opened = [];
+    const own = {
+      open: (...args) => {
+        opened.push(String(args[0]));
+        return openDisk(...args);
+      },
+      read: readFd,
+      close: closeFd,
+    };
+    writeDisk(at('site', 'a.txt'), 'published');
+    for (const [file, flags, code] of [
+      [at('site', 'a.txt'), 'r+', 'ENOTSUP'],
+      [at('prep', 'a.txt'), 'a+', 'ENOTSUP'],
+      [at('ro', 'a.txt'), 'w', 'EROFS'],
+      [at('v', 'p.txt'), 'w', 'ENOTSUP'],
+    ]) {
+      const { outcome } = await streamOf(file, flags, { fs: own });
+      assert.equal(outcome.code ?? outcome, code, `${file} [${flags}]`);
+      assert.equal(outcome.path, file);
+    }
+    assert.deepEqual(opened, [], 'nothing opened');
+    assert.equal(readDisk(at('site', 'a.txt'), 'utf8'), 'published');
+    assert.equal(readDisk(at('ro', 'a.txt'), 'utf8'), 'published');
+    // What routing lets through opens with them.
+    const stream = fs.createReadStream(path.join(outside, 'own.txt'), {
+      flags: 'a+',
+      fs: own,
+    });
+    assert.equal(await drain(stream).then(String), '');
+    assert.deepEqual(opened, [path.join(outside, 'own.txt')]);
+  });
+
+  // A stream given a descriptor opens nothing: node:fs reads the
+  // descriptor, whatever path names it and whatever its flags say.
+  it('a descriptor given: node:fs reads it, the path only names it', async () => {
+    const file = path.join(outside, 'fd.txt');
+    writeDisk(file, 'descriptor');
+    for (const flags of [undefined, 'r+', 'w']) {
+      const fd = fs.openSync(file, 'r');
+      const stream = fs.createReadStream(at('prep', 'a.txt'), { fd, flags });
+      assert.equal(String(await drain(stream)), 'descriptor', `${flags}`);
+    }
+    const handle = await fs.promises.open(file, 'r');
+    const viaHandle = fs.createReadStream(at('v', 'p.txt'), {
+      fd: handle,
+      flags: 'a+',
+    });
+    assert.equal(String(await drain(viaHandle)), 'descriptor');
+    assert.equal(readDisk(at('prep', 'a.txt'), 'utf8'), 'published');
+  });
+
+  it('the disk territory, a disk place and a virtual place, as before', async () => {
+    for (const file of [at('ro', 'raw.bin'), at('drive', 'd.txt')]) {
+      const before = readDisk(file, 'utf8');
+      await refusedStreams(file, WRITE_FLAGS, { code: 'EROFS' });
+      assert.equal(readDisk(file, 'utf8'), before, file);
+    }
+    for (const file of [at('v', 'x.txt'), at('m', 'x.txt')]) {
+      await refusedStreams(file, WRITE_FLAGS, {
+        code: 'ENOTSUP',
+        detail: 'virtual place',
+      });
+    }
+    assert.deepEqual(listDisk(at('v'), { recursive: true }), ['sub']);
+    assert.deepEqual(listDisk(at('m')), []);
+  });
+});
+
+describe('fs-patch under strict: createReadStream with a flag that writes', () => {
+  let root;
+  let outside;
+  let k;
+  const at = (...p) => path.join(root, ...p);
+
+  before(async () => {
+    outside = tmpDir('fspatch-streamflag-strict-out');
+    root = writeTree(tmpDir('fspatch-streamflag-strict'), {
+      'ro/raw.bin': 'raw', // not cached: the disk territory
+      'up/a.txt': 'published',
+      'stray/s.txt': 'unmanaged',
+    });
+    fs.mkdirSync(at('m'));
+    k = await kernel(
+      root,
+      {
+        ro: { fs: { ext: ['txt'], fallback: 'disk' } },
+        up: { fs: { ext: ['txt'], writable: true } },
+        m: { provider: 'map', origin: 'virtual', fs: { writable: true } },
+      },
+      { strict: true, watchTimeout: 60000 },
+    );
+    fsPatch.install(k);
+  });
+
+  after(() => {
+    fsPatch.uninstall();
+    k.close();
+    rm(root);
+    rm(outside);
+  });
+
+  it('a flag that can read a hidden path is EACCES; one that only writes follows the mutation routing', async () => {
+    for (const file of [
+      at('ro', 'new.txt'),
+      at('up', 'new.txt'),
+      at('m', 'x.txt'),
+      at('stray', 's.txt'),
+    ]) {
+      await refusedStreams(file, READ_WRITE_FLAGS, { code: 'EACCES' });
+    }
+    await refusedStreams(at('ro', 'new.txt'), WRITE_ONLY_FLAGS, {
+      code: 'EROFS',
+    });
+    await refusedStreams(at('m', 'x.txt'), WRITE_ONLY_FLAGS, {
+      code: 'ENOTSUP',
+      detail: 'virtual place',
+    });
+    await refusedStreams(at('stray', 's.txt'), WRITE_ONLY_FLAGS, {
+      code: 'EACCES',
+    });
+    await refusedStreams(at('up', 'a.txt'), READ_WRITE_FLAGS, {
+      code: 'ENOTSUP',
+      detail: 'virtual file',
+    });
+    assert.equal(onDisk(at('ro', 'new.txt')), false);
+    assert.equal(onDisk(at('up', 'new.txt')), false);
+    assert.deepEqual(listDisk(at('m')), []);
+    assert.equal(readDisk(at('stray', 's.txt'), 'utf8'), 'unmanaged');
+    assert.equal(readDisk(at('up', 'a.txt'), 'utf8'), 'published');
+    // A writable disk-origin place: its raw file, as node:fs streams a
+    // plain one, hidden until the watcher publishes it.
+    const plain = path.join(outside, 'plain.txt');
+    const file = at('up', 'new.txt');
+    for (const flag of WRITE_ONLY_FLAGS) {
+      rm(file);
+      const native = await nativeStream(plain, null, flag);
+      const { outcome } = await streamOf(file, flag);
+      assert.equal(outcome.code ?? outcome, native.outcome, `${flag}`);
+      const after = onDisk(file) ? readDisk(file, 'utf8') : null;
+      assert.equal(after, native.after, `${flag}`);
+    }
+  });
+
+  it('a descriptor given: node:fs reads it, whatever path names it', async () => {
+    const file = path.join(outside, 'fd.txt');
+    writeDisk(file, 'descriptor');
+    const fd = fs.openSync(file, 'r');
+    const stream = fs.createReadStream(at('stray', 's.txt'), {
+      fd,
+      flags: 'r+',
+    });
+    assert.equal(String(await drain(stream)), 'descriptor');
+    assert.equal(readDisk(at('stray', 's.txt'), 'utf8'), 'unmanaged');
   });
 });
 
