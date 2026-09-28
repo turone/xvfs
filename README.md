@@ -443,7 +443,8 @@ new VfsConfig({ defaults: { strict: true }, places: { ... } });
 
 **`strict: true` makes `appRoot` the routing boundary.** Every path under
 `appRoot` that no place owns is `EACCES` — at every depth, file or
-directory, without the router touching the disk.
+directory, without the router touching the disk (but to learn, once, the
+real path of `appRoot` and, on Windows, what a drive letter names: below).
 
 Strict is a **routing and access policy inside `appRoot`** for code that
 goes through the patched `node:fs` and the module hooks: unmanaged
@@ -487,9 +488,22 @@ the patched `node:fs` replace the operating system's isolation.
   another drive, a short name names nothing of `appRoot` and passes. A
   long name of that form is taken for a short one. `appRoot` itself may be
   given with short names (`os.tmpdir()` on a CI runner): the paths spelled
-  as it is route as usual. Without strict nothing changes. A drive mapped
-  to `appRoot`'s share is not recognized: give `appRoot` in the form the
-  application uses.
+  as it is route as usual. Without strict nothing changes.
+- On Windows under strict a drive letter other than `appRoot`'s that
+  names a share (`net use`), or `appRoot`, a directory above it or below
+  it (`subst`), is refused whole: every path on it is `EACCES` before any
+  native I/O. What a letter names is asked of the disk
+  (`fs.realpathSync.native` of its root) the first time a path on it is
+  routed, once per letter and thread; a letter that names nothing is asked
+  again, one mapped anew after its answer is not seen. A drive off
+  `appRoot`'s line stays native.
+- Under strict an `appRoot` spelled through a link, a subst drive or 8.3
+  names has a second spelling, its real path (`fs.realpathSync.native`,
+  asked once when the kernel is built): a path in or below it is `EACCES`,
+  a recursive walk from above it `ENOTSUP`, a short name where a path
+  leaves it `EACCES`, as for `appRoot`'s own spelling. A share of this
+  machine is not recognized as its local path: an `appRoot` on
+  `\\localhost\C$\…` is reachable as `C:\…` too.
 - `appRoot` itself is a **managed root**: `readdir(appRoot)` and
   `opendir(appRoot)` list the enabled places and nothing else, and
   `stat(appRoot)` is a directory. `watch` of it — as of any managed
@@ -504,8 +518,8 @@ the patched `node:fs` replace the operating system's isolation.
   unpublished or excluded-ext paths → `EACCES` (disk-backed entries
   excepted) — unless a disk-origin place sets `fs.fallback: 'disk'`
   (below).
-- Paths outside `appRoot` → ordinary Node (on Windows, UNC and namespace
-  paths, streams and short names excepted: above), except operations whose walk would enter
+- Paths outside `appRoot` → ordinary Node (the spellings of `appRoot`
+  above excepted), except operations whose walk would enter
   `appRoot` from above: recursive listings, watches, copies and removals,
   and `rename`, of a directory above it. Scanner does not follow symlinks.
 - Listings (`readdir`, `opendir`) always come from the places. A copy or a
