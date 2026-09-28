@@ -9,7 +9,14 @@ const path = require('node:path');
 const { pathToFileURL, fileURLToPath } = require('node:url');
 const fsPatch = require('../lib/adapters/fs-patch.js');
 const moduleHook = require('../lib/adapters/module-hook.js');
-const { tmpDir, writeTree, rm, kernel, drain } = require('./helpers.js');
+const {
+  tmpDir,
+  writeTree,
+  rm,
+  kernel,
+  drain,
+  assertAtRest,
+} = require('./helpers.js');
 const {
   refused,
   countNative,
@@ -1319,6 +1326,94 @@ describe(
     });
   },
 );
+
+// The facade takes keys, not paths, but under strict a mutation of it
+// takes no key node:fs would be refused below appRoot — a stream, a name
+// in 8.3 form, anywhere in the key — in a virtual place, where writeFiles
+// has no path at all, and on disk alike: EACCES before the place's own
+// checks, nothing written, nothing queued. Off Windows, and without
+// strict, such a key is a name like any other.
+const SPELLED = {
+  v: { origin: 'virtual', fs: { writable: true } },
+  m: { provider: 'map', origin: 'virtual', fs: { writable: true } },
+  d: { fs: { writable: true } },
+};
+const FOREIGN_KEYS = [
+  '/a.txt:s',
+  '/a.txt::$DATA',
+  '/dir:x/a.txt',
+  '/A~1.TXT',
+  '/SUB~1/a.txt',
+  '/sub/INDEX~1.HTM',
+];
+
+describe('strict: the facade takes no key in a stream or 8.3 spelling', () => {
+  it(
+    'win32: writeFiles and every mutation, virtual or on disk: EACCES, nothing made',
+    {
+      skip: WIN ? false : 'Windows: stream and 8.3 spellings',
+    },
+    async () => {
+      const root = writeTree(tmpDir('facade-spellings'), { 'd/a.txt': 'a' });
+      const k = await kernel(root, SPELLED, { strict: true });
+      try {
+        for (const name of ['v', 'm', 'd']) {
+          const place = k.fs(name);
+          const ok = place.pathOf('/ok.txt');
+          for (const key of FOREIGN_KEYS) {
+            const at = place.pathOf(key);
+            const calls = [
+              ['writeFiles', () => place.writeFiles([[key, 'x']]), at],
+              ['open', () => place.writeFile(key, 'x'), at],
+              ['open', () => place.appendFile(key, 'x'), at],
+              ['unlink', () => place.unlink(key), at],
+              ['mkdir', () => place.mkdir(key), at],
+              ['rm', () => place.rm(key, { recursive: true }), at],
+              ['rename', () => place.rename(key, '/ok.txt'), at, ok],
+              ['rename', () => place.rename('/ok.txt', key), ok, at],
+            ];
+            for (const [syscall, call, given, dest] of calls) {
+              const what = `${name}: ${syscall} ${key}`;
+              assert.throws(call, (err) => {
+                assert.equal(err.code, 'EACCES', what);
+                assert.equal(err.syscall, syscall, what);
+                assert.equal(err.path, given, what);
+                assert.equal(err.dest, dest, what);
+                return true;
+              });
+            }
+          }
+        }
+        assert.deepEqual(k.fs('v').readdir('/'), []);
+        assert.deepEqual(k.fs('m').readdir('/'), []);
+        assert.deepEqual(listDisk(path.join(root, 'd')), ['a.txt']);
+        assert.equal(readDisk(path.join(root, 'd', 'a.txt'), 'utf8'), 'a');
+        await assertAtRest(k);
+      } finally {
+        k.close();
+        rm(root);
+      }
+    },
+  );
+
+  it('without strict, and off Windows: such keys are names like any other', async () => {
+    const root = writeTree(tmpDir('facade-spellings-open'), { 'd/a.txt': 'a' });
+    const k = await kernel(root, SPELLED, { strict: !WIN });
+    try {
+      const keys = ['/A~1.TXT', '/SUB~1/a.txt', '/a.txt:s'];
+      const v = k.fs('v');
+      await v.writeFiles(keys.map((key) => [key, key]));
+      for (const key of keys) assert.equal(v.readFile(key, 'utf8'), key);
+      const m = k.fs('m');
+      m.writeFiles([['/A~1.TXT', 'm']]);
+      await m.rename('/A~1.TXT', '/SUB~1/b.txt');
+      assert.equal(m.readFile('/SUB~1/b.txt', 'utf8'), 'm');
+    } finally {
+      k.close();
+      rm(root);
+    }
+  });
+});
 
 // A drive letter may name appRoot, a directory above it or below it
 // (`subst`), or its share (`net use`), and appRoot itself may be spelled
