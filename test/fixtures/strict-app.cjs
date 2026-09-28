@@ -7,7 +7,7 @@
 
 const fs = require('node:fs');
 const path = require('node:path');
-const { kernel } = require('shared-memory-fs');
+const { kernel } = require('xvfs');
 
 const root = process.cwd();
 const text = kernel.fs('assets').readFile('/hello.txt', 'utf8').trim();

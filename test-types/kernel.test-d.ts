@@ -5,8 +5,8 @@
 import { EventEmitter, on, once } from 'node:events';
 import { Worker } from 'node:worker_threads';
 import type { MessagePort } from 'node:worker_threads';
-import { VfsConfig, VfsKernel } from 'shared-memory-fs';
-import pkg = require('shared-memory-fs');
+import { VfsConfig, VfsKernel } from 'xvfs';
+import pkg = require('xvfs');
 import type {
   CacheEntry,
   DeepReadonly,
@@ -20,7 +20,7 @@ import type {
   ResolvedPlace,
   ScriptOptions,
   VfsRawConfig,
-} from 'shared-memory-fs';
+} from 'xvfs';
 import { expectType } from './expect.js';
 
 const config = new VfsConfig({

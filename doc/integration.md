@@ -164,11 +164,11 @@ Two layers, `defaults.hooks.{fs,module}`:
 | `fs`     | table-driven `node:fs` patch (sync/callback/promises)  | Executes `FsRouter` decisions: implemented, recognized but unsupported, passthrough (README). |
 | `module` | `module.registerHooks({ resolve, load })` + `_compile` | One chain for `require()` and `import`. Domain = `context.conditions.includes('require')`.    |
 
-Manual install (when not using `--import shared-memory-fs/register`):
+Manual install (when not using `--import xvfs/register`):
 
 ```js
-const fsPatch = require('shared-memory-fs/adapters/fs-patch');
-const moduleHook = require('shared-memory-fs/adapters/module-hook');
+const fsPatch = require('xvfs/adapters/fs-patch');
+const moduleHook = require('xvfs/adapters/module-hook');
 fsPatch.install(kernel);
 moduleHook.install(kernel);
 ```
@@ -449,7 +449,7 @@ const handler = script.runInThisContext();
 
 ```js
 const fs = require('node:fs');
-const fsPatch = require('shared-memory-fs/adapters/fs-patch');
+const fsPatch = require('xvfs/adapters/fs-patch');
 
 beforeEach(async () => {
   kernel = new VfsKernel(testConfig, { appRoot: '/test' });
@@ -474,7 +474,7 @@ Never leave hooks installed on the test runner: uninstall in `after`.
 ## CLI overrides
 
 ```
-node --import shared-memory-fs/register app.js -- \
+node --import xvfs/register app.js -- \
   --vfs.defaults.memory.limit=512mib \
   --vfs.defaults.strict=true \
   --vfs.defaults.hooks.fs=false \
@@ -534,7 +534,7 @@ other means is not contained.
 - [ ] Build `VfsConfig` matching your directory layout (place name =
       folder = mount).
 - [ ] Main: `new VfsKernel(config, { appRoot })` (or
-      `--import shared-memory-fs/register`).
+      `--import xvfs/register`).
 - [ ] Main: `await kernel.initialize()` _before_ spawning workers.
 - [ ] Main: `const { vfs, transferList } = kernel.link()`.
 - [ ] Worker: `new Worker(file, { workerData: { vfs }, transferList })`.

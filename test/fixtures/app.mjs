@@ -6,7 +6,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { Worker } from 'node:worker_threads';
-import vfs from 'shared-memory-fs';
+import vfs from 'xvfs';
 import { greet } from './modules/greet.mjs';
 import cjs from './modules/cjs.cjs';
 

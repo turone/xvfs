@@ -2,12 +2,12 @@
 // a side effect, the adapters install and uninstall over a kernel — and
 // the `kernel` getter, which ESM reads from the default import.
 
-import 'shared-memory-fs/register';
-import * as fsPatch from 'shared-memory-fs/adapters/fs-patch';
-import { install, uninstall } from 'shared-memory-fs/adapters/module-hook';
-import pkg from 'shared-memory-fs';
-import * as ns from 'shared-memory-fs';
-import { VfsKernel } from 'shared-memory-fs';
+import 'xvfs/register';
+import * as fsPatch from 'xvfs/adapters/fs-patch';
+import { install, uninstall } from 'xvfs/adapters/module-hook';
+import pkg from 'xvfs';
+import * as ns from 'xvfs';
+import { VfsKernel } from 'xvfs';
 import { expectType } from './expect.js';
 
 declare const kernel: VfsKernel;

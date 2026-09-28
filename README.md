@@ -1,4 +1,4 @@
-# shared-memory-fs
+# xvfs
 
 Pooled SharedArrayBuffer virtual filesystem for Node.js `worker_threads`,
 plus `node:fs` and `module.registerHooks` adapters.
@@ -70,7 +70,7 @@ is unsupported.
 ## Install
 
 ```
-npm install shared-memory-fs
+npm install xvfs
 ```
 
 Package exports: `.`, `./register`, `./adapters/fs-patch`,
@@ -94,7 +94,7 @@ read `VfsKernel.current`, or `kernel` of the default import.
 Bootstrap (main thread only):
 
 ```
-node --import shared-memory-fs/register app.js -- --vfs.config=./vfs.config.cjs
+node --import xvfs/register app.js -- --vfs.config=./vfs.config.cjs
 ```
 
 Config file: `--vfs.config=…` or `vfs.config.{js,cjs,mjs,json}` in cwd.
@@ -106,7 +106,7 @@ Workers do **not** run `--import` / `--require` preloads. Pass
 `kernel.link()` as `workerData.vfs` and call `attach()`:
 
 ```js
-const { attach } = require('shared-memory-fs');
+const { attach } = require('xvfs');
 const kernel = attach(); // reads workerData.vfs
 ```
 
@@ -116,7 +116,7 @@ Place **name is the directory under `appRoot`**, the mount, the cache
 namespace and the snapshot/delta key. There is no separate `dir` field.
 
 ```js
-const { VfsConfig, VfsKernel } = require('shared-memory-fs');
+const { VfsConfig, VfsKernel } = require('xvfs');
 const { Worker } = require('node:worker_threads');
 
 const config = new VfsConfig({
@@ -153,7 +153,7 @@ const w = new Worker('./worker.js', {
 Worker:
 
 ```js
-const { attach } = require('shared-memory-fs');
+const { attach } = require('xvfs');
 const kernel = attach();
 
 const site = kernel.fs('static');

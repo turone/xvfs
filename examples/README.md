@@ -1,6 +1,6 @@
 # Examples
 
-Runnable demos covering the main shared-memory-fs use cases. Each subfolder
+Runnable demos covering the main xvfs use cases. Each subfolder
 is self-contained — no extra build steps unless explicitly noted.
 
 | Example                                  | What it shows                                                                                                                                                                                                                                                                        |
@@ -25,7 +25,7 @@ check.
 
 ## Common setup
 
-All examples import shared-memory-fs as a sibling of this folder:
+All examples import xvfs as a sibling of this folder:
 
 ```js
 const { VfsConfig, VfsKernel } = require('../..');
@@ -34,6 +34,6 @@ const moduleHook = require('../../lib/adapters/module-hook.js');
 ```
 
 If you copy an example out of the repo, replace those paths with
-`require('shared-memory-fs')`, `require('shared-memory-fs/adapters/fs-patch')`
-and `require('shared-memory-fs/adapters/module-hook')` — or skip the manual
-wiring entirely and start with `node --import shared-memory-fs/register`.
+`require('xvfs')`, `require('xvfs/adapters/fs-patch')`
+and `require('xvfs/adapters/module-hook')` — or skip the manual
+wiring entirely and start with `node --import xvfs/register`.

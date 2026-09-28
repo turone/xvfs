@@ -16,7 +16,7 @@ const { spawnSync } = require('node:child_process');
 // it, as it does for a consumer.
 
 const ROOT = path.resolve(__dirname, '..');
-const NAME = 'shared-memory-fs';
+const NAME = 'xvfs';
 const { exports: subpaths, types } = require('../package.json');
 
 // Values a declaration file exports; `export * from` follows the

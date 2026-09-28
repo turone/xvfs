@@ -217,7 +217,7 @@ export interface VfsKernelEvents {
  */
 export class VfsKernel extends EventEmitter<VfsKernelEvents> {
   #private;
-  /** Published by `--import shared-memory-fs/register` or `attach()`. */
+  /** Published by `--import xvfs/register` or `attach()`. */
   static get current(): VfsKernel | null;
   static set current(kernel: VfsKernel | null);
   /**

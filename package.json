@@ -1,8 +1,8 @@
 {
-  "name": "shared-memory-fs",
+  "name": "xvfs",
   "version": "1.0.0",
   "author": "Dmitriy Shyaryaiev <turone@ukr.net>",
-  "description": "SharedArrayBuffer-backed filesystem cache for Node.js worker_threads",
+  "description": "Extended virtual filesystem for Node.js: places over real paths, prepared content, one shared copy for worker threads, live updates, strict routing",
   "license": "MIT",
   "keywords": [
     "cache",
@@ -10,7 +10,9 @@
     "worker_threads",
     "filesystem",
     "node.js",
-    "metarhia"
+    "metarhia",
+    "vfs",
+    "virtual-filesystem"
   ],
   "repository": {
     "type": "git",
