@@ -21,6 +21,8 @@ const {
   PAIRS,
 } = require('./fs-calls.js');
 
+const WIN = process.platform === 'win32';
+
 // Under strict a native call on a place's disk — fs.fallback: 'disk', a
 // disk or node-default place — goes only where the disk says its path
 // really lies: in the place's directory, or off appRoot's line. A link out
@@ -597,6 +599,125 @@ describe('without strict: links answer as before', () => {
     }
   });
 });
+
+// On POSIX the kernel resolves `..` from the real directory before it, past
+// a symbolic link, so a path with `..` after a link into a place reaches
+// what the link's target holds. The disk proof (aliases) is asked the path
+// the OS opens — not path.resolve's folded form — and the router owns to
+// nobody a path that leaves appRoot through `..` after a name inside it.
+// Windows node:fs folds `..` before the OS, so it never reaches past the
+// link there; these are real symbolic links, so the describe is skipped.
+describe(
+  'POSIX strict: `..` past a symbolic link into a place',
+  { skip: WIN ? 'POSIX: node:fs folds `..` before the OS on Windows' : false },
+  () => {
+    let root;
+    let outside;
+    let k;
+    let native;
+    const at = (...p) => path.join(root, ...p);
+    // Built with literal `..`, which path.join would fold away.
+    const hidden = () => `${at('d', 'jro')}/../ro/h.bin`; // folds inside `d`
+    const hiddenDir = () => `${at('d', 'jro')}/../ro`;
+    const climb = () => `${at('d', 'jdeep')}/../../../h.bin`; // folds outside
+    const climbDir = () => `${at('d', 'jdeep')}/../../..`;
+
+    before(async () => {
+      const base = tmpDir('dotdot');
+      root = writeTree(path.join(base, 'app'), {
+        'ro/h.bin': 'hidden',
+        'ro/a/b/c/x.bin': 'x',
+        'd/f.bin': 'f',
+      });
+      outside = writeTree(path.join(base, 'outside'), { 'o.bin': 'o' });
+      linkDir(at('ro'), at('d', 'jro')); // into another place
+      linkDir(at('ro', 'a', 'b', 'c'), at('d', 'jdeep')); // deep into it
+      k = await kernel(
+        root,
+        { ro: PLACES.ro, d: PLACES.d },
+        { strict: true },
+        { preparers: PREPARERS },
+      );
+      native = countNative();
+      fsPatch.install(k);
+    });
+
+    after(() => {
+      fsPatch.uninstall();
+      native.restore();
+      k.close();
+      rm(path.dirname(root));
+    });
+
+    it('reads and lists the hidden through it: EACCES, nothing reaches node:fs', async () => {
+      native.calls.length = 0;
+      // Folds to /app/d/ro inside place `d`; the OS opens /app/ro (hidden).
+      await refusesEach(FILE_READS, [hidden()]);
+      await refusesEach(DIR_READS, [hiddenDir()]);
+      // Folds outside appRoot; the OS climbs back into ro through the link.
+      await refusesEach(FILE_READS, [climb()]);
+      await refusesEach(DIR_READS, [climbDir()]);
+      assert.deepEqual(native.calls, []);
+      assert.equal(readDisk(at('ro', 'h.bin'), 'utf8'), 'hidden');
+    });
+
+    it('writes to a read-only place through it: EACCES, nothing written', async () => {
+      native.calls.length = 0;
+      await refusesEach(FILE_MUTATIONS, [`${at('d', 'jro')}/../ro/new.bin`]);
+      assert.deepEqual(native.calls, []);
+      assert.deepEqual(listDisk(at('ro')).sort(), ['a', 'h.bin']);
+    });
+
+    it('mkdtemp through it: EACCES, nothing made', async () => {
+      native.calls.length = 0;
+      const prefix = `${at('d', 'jro')}/../ro/tmp-`;
+      await assert.rejects(
+        async () => fs.mkdtempSync(prefix),
+        refused('EACCES', 'mkdtemp', `${prefix}XXXXXX`),
+      );
+      assert.deepEqual(native.calls, []);
+      assert.deepEqual(listDisk(at('ro')).sort(), ['a', 'h.bin']);
+    });
+
+    it('a symlink whose target climbs into a place through it: EACCES, nothing made', async () => {
+      native.calls.length = 0;
+      // A target resolved from the link's directory: an absolute one that
+      // folds outside appRoot (the OS climbs back in), and a relative one
+      // (outside/.. then into the place, past the fold).
+      const app = path.basename(root);
+      const cases = [
+        [climb(), path.join(outside, 's1')],
+        [`../${app}/d/jro/../ro/h.bin`, path.join(outside, 's2')],
+      ];
+      for (const [target, link] of cases) {
+        await assert.rejects(
+          async () => fs.symlinkSync(target, link),
+          refused('EACCES', 'symlink', target, link),
+          `${target} -> ${link}`,
+        );
+        assert.equal(onDisk(link), false, link);
+      }
+      assert.deepEqual(native.calls, []);
+    });
+
+    it('a hard link whose source climbs into a place through it: EACCES, nothing made', async () => {
+      native.calls.length = 0;
+      // The OS names the inode of the source physically: `..` past the link
+      // reaches the hidden file, folded inside `d` or climbed outside.
+      const froms = [hidden(), climb()];
+      for (const from of froms) {
+        const to = path.join(outside, 'hard');
+        await assert.rejects(
+          async () => fs.linkSync(from, to),
+          refused('EACCES', 'link', from, to),
+          from,
+        );
+        assert.equal(onDisk(to), false, to);
+      }
+      assert.deepEqual(native.calls, []);
+    });
+  },
+);
 
 // Under strict a rename that leaves a place moves a regular file only: a
 // directory holding a link out of the place, or a link itself, would turn

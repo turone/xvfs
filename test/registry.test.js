@@ -394,6 +394,56 @@ describe('PlaceRegistry: UNC and namespace paths', () => {
   });
 });
 
+// POSIX under strict: a path that path.resolve puts outside appRoot but
+// that descended into it before a `..` climbed out — `d/link/../../x` — is
+// owned by nobody: a symbolic link on that name would send the path back
+// into a place, and the POSIX kernel resolves `..` from the real directory,
+// past this lexical router. Windows node:fs folds `..` before the OS, so
+// the collapsed path is what it opens; the rule is off there. Strings only,
+// on any host; links.test.js runs it through node:fs on POSIX.
+describe('PlaceRegistry: a path that climbs out of appRoot with `..`', () => {
+  const nobody = { place: null, key: null };
+  const registryOf = (strict) => {
+    const registry = new PlaceRegistry('/app', path.posix, strict);
+    registry.register({ name: 'd' });
+    return registry;
+  };
+
+  it('posix under strict: below appRoot then `..` out is owned by nobody', () => {
+    const registry = registryOf(true);
+    const out = [
+      '/app/d/jro/../../../x',
+      '/app/d/sub/deep/../../../../x',
+      '/app/d/../../x',
+      '/app/d/../..',
+      '/app/ro/../../elsewhere/y',
+    ];
+    for (const p of out) assert.deepEqual(registry.route(p), nobody, p);
+    // Never below appRoot: a plain path outside stays native.
+    const native = ['/app/../x', '/other/../x', '/x', '/app/../app-sibling/y'];
+    for (const p of native) assert.equal(registry.route(p), null, p);
+    // Folds back inside appRoot: routed to its place as usual — the disk
+    // proof (aliases), not the router, judges where `..` past a link lands.
+    assert.deepEqual(registry.route('/app/d/jro/../ro/x'), {
+      place: registry.get('d'),
+      key: '/ro/x',
+    });
+    assert.deepEqual(registry.route('/app/d/sub/../file'), {
+      place: registry.get('d'),
+      key: '/file',
+    });
+  });
+
+  it('posix without strict, and win32: the rule is off', () => {
+    const loose = registryOf(false);
+    assert.equal(loose.route('/app/d/jro/../../../x'), null);
+    const win = new PlaceRegistry('C:\\app', path.win32, true);
+    win.register({ name: 'd' });
+    // Windows folds `..` lexically, as node:fs does before the syscall.
+    assert.equal(win.route('C:\\app\\d\\jro\\..\\..\\..\\x'), null);
+  });
+});
+
 // NTFS takes a `:` past the drive for a stream of the file or directory
 // before it: `a.txt::$DATA` is a.txt itself, `C:\app::$INDEX_ALLOCATION` the
 // directory C:\app. A registry built for strict owns every such path to
