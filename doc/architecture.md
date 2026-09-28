@@ -813,9 +813,11 @@ disk where the path really lies before it hands the route on
 (`VfsKernel#proven`, `Aliases.territory`): `realpath.native` of the path —
 for a path to create, of its nearest existing ancestor with the rest after
 it — and, once, of the place's directory. In the place's directory, or off
-`appRoot`'s real line and on no share or namespace path, the route holds;
-anything else is `EACCES` before any native call, as is what realpath
-cannot answer. `PlaceFs` asks the same of its disk territory, its
+`appRoot`'s real line and on no share or namespace path, the route holds —
+in the disk territory of `fs.fallback: 'disk'` only where the real name
+has no extension the place caches: a link names a cached file another way
+(`t.bin` → `t.txt`), and the territory never serves one raw; anything else
+is `EACCES` before any native call, as is what realpath cannot answer. `PlaceFs` asks the same of its disk territory, its
 disk-backed entries and its disk-origin mutations, and the load hook of a
 module of a `node-default` or `disk` place. A recursive listing of such a
 disk walks one directory at a time and enters no link

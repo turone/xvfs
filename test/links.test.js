@@ -486,6 +486,39 @@ describe('strict: a symbolic link to a file out of a place disk', () => {
       rm(root);
     }
   });
+
+  // The disk territory of `fs.fallback: 'disk'` never serves an extension
+  // its place caches: a link in the place that names such a file another
+  // way (t.bin -> t.txt) is refused, as the file itself is.
+  it('in the disk territory, a link to a file of a cached extension serves nothing', async (t) => {
+    const root = writeTree(tmpDir('file-links-cached'), TREE);
+    const link = path.join(root, 'terr', 't.bin');
+    try {
+      linkDisk(path.join(root, 'terr', 't.txt'), link, 'file');
+    } catch (err) {
+      rm(root);
+      return void t.skip(`no symbolic link to a file here (${err.code})`);
+    }
+    const options = { preparers: PREPARERS };
+    const k = await kernel(root, PLACES, { strict: true }, options);
+    const native = countNative();
+    fsPatch.install(k);
+    try {
+      await refusesEach(FILE_READS.slice(0, 6), [link]);
+      assert.equal(k.fs('terr').readFile('/t.bin'), null);
+      assert.equal(k.fs('terr').stat('/t.bin'), null);
+      assert.deepEqual(native.calls, []);
+      const media = path.join(root, 'terr', 'm.bin');
+      assert.equal(fs.readFileSync(media, 'utf8'), 'media');
+      assert.equal(k.fs('terr').readFile('/t.txt', 'utf8'), 'RAW');
+    } finally {
+      fsPatch.uninstall();
+      native.restore();
+      k.close();
+      unlinkDisk(link);
+      rm(root);
+    }
+  });
 });
 
 describe('without strict: links answer as before', () => {
