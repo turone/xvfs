@@ -327,6 +327,35 @@ describe('Aliases: where a native call on a place disk lands', () => {
     const places = realpath.calls.filter((p) => p === '/app/d');
     assert.equal(places.length, 1);
   });
+
+  // The path is proven as the OS opens it: `..` past a symbolic link is
+  // resolved from the link's real directory, not folded lexically. realpath
+  // is asked the path as given (`/app/d/j/../ro/…`), so a link out of the
+  // place that `..` then re-enters through is refused, though path.resolve
+  // would fold it to `/app/d/ro/…`, inside the place. For a path to create,
+  // its nearest existing ancestor is resolved the same way.
+  it('proves the path the OS opens: `..` past a link is the disk’s', () => {
+    const realpath = realpathOf(path.posix, {
+      '/app': '/app',
+      '/app/d': '/app/d',
+      '/app/d/j': '/app/ro',
+      // The OS resolves `j` to /app/ro, then `..` to /app, then ro/h.bin.
+      '/app/d/j/../ro/h.bin': '/app/ro/h.bin',
+      '/app/d/j/../ro': '/app/ro',
+      '/app/d/j/../sub': '/app/d/sub',
+      '/app/d/j/../sub/x': '/app/d/sub/x',
+    });
+    const posix = new Aliases('/app', path.posix, realpath);
+    // Into another place, though it folds to /app/d/ro/h.bin, inside `d`.
+    assert.equal(posix.territory('/app/d', '/app/d/j/../ro/h.bin'), null);
+    // A path to create there is refused as well (nearest ancestor is /app/ro).
+    assert.equal(posix.territory('/app/d', '/app/d/j/../ro/new.bin'), null);
+    // `..` that lands back inside the place is proven, at its real path.
+    assert.equal(
+      posix.territory('/app/d', '/app/d/j/../sub/x'),
+      '/app/d/sub/x',
+    );
+  });
 });
 
 describe('FsRouter under strict: the disk of a place names the place', () => {

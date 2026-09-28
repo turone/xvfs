@@ -840,9 +840,17 @@ reason the local path behind a share of this machine (`C:\…` behind an
 entry, a disk-origin write, the raw source of a copy — names its place
 (`{ kind: 'passthrough', place }`), and the kernel's route API asks the
 disk where the path really lies before it hands the route on
-(`VfsKernel#proven`, `Aliases.territory`): `realpath.native` of the path —
-for a path to create, of its nearest existing ancestor with the rest after
-it — and, once, of the place's directory. In the place's directory, or off
+(`VfsKernel#proven`, `Aliases.territory`): `realpath.native` of the path as
+the OS opens it — not `path.resolve`'s, whose `..` is folded before a
+symbolic link is resolved (`Aliases#absolute` keeps it, so the disk
+resolves `..` from the real directory, as the POSIX kernel does; Windows
+node:fs folds `..` before the syscall, and realpath.native alike, so
+nothing there changes) — for a path to create, of its nearest existing
+ancestor with the rest after it — and, once, of the place's directory. A
+path that `path.resolve` puts outside `appRoot` but that descended into it
+before a `..` climbed out (`d/link/../../x`) the lexical router owns to
+nobody (`PlaceRegistry#climbsOut`, POSIX under strict), since a symbolic
+link on that name would send it back in. In the place's directory, or off
 `appRoot`'s real line and on no share or namespace path, the route holds —
 in the disk territory of `fs.fallback: 'disk'` only where the real name
 has no extension the place caches: a link names a cached file another way
@@ -900,18 +908,22 @@ into managed territory is created through the patch), so it is refused as
 configuration, where it is found, once.
 
 **Under strict the patch makes no link to managed territory
-(`FsRouter.linksInto`): a `symlink` whose target, resolved from the link's
-directory as the OS resolves it, the registry places below `appRoot`, at
-it or above it — in any spelling it knows — and a hard `link` to a file
-below `appRoot` are `EACCES` before any native call, a link within one
-place included. In either mode a symbolic link's target is routed as a
+(`kernel.linksInto`): a `symlink` whose target, resolved from the link's
+directory as the OS resolves it, names — by its real path — a place,
+`appRoot` or a directory above it, and a hard `link` whose source so
+names one, are `EACCES` before any native call, a link within one place
+included. The target keeps its `..`: resolved from the link's directory
+but not folded lexically, so the disk resolves `..` past a symbolic link,
+and its real path (`Aliases.real`) decides — a target realpath cannot
+answer is refused. In either mode a symbolic link's target is routed as a
 read from the link's directory, where it was routed from the cwd.** _Why:_
 a junction takes no privilege, so any code under strict could make itself
 a path outside `appRoot` into a place, `appRoot` or a directory above it,
 past every lexical check; a hard link to a file of a read-only `disk`
 place gave it a writable name in a writable one. What a link names is
 what a read through it reaches, so its target is routed where the OS
-resolves it. A link within one place is refused too: which names of a
+resolves it — `..` and all, since `d/link/../secret` follows the link on
+POSIX. A link within one place is refused too: which names of a
 place's disk may alias which is the place's to decide, not the code
 running under strict.
 
