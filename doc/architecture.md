@@ -502,6 +502,16 @@ one update per accepted mutation, no coalescing.** _Why:_ each Promise
 corresponds to its own publication; validation and publication see the same
 state without serializing unrelated keys.
 
+**A mutation settles as published or refused: it commits through
+`#commit`, which refuses a kernel closed after the publication's last step
+with the closed-kernel error (`[vfs] kernel closed before publication`).
+The watch pipeline, compaction and `initialize()` commit through `#flush`
+alone.** _Why:_ `close()` is synchronous and a publication is not; `#flush`
+publishes nothing on a closed kernel, and returned silently, so a write
+whose kernel closed in the last `await` before its commit resolved though
+nothing was published. A watcher epoch or a relocation has no caller to
+tell, and `initialize()` checks the kernel right before its commit.
+
 **The semantics of a virtual place's mutations is written once
 (`VirtualStore`): which checks run, in which order, and what each refusal
 is; a store only executes it — `MapStore` at once, on the thread's own Map,
@@ -1171,6 +1181,7 @@ workers call `attach()`.** _Why:_ preloads do not run in worker threads.
 | Re-keying a SAB allocation in place on a subtree move                                                           | a pinned version would get a second projection, its pin unheeded  |
 | Recompressing, re-preparing or moving part of a subtree                                                         | wasted work; no raw input; a tree split between two names         |
 | A hierarchy check against the published index only                                                              | two overlapping mutations would both pass                         |
+| A mutation committed by a `#flush` that returns silently on a closed kernel                                     | the write resolves, though nothing was published                  |
 | Locking every ancestor of a created key                                                                         | serializes all writes of one directory                            |
 | One store class over an execution engine, its results sync or thenable                                          | a thenable test of every result; a subclass knows its execution   |
 | Scanning every key for implicit directories                                                                     | linear in the size of the place, on hot paths                     |
@@ -1222,6 +1233,8 @@ workers call `attach()`.** _Why:_ preloads do not run in worker threads.
   rest of a read it began, and runs no preparer.
 - A closed kernel publishes nothing and arms no timer: a watcher event
   whose `stat` lands after `close()` is dropped.
+- A mutation of a virtual place never resolves without its commit: one
+  whose kernel closes before it rejects as the closed kernel.
 - Companions never appear in `readdir`, `exists`, routing or the patched fs;
   `Place.companions(key)` enumerates them — never hand-roll key lists.
 - Kernel-internal disk I/O (kernel, the publication sink, watch pipeline,
