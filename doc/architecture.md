@@ -534,14 +534,19 @@ _Why:_ one writer keeps allocation single-threaded without locks inside SAB;
 a worker sees its own write before its Promise settles.
 
 **One table (`OPS`) describes each worker mutation for both ends of the
-RPC: what its request carries besides the key — bytes, a second key — and
-the options its store takes, which travel as booleans. The main end
-(`serveMutation()`) takes nothing else from a request: it checks the
-mutation, the place, its origin and writability and every key again, and
-hands the store the options of the table.** _Why:_ the worker's projection
-is read-only and never authoritative; one description keeps the two ends
-from drifting apart, and a store never gets an option its mutation does
-not take.
+RPC: what its request carries besides the key — bytes, a second key, or,
+in place of the key, a set of keys with the sizes of their bytes, all in
+one buffer (`writeFiles`) — and the options its store takes, which travel
+as booleans. The main end (`serveMutation()`) takes nothing else from a
+request: it checks the mutation, the place, its origin and writability
+and every key again — a set whole: every key canonical, none twice, sizes
+that add up to its buffer — and hands the store the options of the table;
+its answer carries the version of the commit of a set.** _Why:_ the
+worker's projection is read-only and never authoritative; one description
+keeps the two ends from drifting apart, and a store never gets an option
+its mutation does not take. A set is one request and one transferred
+buffer, not one per file: one message, and the main thread gets all of it
+or none.
 
 **Mutations of shared places are asynchronous; `*Sync` forms are `ENOTSUP`;
 no `Atomics.wait()`.** _Why:_ blocking a worker on the main thread invites
@@ -1257,6 +1262,7 @@ workers call `attach()`.** _Why:_ preloads do not run in worker threads.
 | Removals or a flag per file in a set                                                                            | widens a write; a second shape of request and of refusal          |
 | A set of a disk-origin place                                                                                    | the disk commits files one by one                                 |
 | The version as the result of every mutation                                                                     | changes every result; `version(key)` answers it                   |
+| A request, or a transferred buffer, per file of a worker's set                                                  | a set would reach the main thread in parts; K transfers           |
 | IPC per chunk or per pin                                                                                        | pins of current versions must stay local                          |
 | Freeing a retired version on a timeout                                                                          | reuse under a slow reader returns another file's bytes            |
 | Retirement books that free the bytes themselves                                                                 | a free starts a compaction, whose epoch only the kernel commits   |
@@ -1417,7 +1423,9 @@ vfs-update  { name, updateId, version, places: { <name>: { entries, removals,
 vfs-ack     { name: 'vfs-ack', updateId, retained?: [retireId] }              worker → main
 vfs-release { name: 'vfs-release', retireIds: [retireId] }                    worker → main
 vfs-mutate  { name, id, place, op, key, to?, options?, data? }                worker → main
-vfs-mutated { name, id, error?: { code, message, syscall, path, dest } }      main → worker
+            writeFiles: { name, id, place, op, keys, sizes, options, data }
+vfs-mutated { name, id, error?: { code, message, syscall, path, dest },
+              version? }                                                      main → worker
 entry       shared { kind, segmentId, offset, length, stat, version, scriptOptions?, meta? }
             | disk { kind, path, stat, version, scriptOptions?, meta? }
 stat        { size, mtimeMs } (+ sourceSize, encoding for compressed companions)

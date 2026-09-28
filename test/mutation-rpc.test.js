@@ -12,6 +12,7 @@ const {
   tap,
   worker,
   nextEvent,
+  leakedBytes,
 } = require('./helpers.js');
 
 // A worker mutation crosses its link port as a `vfs-mutate` request. The
@@ -135,7 +136,8 @@ describe('mutation RPC', () => {
     });
     const store = k.registry.get('v').store;
     const taken = [];
-    for (const op of ['write', 'append', 'unlink', 'mkdir', 'rm', 'rename']) {
+    const ops = ['write', 'append', 'unlink', 'mkdir', 'rm', 'rename'];
+    for (const op of [...ops, 'writeFiles']) {
       const original = store[op];
       store[op] = function (...args) {
         taken.push([op, args.at(-1)]);
@@ -151,6 +153,8 @@ describe('mutation RPC', () => {
       await v.unlink('/d/b.txt');
       await v.writeFile('/e/c.txt', 'c');
       await v.rm('/e', { recursive: 1, force: 'yes', maxRetries: 3 });
+      await v.writeFiles([['/f.txt', 'f']], { flag: 'wx', mode: 0o600 });
+      await v.writeFiles({ '/g.txt': 'g' });
       const expected = [
         ['write', { exclusive: true }],
         ['append', {}],
@@ -159,6 +163,8 @@ describe('mutation RPC', () => {
         ['unlink', { directory: false }],
         ['write', { exclusive: false }],
         ['rm', { force: true, recursive: true, directory: false }],
+        ['writeFiles', { exclusive: true }],
+        ['writeFiles', { exclusive: false }],
       ];
       assert.deepEqual(sent, expected, 'sent');
       assert.deepEqual(taken, expected, 'taken');
@@ -166,15 +172,26 @@ describe('mutation RPC', () => {
       // Whatever else a request says, the store gets the options of its
       // mutation.
       taken.length = 0;
-      const reply = await request(tap(k), {
+      const link = tap(k);
+      let reply = await request(link, {
         place: 'v',
         op: 'rm',
         key: '/gone',
         options: { force: 1, extra: true },
       });
       assert.equal(reply.error, null);
+      reply = await request(link, {
+        place: 'v',
+        op: 'writeFiles',
+        keys: ['/h.txt'],
+        sizes: [1],
+        options: { exclusive: 'yes', recursive: true },
+        data: bytes('h'),
+      });
+      assert.equal(reply.error, null);
       assert.deepEqual(taken, [
         ['rm', { force: true, recursive: false, directory: false }],
+        ['writeFiles', { exclusive: true }],
       ]);
     } finally {
       w.kernel.close();
@@ -336,6 +353,232 @@ describe('mutation RPC', () => {
       assert.deepEqual(v.readdir('/'), []);
       assert.equal(k.mutations.size, 0, 'no lock left');
     } finally {
+      k.close();
+      rm(root);
+    }
+  });
+});
+
+describe('mutation RPC: writeFiles', () => {
+  it("a worker's set is one request, one buffer: its update comes before its answer, the version of its commit", async () => {
+    const root = tmpDir('vfs-rpc');
+    const k = await kernel(root, {
+      v: { origin: 'virtual', fs: { writable: true } },
+    });
+    const w = worker(k);
+    try {
+      const requests = [];
+      w.main.on('message', (msg) => {
+        if (msg?.name === 'vfs-mutate') requests.push(msg);
+      });
+      const delivered = [];
+      w.port.on('message', (msg) => delivered.push(msg.name));
+      let seen = null;
+      w.kernel.on('publish', (event) => {
+        seen = event;
+      });
+      const bytes = Buffer.from('bb');
+      const written = w.kernel.fs('v').writeFiles([
+        ['a.txt', 'a'],
+        ['/d/b.txt', bytes],
+        ['/c.txt', ''],
+      ]);
+      bytes.write('xx');
+      assert.equal(await written, 1, 'the version of its commit');
+      assert.deepEqual(delivered, ['vfs-update', 'vfs-mutated']);
+      assert.deepEqual(seen?.places.v.created, [
+        '/a.txt',
+        '/d/b.txt',
+        '/c.txt',
+      ]);
+      const [request, ...more] = requests;
+      assert.deepEqual(more, [], 'one request');
+      assert.deepEqual(request.keys, ['/a.txt', '/d/b.txt', '/c.txt']);
+      assert.deepEqual(request.sizes, [1, 2, 0]);
+      assert.equal(Buffer.from(request.data).toString(), 'abb');
+      const v = k.fs('v');
+      assert.equal(v.readFile('/d/b.txt', 'utf8'), 'bb', 'taken when called');
+      assert.equal(v.version('/c.txt'), 1);
+      assert.equal(w.kernel.fs('v').readFile('/a.txt', 'utf8'), 'a');
+      assert.equal(k.nextUpdateId, 1);
+      // Other mutations answer as they did: no version.
+      assert.equal(await w.kernel.fs('v').writeFile('/e.txt', 'e'), undefined);
+    } finally {
+      w.kernel.close();
+      k.close();
+      rm(root);
+    }
+  });
+
+  it('a set a request does not describe, or a place that takes none, is refused whole', async () => {
+    const root = writeTree(tmpDir('vfs-rpc'), { 'wd/a.txt': 'a' });
+    const k = await kernel(root, {
+      v: { origin: 'virtual', fs: { writable: true } },
+      m: { provider: 'map', origin: 'virtual', fs: { writable: true } },
+      wd: { fs: { ext: ['txt'] } },
+    });
+    const link = tap(k);
+    try {
+      const updates = k.nextUpdateId;
+      const malformed = {
+        name: 'TypeError',
+        message: '[vfs] writeFiles: malformed request',
+      };
+      const elsewhere = (name) => {
+        const where = k.fs(name).pathOf('');
+        return {
+          code: 'ENOTSUP',
+          syscall: 'writeFiles',
+          path: where,
+          message:
+            'ENOTSUP: operation not supported ' +
+            `(not a shared virtual place), writeFiles '${where}'`,
+        };
+      };
+      for (const [what, msg, fields] of [
+        [
+          'keys and sizes apart',
+          { keys: ['/a', '/b'], sizes: [1], data: bytes('ab') },
+          malformed,
+        ],
+        [
+          'a size past the data',
+          { keys: ['/a'], sizes: [3], data: bytes('ab') },
+          malformed,
+        ],
+        [
+          'bytes left over',
+          { keys: ['/a'], sizes: [1], data: bytes('ab') },
+          malformed,
+        ],
+        [
+          'a negative size',
+          { keys: ['/a', '/b'], sizes: [-1, 3], data: bytes('ab') },
+          malformed,
+        ],
+        [
+          'a size that is no integer',
+          { keys: ['/a'], sizes: ['2'], data: bytes('ab') },
+          malformed,
+        ],
+        ['no key', { keys: [], sizes: [], data: bytes('') }, malformed],
+        ['no data', { keys: ['/a'], sizes: [0] }, malformed],
+        ['no keys', { key: '/a', sizes: [1], data: bytes('a') }, malformed],
+        [
+          'a key twice',
+          { keys: ['/a', 'a'], sizes: [1, 1], data: bytes('ab') },
+          { name: 'TypeError', message: 'writeFiles: "a" written twice' },
+        ],
+        [
+          'an invalid key',
+          { keys: ['/a', '/b/../c'], sizes: [1, 1], data: bytes('ab') },
+          { name: 'TypeError', message: 'invalid key: "/b/../c"' },
+        ],
+        [
+          'a directory',
+          { keys: ['/d/'], sizes: [1], data: bytes('a') },
+          { name: 'TypeError', message: 'invalid key: "/d/"' },
+        ],
+        [
+          'a map place',
+          { place: 'm', keys: ['/a'], sizes: [1], data: bytes('a') },
+          elsewhere('m'),
+        ],
+        [
+          'a disk-origin place',
+          { place: 'wd', keys: ['/a.txt'], sizes: [1], data: bytes('a') },
+          elsewhere('wd'),
+        ],
+      ]) {
+        const reply = await request(link, {
+          place: 'v',
+          op: 'writeFiles',
+          ...msg,
+        });
+        assert.ok(reply.error, what);
+        refusal(reply, fields);
+      }
+      assert.equal(k.nextUpdateId, updates, 'nothing published');
+      assert.deepEqual(k.fs('v').readdir('/'), []);
+      assert.equal(k.fs('m').exists('/a'), false);
+      assert.equal(
+        fs.readFileSync(path.join(root, 'wd', 'a.txt'), 'utf8'),
+        'a',
+      );
+      assert.equal(leakedBytes(k), 0);
+      // A request it takes: its keys canonical, its options booleans.
+      let reply = await request(link, {
+        place: 'v',
+        op: 'writeFiles',
+        keys: ['a.txt', '/b.txt'],
+        sizes: [1, 2],
+        options: { exclusive: 'yes', extra: true },
+        data: bytes('abb'),
+      });
+      assert.equal(reply.error, null);
+      assert.equal(reply.version, updates + 1);
+      const v = k.fs('v');
+      assert.equal(v.readFile('/a.txt', 'utf8'), 'a');
+      assert.equal(v.readFile('/b.txt', 'utf8'), 'bb');
+      reply = await request(link, {
+        place: 'v',
+        op: 'writeFiles',
+        keys: ['/c.txt', '/b.txt'],
+        sizes: [1, 1],
+        options: { exclusive: 1 },
+        data: bytes('cb'),
+      });
+      refusal(reply, {
+        code: 'EEXIST',
+        syscall: 'writeFiles',
+        path: v.pathOf('/b.txt'),
+      });
+      assert.equal('version' in reply, false);
+      assert.equal(v.exists('/c.txt'), false);
+      assert.equal(k.mutations.size, 0);
+    } finally {
+      k.close();
+      rm(root);
+    }
+  });
+
+  it("the refusal of a worker's set crosses the link with its fields", async () => {
+    const root = tmpDir('vfs-rpc');
+    const k = await kernel(root, {
+      v: {
+        origin: 'virtual',
+        fs: { writable: true, script: { ext: ['js'] } },
+      },
+    });
+    const w = worker(k);
+    try {
+      const v = w.kernel.fs('v');
+      await assert.rejects(
+        v.writeFiles([
+          ['/ok.js', 'x = 1;'],
+          ['/bad.js', '((('],
+        ]),
+        {
+          code: 'ENOTSUP',
+          syscall: 'writeFiles',
+          path: v.pathOf('/bad.js'),
+          message:
+            'ENOTSUP: operation not supported (fs.script.compile: source ' +
+            `does not compile), writeFiles '${v.pathOf('/bad.js')}'`,
+        },
+      );
+      await assert.rejects(
+        v.writeFiles([
+          ['/a', 'a'],
+          ['/a/b.js', 'b'],
+        ]),
+        { code: 'ENOTDIR', syscall: 'writeFiles', path: v.pathOf('/a/b.js') },
+      );
+      assert.equal(k.fs('v').exists('/ok.js'), false);
+      assert.equal(k.nextUpdateId, 0);
+      assert.equal(leakedBytes(k), 0);
+    } finally {
+      w.kernel.close();
       k.close();
       rm(root);
     }
