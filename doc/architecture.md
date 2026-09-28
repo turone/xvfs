@@ -751,8 +751,8 @@ raw bytes and miss virtual entries.
   `appRoot`, `disk` / `node-default` places, disk-territory files,
   unmanaged paths without strict; and the guarded APIs (`chmod`, `chown`,
   `utimes`, `truncate`, `symlink`, `readlink`, `statfs`, `watchFile`,
-  `rmdir`, `glob`, and `open` with a flag that writes) once every path
-  argument is routed.
+  `rmdir`, `glob`, and `open` — or `readFile` — with a flag that writes)
+  once every path argument is routed.
 
 _Why:_ an application must be able to tell which calls the VFS serves, which
 it refuses and which belong to the operating system — and a new API must
@@ -932,10 +932,15 @@ wherever `writeFile` writes it, and `open(new, 'w')` passes where
 `writeFileSync(new)` does, while a flag that can read stays `EACCES` on a
 hidden path.
 `createWriteStream` opens through `fs.open`, so its stream gets the same
-error.** _Why:_ routed only as a read, `openSync(p, 'w')` and
-`createWriteStream` bypassed the mutation policy: they created a file in a
-read-only place, and a stray one in a virtual place's directory on disk,
-which the place never shows. Refusing every descriptor to a published entry
+error. `readFile` with a flag that writes opens the file with it before
+it reads: it is routed as `open` with that flag, and what `open` lets
+through is read natively.** _Why:_ routed only as a read,
+`openSync(p, 'w')` and `createWriteStream` bypassed the mutation policy:
+they created a file in a read-only place, and a stray one in a virtual
+place's directory on disk, which the place never shows — and so did
+`readFile` with such a flag, which also truncated a file of a read-only
+place, while a published entry served its content whatever the flag.
+Refusing every descriptor to a published entry
 then left `createWriteStream` unable to do what `writeFileSync` — open,
 write, close, in the native section — did: the raw file is a disk-origin
 place's source of truth, `truncate` edited it already, and the watcher
