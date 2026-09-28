@@ -604,8 +604,13 @@ cloneable so workers rebuild from it.
 | `watchTimeout`         | number | `1000`     | Watcher debounce (ms)               |
 | `strict`               | bool   | `false`    | Routing policy inside `appRoot`     |
 
-Sizes accept `metautil.sizeToBytes` strings or numbers. Booleans must be
-booleans.
+Sizes accept `metautil.sizeToBytes` strings or numbers: a bare integer
+(bytes), or one followed by a decimal (`kb`, `mb`, `gb`, `tb`, `pb`, `eb`,
+`zb`, `yb`) or binary (`kib`, `mib`, `gib`, `tib`, `pib`, `eib`, `zib`,
+`yib`) unit, case-insensitive, with optional whitespace before the unit
+and none after. Any other unit — `'1 xb'`, or trailing text after a real
+one — is rejected with `[vfs config]`, not silently read as bytes.
+Booleans must be booleans.
 
 `memory.maxFileSize` keeps large disk files out of the pool: they stay
 disk entries, read from disk. Content without a disk file of its own —

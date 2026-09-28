@@ -27,6 +27,53 @@ describe('VfsConfig: globals', () => {
     assert.equal(global.memory.segmentSize, 1024);
   });
 
+  it('accepts every decimal and binary unit metautil.sizeToBytes knows', () => {
+    // eb/zb/yb (decimal) and eib+ (binary) are omitted: their byte count
+    // exceeds Number.isSafeInteger and is refused on that separate, already
+    // covered ground ('rejects invalid numbers'), whatever the unit.
+    for (const [size, bytes] of [
+      ['1024', 1024],
+      ['1kb', 1000],
+      ['2 KB', 2000],
+      ['1  mb', 1000000],
+      ['1gb', 1000000000],
+      ['1tb', 1000000000000],
+      ['1pb', 1000000000000000],
+      ['1kib', 1024],
+      ['2 KiB', 2048],
+      ['1mib', 1024 ** 2],
+      ['1gib', 1024 ** 3],
+      ['1tib', 1024 ** 4],
+      ['1pib', 1024 ** 5],
+    ]) {
+      // All three fields get the same string: whatever it resolves to,
+      // limit >= segmentSize >= maxFileSize holds trivially (equal).
+      const { global } = make(
+        {},
+        { memory: { limit: size, segmentSize: size, maxFileSize: size } },
+      );
+      assert.equal(global.memory.limit, bytes, size);
+    }
+  });
+
+  it('rejects size strings with an unrecognized unit', () => {
+    // '1 gib ' (trailing space) is included: metautil.sizeToBytes reads the
+    // unit off the string's last 2-3 characters, so trailing text after a
+    // real unit shifts that window past it and silently parses as `1`.
+    for (const size of ['1 xb', '1mbx', '1 mi', 'nope', '1 gib ']) {
+      fails(
+        { defaults: { memory: { limit: size } } },
+        /defaults\.memory\.limit: invalid size unit/,
+      );
+    }
+    // A recognized unit with a bad sign or magnitude is still the
+    // pre-existing "positive integer" refusal, not "invalid size unit".
+    fails(
+      { defaults: { memory: { limit: '-1 kb' } } },
+      /defaults\.memory\.limit must be a positive integer/,
+    );
+  });
+
   // An explicit `undefined` means "this key is not set": mergeDeep() must
   // not let it clobber the default it would otherwise merge over.
   it('treats an explicit undefined as absent, at every depth', () => {
