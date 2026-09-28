@@ -348,19 +348,22 @@ describe('rename routes its source and its destination', () => {
     }
     // A directory strict routing hides stays hidden.
     await refusedEverywhere(at('closed', 'rawdir'), fresh('rawdir'), 'EACCES');
-    // Within its place, or outside the indexed ones, a directory is node:fs.
+    // Within its place, or outside every place, a directory is node:fs.
     await moveDir(at('wd', 'pages'), at('wd', 'docs'));
     assert.equal(readDisk(at('wd', 'docs', 'p.txt'), 'utf8'), 'page');
     await moveDir(at('wd', 'docs'), at('wd', 'pages'));
     await moveDir(unrelated, `${unrelated}2`);
     await moveDir(`${unrelated}2`, unrelated);
     assert.equal(readDisk(path.join(unrelated, 'o.txt'), 'utf8'), 'o');
+    // Under strict a directory leaves no place, whatever its provider — nor
+    // does a place's own: it could take a link of the place's disk out of
+    // it (links.test.js). Within its place it moves.
     for (const name of ['files', 'nd']) {
-      const moved = fresh(name);
-      await moveDir(at(name, 'd'), moved);
-      await moveDir(moved, at(name, 'd'));
-      await moveDir(at(name), moved);
-      await moveDir(moved, at(name));
+      await refusedEverywhere(at(name, 'd'), fresh(name), 'ENOTSUP');
+      await refusedEverywhere(at(name), fresh(name), 'ENOTSUP');
+      assert.ok(onDisk(at(name, 'd')), name);
+      await moveDir(at(name, 'd'), at(name, 'e'));
+      await moveDir(at(name, 'e'), at(name, 'd'));
       assert.ok(onDisk(at(name, 'd')), name);
     }
   });
