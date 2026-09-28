@@ -1,4 +1,5 @@
 {
+  "root": true,
   "extends": ["metarhia", "plugin:prettier/recommended"],
   "env": {
     "browser": true,
