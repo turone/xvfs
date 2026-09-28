@@ -612,6 +612,57 @@ describe("Node's rimraf keeps the node:fs it first loads with", () => {
       }),
     );
 
+  // Code that ran before the library may have wrapped node:fs
+  // (fixtures/rm-wrapped.cjs). On Node 22 rmSync loads rimraf at once;
+  // later lines load it through rm and the stand-in lstat.
+  const wrapped = (mode) =>
+    JSON.parse(
+      execFileSync(
+        process.execPath,
+        [path.join(__dirname, 'fixtures', 'rm-wrapped.cjs'), mode],
+        { encoding: 'utf8', timeout: 30000 },
+      ),
+    );
+  const node22 = process.versions.node.split('.')[0] === '22';
+  const whole = { loadedBefore: false, failed: {}, left: [] };
+
+  // A deferred rm runs past the native section, so its own checks are
+  // routed — a path strict hides is EACCES to it: only what rimraf does is
+  // asked here, through fs.promises.rm, which the wrapper leaves alone.
+  it('an fs.rm wrapped to defer: rmSync loads rimraf on Node 22; else install() says so, once', () => {
+    const report = wrapped('defer');
+    assert.equal(report.loadedBefore, false);
+    assert.equal(report.loadedAtInstall, node22, 'loaded by rmSync');
+    assert.equal(report.warnings, node22 ? 0 : 1, 'said once, went on');
+    if (node22) {
+      assert.equal(report.failed.promises, undefined);
+      assert.equal(report.failed['promises-only'], undefined);
+      assert.ok(!report.left.some((dir) => dir.startsWith('promises')));
+    }
+  });
+
+  it('an fs.lstat wrapped: rimraf takes it, as it finds node:fs', () => {
+    assert.deepEqual(wrapped('lstat'), {
+      ...whole,
+      mode: 'lstat',
+      loadedAtInstall: true,
+      warnings: 0,
+      lstatRestored: true,
+    });
+  });
+
+  it('an fs.rm that takes fs.lstat as it is called: the stand-in it takes answers as lstat', () => {
+    const expected = {
+      ...whole,
+      mode: 'capture',
+      loadedAtInstall: true,
+      warnings: 0,
+      captured: !node22, // Node 22 loads rimraf without calling rm
+    };
+    if (!node22) expected.answers = 'file';
+    assert.deepEqual(wrapped('capture'), expected);
+  });
+
   for (const mode of ['initialized', 'projected']) {
     it(`loaded by install(), a kernel ${mode}: every form removes whole trees`, () => {
       assert.deepEqual(run(mode), {

@@ -1066,11 +1066,17 @@ accepted, as strict mode is a routing policy, not a sandbox.
 
 **`install()` loads Node's rimraf over `node:fs` itself before it replaces
 anything — synchronously, once per thread (`loadRimraf()`, a
-workaround).** `node:fs`'s `rm` checks its options through the public
-`fs.lstat` and loads rimraf in that callback: a stand-in `lstat` takes the
-callback, and once `fs.lstat` is `node:fs`'s again the callback hears that
-the path does not exist, which with `force` loads rimraf and removes
-nothing. _Why:_ the asynchronous `fs.rm` and `fs.promises.rm` — and a
+workaround), over a sentinel path that does not exist.** On Node 22
+`rmSync` is rimraf too and loads it at once. Later lines load it only
+through `rm`, which checks its options through the public `fs.lstat` and
+loads rimraf in that callback: a stand-in `lstat` takes the callback of
+that one call, the sentinel's, and hands every other call to the `lstat`
+it stands in for — whatever takes it meanwhile works as before — and once
+`fs.lstat` is itself again, the callback hears that the sentinel does not
+exist, which with `force` loads rimraf. When neither loads it — an `rm`
+that code before the library wrapped and defers, or that does not reach
+`node:fs` — `install()` says so once through the kernel's log and goes
+on. _Why:_ the asynchronous `fs.rm` and `fs.promises.rm` — and a
 recursive `rmSync` on Node 22 — are a JavaScript rimraf that takes its
 functions from the public `node:fs` when it first loads. Loaded under the
 patch, it walked a tree through routing — the place's listing, not the
@@ -1080,6 +1086,11 @@ an asynchronous load, which covered the bootstrap and a manual
 `await initialize()`, but not a worker: `attach()` installs the patch at
 once, and every thread loads its own rimraf. Loaded by `install()`, it is
 loaded before the patch whatever made the kernel and in whichever thread.
+A stand-in that took every call broke whatever took it during the call —
+rimraf itself, loaded there by a wrapper of `rm` over `rmSync` on Node 22,
+answered no `lstat` again. What fails to load it costs removals inside the
+places their completeness, not the strict boundary: a warning, not a
+refusal.
 
 **Listings sort and deduplicate the string names, then encode them as
 asked; a recursive `encoding: 'buffer'` listing works in places.** _Why:_
@@ -1231,8 +1242,10 @@ workers call `attach()`.** _Why:_ preloads do not run in worker threads.
 - `loadRimraf()` is a load-bearing workaround (Node's asynchronous `rm`,
   and `rmSync` on Node 22, is a JavaScript rimraf that takes its functions
   from the public `node:fs` when it first loads): `install()` runs it
-  before it replaces anything, in every thread; remove it only when every
-  supported Node line removes a tree natively.
+  before it replaces anything, in every thread, and says once when it
+  could not load rimraf; its stand-in `lstat` answers every call but the
+  sentinel's as `lstat`; remove it only when every supported Node line
+  removes a tree natively.
 - `install()` records every replaced `node:fs` property — an accessor by
   its descriptor — and `uninstall()` restores them in reverse; a `.native`
   variant is routed as its function is and restored with it, any other
@@ -1332,7 +1345,9 @@ stat        { size, mtimeMs } (+ sourceSize, encoding for compressed companions)
   `test/helpers.js` does, with its first removal): which functions it
   keeps is tested in a plain node process too (`test/fixtures/rm-kept.cjs`),
   loaded by `install()` over an initialized kernel and over a projection,
-  and in a worker thread, which loads its own.
+  in a worker thread, which loads its own, and with `node:fs` wrapped
+  before the library loads (`test/fixtures/rm-wrapped.cjs`: an `rm` that
+  defers, a wrapped `lstat`, an `rm` that takes the `lstat` it finds).
 - A refused operation is tested for its error (`code`, `syscall`, `path`,
   `dest`) and for leaving nothing behind — no copy, no deletion, no move,
   and no allocation: `leakedBytes()`, the bytes in allocations that no
