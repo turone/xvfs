@@ -121,6 +121,48 @@ describe('Aliases: the real path of appRoot', () => {
     ];
     for (const p of other) assert.equal(aliases.covers(p), false, p);
   });
+
+  // appRoot given in 8.3 spelling on a runner: a path along that spelling
+  // leaves it where it leaves appRoot as given, as one along the real
+  // spelling does; a path that mixes the two is appRoot's line spelled so
+  // that neither containment sees it.
+  it('win32: a path along the 8.3 spelling of appRoot, or a mix of both', () => {
+    const given = 'C:\\U\\RUNNER~1\\LOCALA~1\\APP~1';
+    const realpath = realpathOf(path.win32, {
+      [given]: 'C:\\U\\runneradmin\\localappdata\\application',
+    });
+    const aliases = new Aliases(given, path.win32, realpath);
+    const siblings = [
+      'C:\\U\\RUNNER~1\\LOCALA~1\\other\\x',
+      'C:\\U\\RUNNER~1\\LOCALA~1\\other\\SUB~1\\x',
+      'C:\\U\\runneradmin\\localappdata\\other\\x',
+      'C:\\U\\RUNNER~1\\LOCALA~1',
+      'C:\\U\\runneradmin\\localappdata',
+      'C:\\U\\RUNNER~1\\LOCALA~1\\APP~1\\ro\\x',
+    ];
+    for (const p of siblings) assert.equal(aliases.covers(p), false, p);
+    const aliased = [
+      'C:\\U\\runneradmin\\localappdata\\application\\ro\\x',
+      'C:\\U\\RUNNER~1\\LOCALA~1\\OTHER~1\\x',
+      'C:\\U\\runneradmin\\LOCALA~1\\application\\ro\\x',
+      'C:\\U\\RUNNER~1\\localappdata\\APP~1\\ro\\x',
+      'C:\\U\\runneradmin\\LOCALA~1\\APP~1',
+      'C:\\U\\runneradmin\\LOCALA~1',
+      'C:\\U\\RUNNER~2\\x',
+    ];
+    for (const p of aliased) assert.equal(aliases.covers(p), true, p);
+  });
+
+  it('win32: a second spelling of another depth is no name-for-name one', () => {
+    const realpath = realpathOf(path.win32, {
+      'S:\\APP~1': 'C:\\base\\application',
+      'S:\\': 'C:\\base',
+    });
+    const aliases = new Aliases('S:\\APP~1', path.win32, realpath);
+    assert.equal(aliases.covers('C:\\base\\APP~1\\ro\\x'), true);
+    assert.equal(aliases.covers('C:\\APP~1\\x'), true);
+    assert.equal(aliases.covers('C:\\base\\other'), false);
+  });
 });
 
 describe('Aliases: what a drive letter names (win32)', () => {
