@@ -1199,7 +1199,7 @@ in `readdir` / `exists` / patched `fs`.
 ## Tests
 
 ```
-npm test              # node --test "test/*.test.js"
+npm test              # node --test --test-force-exit --test-timeout=60000 "test/*.test.js"
 npm run test:types    # tsc --noEmit over test-types/
 npm run lint          # eslint + prettier
 npm run bench         # hot-path benchmarks (not part of npm test or CI)

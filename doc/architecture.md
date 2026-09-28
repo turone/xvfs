@@ -1221,8 +1221,13 @@ stat        { size, mtimeMs } (+ sourceSize, encoding for compressed companions)
 
 ## Testing
 
-- `npm test` runs `test/*.test.js`; `npm run test:examples` runs the
-  example smoke suite; `npm run lint` is eslint + prettier. CI covers Linux
+- `npm test` runs `test/*.test.js`, each test under a 60 s timeout
+  (`--test-timeout`) — the slowest take about a second, so a test that
+  hangs where no bounded wait guards it fails — and with
+  `--test-force-exit`, which ends the run once every test has reported:
+  what a timed-out test waits on may still hold its process, where Node
+  24 and later would print the timeout and wait on;
+  `npm run test:examples` runs the example smoke suite; `npm run lint` is eslint + prettier. CI covers Linux
   and Windows on Node 22.22.3 / 22.x / 24.12.0 / 24.x / 26.x.
 - Concurrency tests are deterministic: gate the injected reader
   (`k.cache.reader`), emit watcher epochs by hand and await
