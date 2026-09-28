@@ -201,6 +201,18 @@ export class VfsKernel {
   readonly state: KernelState;
   get ready(): boolean;
   /**
+   * Publications this thread has committed (main) or applied (worker): the
+   * version of the last one, 0 before the first. A commit that publishes —
+   * init, a watcher epoch, a mutation of a virtual place — takes the next
+   * one; one that changes nothing, and a compaction, none.
+   */
+  get version(): number;
+  /**
+   * The main kernel's random id, the same in every thread linked to it: a
+   * version restarts with each process, `instance` with `version` does not.
+   */
+  get instance(): string;
+  /**
    * Scan / SEA / map through the publication pipeline: preparers,
    * bytecode, compression. A failure closes the kernel. Once, from `new`.
    */
@@ -212,7 +224,7 @@ export class VfsKernel {
   close(): void;
   /** The `PlaceFs` of an indexed place with an fs domain; throws otherwise. */
   fs(name: string): PlaceFs;
-  /** Published entries only; main thread. */
+  /** Published entries only, with `version` and `instance`; main thread. */
   snapshot(): VfsSnapshot;
   /** Everything a worker needs: snapshot, config, appRoot, a MessagePort. */
   link(): LinkResult;

@@ -12,12 +12,13 @@ import type { VfsBigIntStats, VfsDirent, VfsStats } from './stats.js';
 /**
  * A lease over the current version of a file (`fs.zeroCopy`): `view` is a
  * direct SAB Buffer, stable until `release()`, never to be mutated or used
- * afterwards — `Buffer.from(view)` keeps the bytes. `release()` is
- * synchronous and idempotent. Map places hold owned Buffers: their leases
- * are no-ops.
+ * afterwards — `Buffer.from(view)` keeps the bytes. `version` is the
+ * file's (`PlaceFs.version()`). `release()` is synchronous and idempotent.
+ * Map places hold owned Buffers: their leases are no-ops.
  */
 export interface FileLease {
   readonly view: Buffer;
+  readonly version: number | null;
   readonly release: () => void;
   readonly [Symbol.dispose]: () => void;
 }
@@ -92,13 +93,16 @@ export interface MkdirOptions {
  * covers: `new vm.Script(source, { ...scriptOptions, cachedData })`.
  * `source` and `cachedData` are owned copies; `scriptOptions` and `meta`
  * are the frozen objects the entry holds, shared by every call.
- * `cachedData` is null when `fs.script.compile` is off.
+ * `cachedData` is null when `fs.script.compile` is off. `version` is the
+ * file's (`PlaceFs.version()`): a script built from the bundle serves until
+ * it changes.
  */
 export interface ScriptBundle<M extends object = Record<string, unknown>> {
   source: string;
   cachedData: Buffer | null;
   scriptOptions: Readonly<ScriptOptions> | null;
   meta: DeepReadonly<M> | null;
+  version: number | null;
 }
 
 /** Sync for map and disk-origin places, a Promise for `sab + virtual`. */
@@ -125,6 +129,13 @@ export class PlaceFs {
   pathOf(key: string): string;
   /** A file, or an implicit directory. */
   exists(key: string): boolean;
+  /**
+   * The version of the commit that published the file of a shared place
+   * (`sab`, `sea`): equal for the files one commit published, the same in
+   * every thread. Null for a missing key, a `map` place's file and the disk
+   * territory.
+   */
+  version(key: string): number | null;
   stat(key: string, options?: { bigint?: false }): VfsStats | null;
   stat(key: string, options: { bigint: true }): VfsBigIntStats | null;
   stat(key: string, options: StatOptions): VfsStats | VfsBigIntStats | null;
