@@ -238,6 +238,26 @@ const mutate = async (place: PlaceFs) => {
 };
 void mutate;
 
+// --- A set of files as one publication: the version of its commit for
+// sab + virtual ---
+
+const batch = async (place: PlaceFs) => {
+  expectType<void | Promise<number>>()(
+    place.writeFiles([
+      ['/a.txt', 'a'],
+      ['/b.bin', new Uint8Array(1)],
+    ]),
+  );
+  place.writeFiles(new Map([['/a.txt', 'a']]));
+  place.writeFiles({ '/a.txt': 'a', '/b.txt': Buffer.from('b') });
+  place.writeFiles([['/a.txt', 'a']], { flag: 'wx', encoding: 'latin1' });
+  place.writeFiles({ '/a.txt': 'YQ==' }, 'base64');
+  const pairs: (readonly [string, string])[] = [['/a.txt', 'a']];
+  place.writeFiles(pairs);
+  expectType<number | void>()(await place.writeFiles(pairs));
+};
+void batch;
+
 // --- Refusals ---
 
 // @ts-expect-error a key
@@ -288,3 +308,11 @@ new PlaceFs();
 files.withFileView('/index.html', (view: string) => view.length);
 // @ts-expect-error a mutation result is not a Promise for every place
 files.unlink('/note.txt').then(() => {});
+// @ts-expect-error data is a string or bytes
+files.writeFiles([['/a.txt', 42]]);
+// @ts-expect-error a removal is no write
+files.writeFiles({ '/a.txt': null });
+// @ts-expect-error [key, data] pairs or an object of them
+files.writeFiles('/a.txt');
+// @ts-expect-error the result is not a Promise for every place
+files.writeFiles({ '/a.txt': 'a' }).then(() => {});
