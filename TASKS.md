@@ -95,18 +95,6 @@ serves or that enclose `appRoot`, refuse links in disk territory, or check
 the real path of passthrough reads) is implemented with tests on Linux and
 Windows.
 
-## P2 — Recursive `rm` under the patch in a worker
-
-**Problem.** In a worker, asynchronous `fs.rm` / `fs.promises.rm` with
-`recursive` in a disk-origin place walks the place's listing instead of
-the disk and removes the tree only in part (`ENOTEMPTY`). The main thread
-is covered: `initialize()` loads Node's rimraf before the patch, while
-`attach()` is synchronous and installs the patch first.
-
-**Done when.** Workers get the same guarantee — a preload before
-`attach()` installs the patch, or the VFS-aware recursive `rm` above —
-with a worker test.
-
 ## P2 — Writes that bypass the mutation routing
 
 **Problem.** `fs.readFile*(p, { flag: 'w' })` truncates a disk-territory

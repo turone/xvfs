@@ -7,7 +7,6 @@ const { availableParallelism, constants } = require('node:os');
 const { Worker } = require('node:worker_threads');
 const { VfsKernel } = require('../lib/kernel.js');
 const { bytecodeKey } = require('../lib/companion.js');
-const { loadRimraf } = require('../lib/disk.js');
 const {
   tmpDir,
   writeTree,
@@ -132,7 +131,6 @@ describe('VfsKernel: lifecycle', () => {
   // it reads; while it reads them, the reads finish — or fail, the file
   // changed meanwhile — and nothing follows them.
   it('close() during initialize() rejects with the closed-kernel error', async () => {
-    await loadRimraf(); // its probe of a missing path is a disk call too
     const tree = { 'a.txt': 'a', 'b.txt': 'b', 'sub/c.txt': 'c' };
     const places = {
       map: { provider: 'map', fs: true },
@@ -251,6 +249,23 @@ describe('VfsKernel: lifecycle', () => {
         message: '[vfs] kernel closed before publication',
       });
       assert.equal(prepared, 0, 'no preparer after close()');
+    } finally {
+      k.close();
+    }
+  });
+
+  // Virtual places read nothing at init: closed at once, the commit refuses.
+  it('close() during initialize() of virtual places is final', async () => {
+    const places = { v: { origin: 'virtual', fs: { writable: true } } };
+    const k = new VfsKernel(config(places), { appRoot: root, console: quiet });
+    try {
+      const init = k.initialize();
+      k.close();
+      await assert.rejects(init, {
+        message: '[vfs] kernel closed before publication',
+      });
+      assert.equal(k.state, 'closed');
+      assert.equal(k.cache, null);
     } finally {
       k.close();
     }
