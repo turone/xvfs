@@ -421,26 +421,35 @@ describe('VfsKernel: providers', () => {
 });
 
 // Content without a disk file of its own never falls back to disk: what
-// the pool has no room for is refused as a full disk refuses it — ENOSPC,
+// finds no room is refused as a real filesystem refuses such a write,
 // named by the operation, whichever thread asked — a new key is not
 // published, a replaced one keeps its version, and nothing is left behind.
+// Two distinct refusals share that shape: ENOSPC when the pool merely has
+// no room right now (this block), EFBIG when the content is larger than
+// maxFileSize and could never fit whatever the pool's state (the next).
 describe('VfsKernel: a full pool', () => {
   const MEMORY = { limit: '8 kib', segmentSize: '4 kib', maxFileSize: '4 kib' };
 
+  const REASON = {
+    ENOSPC: 'no space left on device',
+    EFBIG: 'file too large',
+  };
+
   // The refusal of `syscall` on `from` (and `to`); what did not fit is
   // its detail.
-  const noRoom = (syscall, from, to) => {
+  const refusal = (code, syscall, from, to) => {
     const detail = 'canonical source does not fit in SAB';
     const ends = to === undefined ? `'${from}'` : `'${from}' -> '${to}'`;
     return {
-      code: 'ENOSPC',
-      errno: -constants.errno.ENOSPC,
+      code,
+      errno: -constants.errno[code],
       syscall,
       path: from,
       dest: to,
-      message: `ENOSPC: no space left on device (${detail}), ${syscall} ${ends}`,
+      message: `${code}: ${REASON[code]} (${detail}), ${syscall} ${ends}`,
     };
   };
+  const noRoom = (syscall, from, to) => refusal('ENOSPC', syscall, from, to);
   const shape = (err) => ({
     code: err.code,
     errno: err.errno,
@@ -504,8 +513,105 @@ describe('VfsKernel: a full pool', () => {
     }
   });
 
-  it('a prepared source that does not fit fails initialize() with ENOSPC', async () => {
-    const root = writeTree(tmpDir('kernel-full-init'), { 'app/big.txt': 'x' });
+  // Three prepared sources, each 4000 bytes — well under maxFileSize (4096)
+  // on its own — together need 12000 of the pool's 8192-byte limit: two
+  // fit, the pool then has no room for the third. The scan's own order
+  // (readdir, not sorted) decides which one — checked as membership, not a
+  // fixed name — but the failure is always ENOSPC, never EFBIG.
+  it('a prepared source fails initialize() with ENOSPC when the pool fills up', async () => {
+    const root = writeTree(tmpDir('kernel-full-init'), {
+      'app/a.txt': 'a',
+      'app/b.txt': 'b',
+      'app/c.txt': 'c',
+    });
+    try {
+      const init = kernel(
+        root,
+        { app: { fs: { ext: ['txt'], prepare: 'grow' } } },
+        { memory: MEMORY },
+        { preparers: { grow: (raw) => raw.toString().repeat(4000) } },
+      );
+      const files = ['a.txt', 'b.txt', 'c.txt'].map((n) =>
+        path.join(root, 'app', n),
+      );
+      await assert.rejects(init, (err) => {
+        assert.ok(files.includes(err.path), `unexpected path ${err.path}`);
+        assert.deepEqual(shape(err), noRoom('open', err.path));
+        return true;
+      });
+    } finally {
+      rm(root);
+    }
+  });
+});
+
+// EFBIG: the content is larger than maxFileSize and could never fit in one
+// allocation, whatever the pool's state — distinct from ENOSPC, the pool
+// merely having no room right now (the previous block). Same shape and the
+// same "nothing published, nothing leaked" guarantees.
+describe('VfsKernel: content larger than maxFileSize', () => {
+  const MEMORY = { limit: '8 kib', segmentSize: '4 kib', maxFileSize: '4 kib' };
+
+  const refusal = (syscall, from, to) => {
+    const detail = 'canonical source does not fit in SAB';
+    const ends = to === undefined ? `'${from}'` : `'${from}' -> '${to}'`;
+    return {
+      code: 'EFBIG',
+      errno: -constants.errno.EFBIG,
+      syscall,
+      path: from,
+      dest: to,
+      message: `EFBIG: file too large (${detail}), ${syscall} ${ends}`,
+    };
+  };
+  const shape = (err) => ({
+    code: err.code,
+    errno: err.errno,
+    syscall: err.syscall,
+    path: err.path,
+    dest: err.dest,
+    message: err.message,
+  });
+
+  it('a virtual write over maxFileSize is EFBIG, in main and a worker, with an empty pool', async () => {
+    const root = tmpDir('kernel-toobig');
+    const k = await kernel(
+      root,
+      { v: { origin: 'virtual', fs: { writable: true } } },
+      { memory: MEMORY },
+    );
+    let w = null;
+    try {
+      const v = k.fs('v');
+      w = worker(k);
+      const updates = k.nextUpdateId;
+      const at = (key) => v.pathOf(key);
+      for (const [label, place] of [
+        ['main', v],
+        ['worker', w.kernel.fs('v')],
+      ]) {
+        await assert.rejects(
+          place.writeFile('/big', 'x'.repeat(5000)),
+          (err) => {
+            assert.deepEqual(shape(err), refusal('open', at('/big')), label);
+            return true;
+          },
+        );
+      }
+      assert.equal(v.exists('/big'), false, 'not published');
+      assert.equal(k.nextUpdateId, updates, 'nothing published');
+      assert.equal(leakedBytes(k), 0, 'nothing left behind');
+    } finally {
+      w?.kernel.close();
+      k.close();
+      rm(root);
+    }
+  });
+
+  it('a prepared source over maxFileSize fails initialize() with EFBIG', async () => {
+    const root = writeTree(tmpDir('kernel-toobig-init'), {
+      'app/big.txt': 'x',
+    });
     try {
       const init = kernel(
         root,
@@ -515,7 +621,7 @@ describe('VfsKernel: a full pool', () => {
       );
       const file = path.join(root, 'app', 'big.txt');
       await assert.rejects(init, (err) => {
-        assert.deepEqual(shape(err), noRoom('open', file));
+        assert.deepEqual(shape(err), refusal('open', file));
         return true;
       });
     } finally {
