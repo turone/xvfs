@@ -19,6 +19,7 @@ const WORKER_STATIC_MS = 15000;
 const PREPARED_SCRIPTS_MS = 10000;
 const ETAG_MS = 15000;
 const SSR_MS = 10000;
+const ASYNC_WORKER_MS = 10000;
 
 const httpRequest = (url) =>
   new Promise((resolve, reject) => {
@@ -594,6 +595,102 @@ describe('examples smoke', () => {
         assert.match(bundleLine, /meta\.template=\/greeting\.tmpl\b/);
         assert.match(bundleLine, /scriptOptions\.filename=\S*greeting\.tmpl\b/);
         assert.match(bundleLine, /cachedData=\d+b/);
+      } finally {
+        await stopChild(child);
+      }
+    },
+  );
+
+  it(
+    'async-worker publishes writeFiles from a worker, one version for the whole set',
+    { timeout: ASYNC_WORKER_MS },
+    async () => {
+      const child = spawn(process.execPath, ['examples/async-worker/run.js'], {
+        cwd: REPO,
+        env: { ...process.env },
+        stdio: ['ignore', 'pipe', 'pipe'],
+        windowsHide: true,
+      });
+      const output = attachOutput(child);
+      try {
+        const exited = await waitForExit(child, ASYNC_WORKER_MS - 1000);
+        const stdout = output.stdout();
+        assert.equal(exited, true, `async-worker example timed out\n${stdout}`);
+        assert.equal(child.exitCode, 0, output.stderr() || stdout);
+        assert.equal(output.stderr(), '');
+        const lines = stdout.split(/\r?\n/);
+
+        const genLine = (round) =>
+          lines.find((line) => line.startsWith(`generator round ${round}:`));
+        const readerLines = (round) =>
+          lines.filter(
+            (line) =>
+              line.startsWith('reader ') && line.includes(`round ${round}:`),
+          );
+
+        const gen1 = genLine(1);
+        const gen2 = genLine(2);
+        const gen3 = genLine(3);
+        assert.ok(gen1, stdout);
+        assert.ok(gen2, stdout);
+        assert.ok(gen3, stdout);
+        assert.match(gen1, /published version=1 sha256=([0-9a-f]{16})…/);
+        assert.match(gen2, /published version=2 sha256=([0-9a-f]{16})…/);
+        // Round 3's render.js cannot compile: the whole batch is refused,
+        // report.html and report.json included, though both are valid.
+        assert.match(gen3, /writeFiles rejected: ENOTSUP:/);
+        assert.match(gen3, /fs\.script\.compile/);
+
+        const sha1 = gen1.match(/sha256=([0-9a-f]{16})…/)[1];
+        const sha2 = gen2.match(/sha256=([0-9a-f]{16})…/)[1];
+        assert.notEqual(sha1, sha2, 'round 2 content differs from round 1');
+
+        const round1 = readerLines(1);
+        const round2 = readerLines(2);
+        assert.equal(round1.length, 2, stdout);
+        assert.equal(round2.length, 2, stdout);
+        for (const line of round1) {
+          assert.match(
+            line,
+            /version=1 versions-match=true html-matches=true/,
+            stdout,
+          );
+          assert.match(line, new RegExp(`sha256=${sha1}`));
+          assert.match(line, /\(cached data accepted\)$/);
+        }
+        for (const line of round2) {
+          assert.match(
+            line,
+            /version=2 versions-match=true html-matches=true/,
+            stdout,
+          );
+          assert.match(line, new RegExp(`sha256=${sha2}`));
+          assert.match(line, /\(cached data accepted\)$/);
+        }
+
+        // No reader ever announces round 3: nothing published, so no
+        // 'publish' event fires. Its next read, on demand, is still round
+        // 2's whole set, unchanged.
+        assert.equal(readerLines(3).length, 0, stdout);
+        const afterLines = lines.filter((line) =>
+          line.includes('after rejection:'),
+        );
+        assert.equal(afterLines.length, 2, stdout);
+        for (const line of afterLines) {
+          assert.match(
+            line,
+            /version=2 versions-match=true html-matches=true/,
+            stdout,
+          );
+          assert.match(line, new RegExp(`sha256=${sha2}`));
+          assert.match(line, /\(unchanged\)$/);
+        }
+
+        const mainLine = lines.find((line) =>
+          line.startsWith('main thread reports.version:'),
+        );
+        assert.ok(mainLine, stdout);
+        assert.match(mainLine, /html=2 json=2 render\.js=2/);
       } finally {
         await stopChild(child);
       }
