@@ -1247,7 +1247,9 @@ workers call `attach()`.** _Why:_ preloads do not run in worker threads.
   sentinel's as `lstat`; remove it only when every supported Node line
   removes a tree natively.
 - `install()` records every replaced `node:fs` property — an accessor by
-  its descriptor — and `uninstall()` restores them in reverse; a `.native`
+  its descriptor — and `uninstall()` restores them in reverse, every one
+  it can, and uninstalls whatever one of them throws, then throws it; a
+  `.native`
   variant is routed as its function is and restored with it, any other
   function an export carries stays on its replacement; an `install()`
   that fails half-way undoes itself; with no kernel installed, and inside

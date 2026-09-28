@@ -291,6 +291,38 @@ describe('fs-patch: a function the table does not know', () => {
     }
   });
 
+  // A property made read-only after install() cannot be restored: the rest
+  // is, the patch is uninstalled all the same — the wrapper left is its
+  // original — and the failure is thrown once all that is done.
+  it('uninstall() restores what it can, uninstalls, and throws what it could not', async () => {
+    const root = writeTree(tmpDir('fs-surface-uninstall'), {
+      'site/a.txt': 'a',
+    });
+    const k = await kernel(root, { site: { fs: true } });
+    const { readFile, readdir } = fs;
+    try {
+      fsPatch.install(k);
+      const left = fs.readdir;
+      Object.defineProperty(fs, 'readdir', { writable: false });
+      assert.throws(() => fsPatch.uninstall(), TypeError);
+      assert.equal(fs.readFile, readFile, 'the rest restored');
+      assert.equal(fs.readdir, left, 'the one it could not');
+      const names = await new Promise((resolve, reject) => {
+        fs.readdir(root, (err, found) => (err ? reject(err) : resolve(found)));
+      });
+      assert.deepEqual(names, ['site'], 'its original, natively');
+      Object.defineProperty(fs, 'readdir', { writable: true, value: readdir });
+      fsPatch.install(k);
+      assert.notEqual(fs.readFile, readFile, 'installs again');
+    } finally {
+      Object.defineProperty(fs, 'readdir', { writable: true });
+      fsPatch.uninstall();
+      fs.readdir = readdir;
+      k.close();
+      rm(root);
+    }
+  });
+
   // An object is a namespace of functions no table knows, as
   // node:fs/promises is one: strict cannot hold it, whether it is a value
   // or what an accessor gives, of node:fs or of node:fs/promises.
