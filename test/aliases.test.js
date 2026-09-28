@@ -306,6 +306,29 @@ describe('FsRouter under strict: the disk of a place names the place', () => {
     assert.deepEqual(router.mutate('/app/d/x'), passthrough);
     assert.deepEqual(router.copy('/app/d', true), passthrough);
   });
+
+  // No new link names managed territory under strict: a symbolic link's
+  // target, a hard link's file.
+  it('strict: a link to managed territory is refused', () => {
+    const { router } = routerOf(true);
+    const managed = ['/app/d/x', '/app/nd', '/app/site/a.txt', '/app', '/'];
+    for (const p of [...managed, '/app/other/x']) {
+      assert.equal(router.linksInto(p), true, p);
+    }
+    assert.equal(router.linksInto('/elsewhere/x'), false);
+    assert.equal(router.linksInto('/ap'), false);
+    const eacces = { kind: 'deny', code: 'EACCES' };
+    assert.deepEqual(router.link('/app/d/f', '/elsewhere/f'), eacces);
+    assert.deepEqual(router.link('/app/d/f', '/app/d/g'), eacces);
+    assert.deepEqual(router.link('/elsewhere/f', '/app/d/f'), {
+      kind: 'passthrough',
+    });
+    const { router: loose } = routerOf(false);
+    assert.equal(loose.linksInto('/app/d/x'), false);
+    assert.deepEqual(loose.link('/app/d/f', '/elsewhere/f'), {
+      kind: 'passthrough',
+    });
+  });
 });
 
 describe('PlaceRegistry with aliases: owned by nobody, refused under strict', () => {
