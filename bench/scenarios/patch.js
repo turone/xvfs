@@ -9,6 +9,9 @@ const { tmpDir, writeTree, cleanup, kernel, memory } = require('../lib.js');
 // over a VFS place, over paths outside the places (outside appRoot) and
 // over the disk territory of `fs.fallback: 'disk'` — the cost of routing.
 // `native` is the same call on the outside paths before the patch.
+// `strict.*` is the same under strict, and over a `disk` place: every
+// native call on a place's disk proves where its path really lies first
+// (one realpath).
 
 const OPS = {
   readFileSync: (p) => fs.readFileSync(p.file),
@@ -23,6 +26,26 @@ const dirOf = (prefix, ext) => {
   return files;
 };
 
+const PLACES = {
+  vfs: { fs: true },
+  terr: { fs: { ext: ['txt'], fallback: 'disk' } },
+  d: { provider: 'disk', fs: true },
+};
+
+// Every target of `targets` under the patch installed with `k`.
+const measure = (b, prefix, k, targets) => {
+  fsPatch.install(k);
+  try {
+    for (const [where, p] of Object.entries(targets)) {
+      for (const [name, op] of Object.entries(OPS)) {
+        b.ops(`${prefix}.${where}.${name}`, () => op(p));
+      }
+    }
+  } finally {
+    fsPatch.uninstall();
+  }
+};
+
 module.exports = async (b) => {
   const one = Buffer.alloc(1024, 99);
   const root = writeTree(tmpDir('patch'), {
@@ -30,46 +53,37 @@ module.exports = async (b) => {
     ...dirOf('vfs', 'txt'),
     'terr/a.bin': one,
     ...dirOf('terr', 'bin'),
+    'd/a.bin': one,
+    ...dirOf('d', 'bin'),
   });
   const outside = writeTree(tmpDir('patch-out'), {
     'a.txt': one,
     ...dirOf('', 'txt'),
   });
-  const k = await kernel(root, {
-    vfs: { fs: true },
-    terr: { fs: { ext: ['txt'], fallback: 'disk' } },
+  const k = await kernel(root, PLACES);
+  const strict = await kernel(root, PLACES, { strict: true });
+  const at = (place) => ({
+    file: path.join(root, place, place === 'vfs' ? 'a.txt' : 'a.bin'),
+    dir: path.join(root, place, 'dir'),
   });
   const targets = {
-    vfs: {
-      file: path.join(root, 'vfs', 'a.txt'),
-      dir: path.join(root, 'vfs', 'dir'),
-    },
+    vfs: at('vfs'),
     outside: {
       file: path.join(outside, 'a.txt'),
       dir: path.join(outside, 'dir'),
     },
-    territory: {
-      file: path.join(root, 'terr', 'a.bin'),
-      dir: path.join(root, 'terr', 'dir'),
-    },
+    territory: at('terr'),
   };
   try {
     for (const [name, op] of Object.entries(OPS)) {
       b.ops(`patch.native.${name}`, () => op(targets.outside));
     }
-    fsPatch.install(k);
-    try {
-      for (const [where, p] of Object.entries(targets)) {
-        for (const [name, op] of Object.entries(OPS)) {
-          b.ops(`patch.${where}.${name}`, () => op(p));
-        }
-      }
-    } finally {
-      fsPatch.uninstall();
-    }
+    measure(b, 'patch', k, targets);
+    measure(b, 'patch.strict', strict, { ...targets, disk: at('d') });
     memory(b, 'patch', k);
   } finally {
     k.close();
+    strict.close();
     cleanup(root);
     cleanup(outside);
   }
