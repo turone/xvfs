@@ -384,3 +384,43 @@ input (−41 to −49 % at every size, in every pair); the raw, same and
 string rows did not move (`raw` at 64 KiB: 2–8 % in the same direction
 in every pair, below the threshold), nor did the `publish` scenario (raw
 and prepared writes into `sab` and `map` places).
+
+## Strict routing on Windows: spellings and a place's disk
+
+`bench/scenarios/router.js`, `bench/scenarios/patch.js`. Under strict the
+router refuses spellings of `appRoot` the strings do not show — NTFS
+streams, 8.3 names, a drive or a real path that names it — and a native
+call on a place's disk proves where its path really lands (one
+`realpath.native`; `doc/architecture.md`, Routing and strict mode). The
+A/B of that work against the commit before it (`f0efa1a`), four
+alternating pairs of `--only router,patch,read --bench HEAD` — the new
+`patch.strict.*` rows measured on the old code too — ns/op, median of the
+four runs on each side:
+
+| metric                                | before |   after | change |
+| ------------------------------------- | -----: | ------: | -----: |
+| `router.strict.read.outside`          |     62 |      87 |  −40 % |
+| `router.strict.mutate.outside`        |     62 |      85 |  −38 % |
+| `router.strict.mutate.disk`           |    177 |  73 261 |   ×415 |
+| `patch.strict.outside.readFileSync`   | 19 020 |  19 791 |      ~ |
+| `patch.strict.territory.readFileSync` | 19 200 |  66 267 |   ×3.5 |
+| `patch.strict.territory.statSync`     | 13 432 |  55 863 |   ×4.2 |
+| `patch.strict.territory.existsSync`   | 23 488 |  66 283 |   ×2.8 |
+| `patch.strict.territory.readdirSync`  | 60 553 | 125 925 |   ×2.1 |
+| `patch.strict.disk.readFileSync`      | 18 879 |  61 505 |   ×3.3 |
+| `patch.strict.disk.readdirSync`       | 32 373 |  73 765 |   ×2.3 |
+| `patch.territory.readdirSync` (open)  | 61 259 |  47 405 |  +23 % |
+
+A route outside `appRoot` under strict pays 23–25 ns for the stream and
+short-name checks and the drive lookup — nothing a native call beside it
+shows (`patch.strict.outside.*` moved 1–4 %, below the threshold). A
+native call on a place's disk pays one `realpath.native`, 42–47 µs on this
+machine — `GetFinalPathNameByHandle` opens the file — so a `stat` of the
+disk territory costs four times what it did and a read three and a half;
+a listing pays two (the route and the facade's walk). `router.strict.
+mutate.disk` names a file whose place's directory does not exist: its
+proof walks up three levels. Without strict nothing moved, and a listing
+of the disk territory got cheaper: the facade no longer stats a directory
+it is about to list (+23 %). Where this cost matters, the application
+keeps such content in the VFS — a cached extension, a virtual place — or
+runs without strict.
