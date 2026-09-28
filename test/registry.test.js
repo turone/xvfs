@@ -9,6 +9,7 @@ const {
   Containment,
   namespaced,
   streamed,
+  shortName,
   resolvedFor,
   listedNames,
 } = require('../lib/registry.js');
@@ -522,6 +523,171 @@ describe('PlaceRegistry: NTFS stream spellings', () => {
     k.registry = new PlaceRegistry('C:\\app', path.win32, true);
     try {
       for (const p of ['C:\\app\\lib\\m.js::$DATA', 'C:\\app::$DATA\\m.js']) {
+        assert.deepEqual(k.resolveModule(p, 'require'), { denied: true }, p);
+      }
+    } finally {
+      k.close();
+    }
+  });
+});
+
+// An NTFS short (8.3) name may stand for any long name of its directory,
+// which only the disk knows: `C:\Users\ME~1\…\APP~1\place\hidden` is a path
+// below appRoot. A registry built for strict owns to nobody a name in that
+// form below appRoot, and one where a path leaves appRoot's spelling — past
+// a name that differs from appRoot's the path lies in a directory that is
+// no ancestor of appRoot, and on another drive none stands for it. Strings
+// only; path-identity.test.js runs it through node:fs where the volume
+// generates 8.3 names.
+describe('PlaceRegistry: short (8.3) names', () => {
+  const nobody = { place: null, key: null };
+  const APP = 'C:\\Users\\me\\AppData\\Local\\Temp\\case-x';
+  const registryOf = (P, root, strict = true) => {
+    const registry = new PlaceRegistry(root, P, strict);
+    const ro = { name: 'ro' };
+    registry.register(ro);
+    return { registry, ro };
+  };
+
+  it('shortName: the form of an 8.3 name, in any case', () => {
+    const short = [
+      ...['PROGRA~1', 'progra~1', 'LONG-F~1.TXT', 'A~1.HTM', 'AB12CD~1'],
+      ...['~1', 'ABCDE~10', 'A~123456', '~$DOC~1.DOC', 'NETV4~1.5CL'],
+      ...['1DS_TE~2.DB-', 'SES~1', 'index~1.htm', 'ÄBC~1'],
+    ];
+    for (const name of short) assert.equal(shortName(name), true, name);
+    const long = [
+      ...['PROGRAM~', 'a~b', 'file~', 'ABCDEFG~1', 'A~1.HTML', 'a.b~1'],
+      ...['a~1.', '~', 'a~1b', 'x.y.z~1', 'Program Files', 'A~1.B.C', ''],
+      ...['node_modules', 'a~1 .txt'],
+    ];
+    for (const name of long) assert.equal(shortName(name), false, name);
+  });
+
+  it('win32 under strict: below appRoot, every name of that form', () => {
+    const { registry, ro } = registryOf(path.win32, APP);
+    const at = (...parts) => path.win32.join(APP, ...parts);
+    const forms = [
+      ...[at('ro', 'INDEX~1.HTM'), at('ro', 'SUBDIR~1', 'a.bin')],
+      ...[at('ro', 'index~1.htm'), at('RO~1', 'x'), at('ro', 'x', 'Y~2')],
+    ];
+    for (const p of forms) assert.deepEqual(registry.route(p), nobody, p);
+    const keys = [
+      [at('ro', 'file~'), '/file~'],
+      [at('ro', 'a~b', 'x'), '/a~b/x'],
+      [at('ro', 'LONGNAME~1'), '/LONGNAME~1'],
+    ];
+    for (const [p, key] of keys) {
+      assert.deepEqual(registry.route(p), { place: ro, key }, p);
+    }
+  });
+
+  it('win32 under strict: where a path leaves the spelling of appRoot', () => {
+    const { registry } = registryOf(path.win32, APP);
+    const forms = [
+      'C:\\Users\\me\\AppData\\Local\\Temp\\CASE-X~1\\ro\\x',
+      'c:\\users\\ME\\appdata\\local\\temp\\case-x~1',
+      'C:\\Users\\me\\APPDAT~1\\Local\\Temp\\case-x\\ro\\x',
+      'C:\\Users\\ME~1\\AppData\\Local\\Temp\\case-x\\ro\\x',
+      'C:\\Users\\me\\APPDAT~1',
+      'C:\\USERS~1\\x',
+      'C:\\PROGRA~1\\nodejs\\node.exe',
+      'C:/Users/me/AppData/LOCAL~1/Temp/case-x/ro/x',
+    ];
+    for (const p of forms) assert.deepEqual(registry.route(p), nobody, p);
+    // Past a name of its own, a short name names an entry of that
+    // directory; another drive holds none of appRoot's.
+    const outside = [
+      'C:\\Users\\me\\Documents\\LONGNA~1\\x',
+      'C:\\Windows\\SYSTEM~1\\x',
+      'C:\\Users\\me\\AppData\\Local\\Temp\\other\\SUB~1\\x',
+      'D:\\Users\\me\\AppData\\Local\\Temp\\CASE-X~1\\ro\\x',
+      'D:\\PROGRA~1\\x',
+      'C:\\Users\\me\\AppData\\Local\\Temp',
+      'C:\\',
+    ];
+    for (const p of outside) assert.equal(registry.route(p), null, p);
+  });
+
+  it('win32 under strict: an appRoot given with short names routes as given', () => {
+    const short = 'C:\\Users\\RUNNER~1\\AppData\\Local\\Temp\\case-x';
+    const { registry, ro } = registryOf(path.win32, short);
+    for (const root of [short, short.toLowerCase()]) {
+      assert.deepEqual(registry.route(path.win32.join(root, 'ro', 'x')), {
+        place: ro,
+        key: '/x',
+      });
+    }
+    const other = 'C:\\Users\\RUNNER~1\\AppData\\Local\\Temp\\other\\x';
+    assert.equal(registry.route(other), null);
+    assert.deepEqual(registry.route('C:\\Users\\RUNNER~2\\x'), nobody);
+  });
+
+  // path.win32 resolves a relative path against process.cwd() on any host.
+  it('win32 under strict: a relative short name is what the cwd makes of it', () => {
+    const { registry } = registryOf(path.win32, APP);
+    const { cwd } = process;
+    process.cwd = () => 'C:\\Users\\me\\AppData\\Local\\Temp';
+    try {
+      assert.deepEqual(registry.route('CASE-X~1\\ro\\x'), nobody);
+      assert.deepEqual(registry.route('case-x\\ro\\INDEX~1.HTM'), nobody);
+      assert.equal(registry.route('other\\SUB~1'), null);
+    } finally {
+      process.cwd = cwd;
+    }
+  });
+
+  it('win32 without strict, and posix: names like any other', () => {
+    const loose = registryOf(path.win32, APP, false);
+    const at = (...parts) => path.win32.join(APP, ...parts);
+    assert.equal(
+      loose.registry.route('C:\\Users\\me\\AppData\\Local\\Temp\\CASE-X~1'),
+      null,
+    );
+    assert.deepEqual(loose.registry.route(at('ro', 'INDEX~1.HTM')), {
+      place: loose.ro,
+      key: '/INDEX~1.HTM',
+    });
+    const posix = registryOf(path.posix, '/app');
+    assert.deepEqual(posix.registry.route('/app/ro/INDEX~1.HTM'), {
+      place: posix.ro,
+      key: '/INDEX~1.HTM',
+    });
+    assert.equal(posix.registry.route('/APP~1/ro/x'), null);
+  });
+
+  it('strict refuses a short name in every routing decision', () => {
+    const strict = new FsRouter(registryOf(path.win32, APP).registry, true);
+    const eacces = { kind: 'deny', code: 'EACCES' };
+    const plain = path.win32.join(APP, 'ro', 'x');
+    const forms = [
+      path.win32.join(APP, 'ro', 'INDEX~1.HTM'),
+      'C:\\Users\\me\\AppData\\Local\\Temp\\CASE-X~1\\ro\\x',
+    ];
+    for (const p of forms) {
+      assert.deepEqual(strict.read(p), eacces, p);
+      assert.deepEqual(strict.mutate(p), eacces, p);
+      assert.deepEqual(strict.copy(p, false), eacces, p);
+      assert.deepEqual(strict.copy(p, true), eacces, p);
+      assert.deepEqual(strict.rename(p, plain), eacces, p);
+      assert.deepEqual(strict.link(p, plain), eacces, p);
+      assert.deepEqual(strict.link('D:\\x', p), eacces, p);
+    }
+  });
+
+  it('module lookup: strict refuses a short name', () => {
+    const config = new VfsConfig({
+      defaults: { strict: true },
+      places: { lib: { require: true } },
+    });
+    const k = new VfsKernel(config, { appRoot: APP, console: quiet });
+    k.registry = new PlaceRegistry(APP, path.win32, true);
+    try {
+      const forms = [
+        'C:\\Users\\me\\AppData\\Local\\Temp\\CASE-X~1\\lib\\m.js',
+        path.win32.join(APP, 'lib', 'LONG-M~1.JS'),
+      ];
+      for (const p of forms) {
         assert.deepEqual(k.resolveModule(p, 'require'), { denied: true }, p);
       }
     } finally {

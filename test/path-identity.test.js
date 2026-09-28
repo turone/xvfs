@@ -1061,3 +1061,236 @@ describe(
     });
   },
 );
+
+// A short (8.3) name may stand for any long name of its directory. Under
+// strict a name of that form below appRoot, or where a path leaves
+// appRoot's spelling, is refused before any native I/O; an appRoot given
+// with short names routes the paths spelled as it is. The names are the
+// volume's own, as cmd gives them (`%~s`); where the volume of the
+// temporary directory generates none, the tests skip.
+
+// The 8.3 spelling Windows gives an existing path, or null without one.
+const shortPath = (p) => {
+  const { stdout } = spawnSync(
+    'cmd',
+    ['/d', '/c', `for %I in ("${p}") do @echo %~sI`],
+    { windowsVerbatimArguments: true, encoding: 'utf8' },
+  );
+  const short = stdout.trim();
+  return short && short.toLowerCase() !== p.toLowerCase() ? short : null;
+};
+const NO_SHORT_NAMES =
+  'the volume of the temporary directory makes no 8.3 names';
+
+const SHORT_PLACES = {
+  ro: PLACES.ro,
+  terr: {
+    fs: { ext: ['html'], fallback: 'disk', prepare: { mark: ['html'] } },
+  },
+  rw: PLACES.rw,
+  v: PLACES.v,
+  lib: { require: { prepare: 'mod' }, import: { ext: ['mjs'] } },
+};
+
+const SHORT_TREE = {
+  'ro/a.txt': 'raw',
+  'ro/h.bin': 'hidden',
+  'terr/index.html': 'raw',
+  'terr/subdirectory/m.bin': 'media',
+  'rw/w.txt': 'w',
+  'lib/side.js': NS_TREE['lib/side.js'],
+  'lib/e.mjs': NS_TREE['lib/e.mjs'],
+  'lib/long-module-name.js': "module.exports = 'raw';",
+};
+
+describe('Windows, strict: short (8.3) names', { skip: NAMESPACES }, () => {
+  let root;
+  let short; // root by its 8.3 name
+  let names; // 8.3 names inside the places
+  let outside;
+  let k;
+  let native;
+  const at = (...p) => path.join(root, ...p);
+  const briefly = (...p) => path.join(short, ...p);
+  const shortName = (...p) => {
+    const spelled = shortPath(at(...p));
+    return spelled && path.basename(spelled);
+  };
+
+  before(async () => {
+    root = writeTree(tmpDir('short-names'), SHORT_TREE);
+    outside = tmpDir('short-names-outside');
+    short = shortPath(root);
+    names = {
+      index: shortName('terr', 'index.html'),
+      subdirectory: shortName('terr', 'subdirectory'),
+      module: shortName('lib', 'long-module-name.js'),
+    };
+    const options = { preparers: PREPARERS };
+    k = await kernel(root, SHORT_PLACES, { strict: true }, options);
+    native = countNative();
+    fsPatch.install(k);
+    moduleHook.install(k);
+  });
+
+  after(() => {
+    moduleHook.uninstall();
+    fsPatch.uninstall();
+    native.restore();
+    k.close();
+    rm(root);
+    rm(outside);
+    delete globalThis.__smfsSide;
+    delete globalThis.__smfsEsm;
+  });
+
+  it('reads, listings and watches: EACCES, nothing reaches node:fs', async (t) => {
+    if (!short || Object.values(names).includes(null)) {
+      return void t.skip(NO_SHORT_NAMES);
+    }
+    native.calls.length = 0;
+    const files = [
+      briefly('ro', 'h.bin'),
+      briefly('ro', 'a.txt'),
+      briefly('terr', 'subdirectory', 'm.bin'),
+      shortPath(at('ro', 'h.bin')),
+      at('terr', names.index),
+      at('terr', names.subdirectory, 'm.bin'),
+    ];
+    await refusesEach(FILE_READS, files);
+    const dirs = [short, briefly('ro'), at('terr', names.subdirectory)];
+    await refusesEach(DIR_READS, dirs);
+    for (const p of [...files, ...dirs]) {
+      assert.equal(fs.existsSync(p), false, p);
+    }
+    assert.deepEqual(native.calls, []);
+  });
+
+  it('writes, removals and metadata: EACCES, nothing changes', async (t) => {
+    if (!short) return void t.skip(NO_SHORT_NAMES);
+    native.calls.length = 0;
+    const files = [
+      briefly('rw', 'w.txt'),
+      briefly('rw', 'n.txt'),
+      briefly('ro', 'a.txt'),
+      briefly('v', 'x.txt'),
+    ];
+    if (names.index) files.push(at('terr', names.index));
+    await refusesEach(FILE_MUTATIONS, files);
+    await refusesEach(DIR_MUTATIONS, [
+      briefly('rw', 'd'),
+      briefly('rw'),
+      short,
+    ]);
+    assert.deepEqual(native.calls, []);
+    assert.equal(readDisk(at('rw', 'w.txt'), 'utf8'), 'w');
+    assert.equal(readDisk(at('ro', 'a.txt'), 'utf8'), 'raw');
+    assert.deepEqual(listDisk(at('rw')), ['w.txt']);
+    assert.deepEqual(k.fs('v').readdir('/'), []);
+  });
+
+  it('copies, renames and links in 8.3 spelling: EACCES, nothing moves', async (t) => {
+    if (!short) return void t.skip(NO_SHORT_NAMES);
+    native.calls.length = 0;
+    const pairs = [
+      [briefly('rw', 'w.txt'), at('rw', 'z.txt')],
+      [briefly('ro', 'h.bin'), path.join(outside, 'h.bin')],
+      [__filename, briefly('rw', 'i.txt')],
+    ];
+    if (names.index) {
+      pairs.push([at('terr', names.index), path.join(outside, 'i.html')]);
+    }
+    await refusesPairs(pairs);
+    assert.deepEqual(native.calls, []);
+    assert.deepEqual(listDisk(at('rw')), ['w.txt']);
+    assert.deepEqual(listDisk(outside), []);
+  });
+
+  it('require and import: not found, never loaded', async (t) => {
+    if (!short) return void t.skip(NO_SHORT_NAMES);
+    const modules = [briefly('lib', 'side.js')];
+    if (names.module) modules.push(at('lib', names.module));
+    for (const form of modules) {
+      assert.throws(() => require(form), {
+        code: 'MODULE_NOT_FOUND',
+        message: /\(vfs: not published\)/,
+      });
+    }
+    await assert.rejects(import(pathToFileURL(briefly('lib', 'e.mjs')).href), {
+      code: 'ERR_MODULE_NOT_FOUND',
+      message: /\(vfs: not published\)/,
+    });
+    assert.equal(globalThis.__smfsSide, undefined);
+    assert.equal(globalThis.__smfsEsm, undefined);
+  });
+
+  it('the facade serves no disk-territory file by a short name', (t) => {
+    if (!names.index) return void t.skip(NO_SHORT_NAMES);
+    const terr = k.fs('terr');
+    assert.equal(terr.readFile(`/${names.index}`), null);
+    assert.equal(terr.stat(`/${names.index}`), null);
+    assert.equal(terr.readFile('/index.html', 'utf8'), '<raw>');
+    const media = `/${names.subdirectory}/m.bin`;
+    assert.equal(terr.readFile(media, 'utf8'), 'media');
+  });
+
+  it('an appRoot given by its short name routes its own spelling', async (t) => {
+    if (!short) return void t.skip(NO_SHORT_NAMES);
+    moduleHook.uninstall();
+    fsPatch.uninstall();
+    const options = { preparers: PREPARERS };
+    const brief = await kernel(short, SHORT_PLACES, { strict: true }, options);
+    fsPatch.install(brief);
+    try {
+      assert.equal(fs.readFileSync(briefly('ro', 'a.txt'), 'utf8'), 'RAW');
+      assert.equal(
+        fs.readFileSync(briefly('TERR', 'index.html'), 'utf8'),
+        '<raw>',
+      );
+      assert.deepEqual(fs.readdirSync(short), ['lib', 'ro', 'rw', 'terr', 'v']);
+      const hidden = briefly('ro', 'h.bin');
+      assert.throws(
+        () => fs.readFileSync(hidden),
+        refused('EACCES', 'open', hidden),
+      );
+      fs.writeFileSync(briefly('rw', 'n.txt'), 'n');
+      assert.equal(readDisk(at('rw', 'n.txt'), 'utf8'), 'n');
+      if (names.index) {
+        const index = briefly('terr', names.index);
+        assert.throws(
+          () => fs.readFileSync(index),
+          refused('EACCES', 'open', index),
+        );
+      }
+    } finally {
+      fsPatch.uninstall();
+      brief.close();
+      fsPatch.install(k);
+      moduleHook.install(k);
+    }
+  });
+});
+
+describe(
+  'Windows, without strict: short names pass through as before',
+  { skip: NAMESPACES },
+  () => {
+    it('node:fs reads what the path names; the facade no raw cached file', async (t) => {
+      const root = writeTree(tmpDir('short-names-open'), SHORT_TREE);
+      const k = await kernel(root, SHORT_PLACES, {}, { preparers: PREPARERS });
+      fsPatch.install(k);
+      try {
+        const short = shortPath(root);
+        const index = shortPath(path.join(root, 'terr', 'index.html'));
+        if (!short || !index) return void t.skip(NO_SHORT_NAMES);
+        const hidden = path.join(short, 'ro', 'h.bin');
+        assert.equal(fs.readFileSync(hidden, 'utf8'), 'hidden');
+        assert.equal(k.fs('terr').readFile(`/${path.basename(index)}`), null);
+      } finally {
+        fsPatch.uninstall();
+        k.close();
+        rm(root);
+      }
+    });
+  },
+);

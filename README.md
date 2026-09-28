@@ -475,9 +475,21 @@ the patched `node:fs` replace the operating system's isolation.
   `appRoot::$INDEX_ALLOCATION\…`, `appRoot` as a name its strings do not
   show; `…\x:stream` — is, under strict, `EACCES` (not found for `require`
   / `import`) before any native I/O, below `appRoot` or not. Without
-  strict it passes through as before. Other spellings of `appRoot` — an
-  8.3 short name, a drive mapped to its share — are not recognized: give
-  `appRoot` in the form the application uses.
+  strict it passes through as before.
+- On Windows a name in the form of an 8.3 short name — a base of up to
+  eight characters that ends in `~` and digits, up to three more after a
+  dot: `PROGRA~1`, `INDEX~1.HTM` — may stand for any long name of its
+  directory, which only the disk knows. Under strict it is `EACCES` (not
+  found for `require` / `import`) before any native I/O below `appRoot`, in
+  every place, and at the name where a path leaves `appRoot`'s spelling:
+  `…\Temp\APP~1\place\hidden` may name `appRoot`, `C:\Users\ME~1\…` a
+  directory above it. Past a name that differs from `appRoot`'s, and on
+  another drive, a short name names nothing of `appRoot` and passes. A
+  long name of that form is taken for a short one. `appRoot` itself may be
+  given with short names (`os.tmpdir()` on a CI runner): the paths spelled
+  as it is route as usual. Without strict nothing changes. A drive mapped
+  to `appRoot`'s share is not recognized: give `appRoot` in the form the
+  application uses.
 - `appRoot` itself is a **managed root**: `readdir(appRoot)` and
   `opendir(appRoot)` list the enabled places and nothing else, and
   `stat(appRoot)` is a directory. `watch` of it — as of any managed
@@ -493,7 +505,7 @@ the patched `node:fs` replace the operating system's isolation.
   excepted) — unless a disk-origin place sets `fs.fallback: 'disk'`
   (below).
 - Paths outside `appRoot` → ordinary Node (on Windows, UNC and namespace
-  paths and streams excepted: above), except operations whose walk would enter
+  paths, streams and short names excepted: above), except operations whose walk would enter
   `appRoot` from above: recursive listings, watches, copies and removals,
   and `rename`, of a directory above it. Scanner does not follow symlinks.
 - Listings (`readdir`, `opendir`) always come from the places. A copy or a
@@ -524,8 +536,9 @@ places: {
   video, …) are served from disk, inside this place only. Cached
   extensions stay VFS-only under strict, so a raw or unpublished file
   never stands in for canonical (prepared) content — nor under another
-  name: on Windows the `PlaceFs` facade takes no key with a `:` for a
-  disk file, in either mode (`/a.txt::$DATA` is `a.txt`). `readdir` merges
+  name: on Windows the `PlaceFs` facade takes no key with a `:` and no
+  file name in short-name form for a disk file, in either mode
+  (`/a.txt::$DATA` is `a.txt`, `/INDEX~1.HTM` may be `index.html`). `readdir` merges
   published entries with disk directories and files of the other
   extensions (no companions, no duplicates) — also in a directory that
   exists only on disk, and in either mode: a file of a cached extension is
