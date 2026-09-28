@@ -251,6 +251,12 @@ export class PlaceFs {
   meta<M extends object = Record<string, unknown>>(
     key: string,
   ): DeepReadonly<M> | null;
+  /**
+   * Under strict routing on Windows this and every other mutation refuse a
+   * key with NTFS stream syntax or a name in 8.3 form anywhere in it — the
+   * spellings `node:fs` is refused below `appRoot` — with `EACCES`, before
+   * the place's own checks, in any place.
+   */
   writeFile(
     key: string,
     data: string | Uint8Array,
@@ -261,9 +267,10 @@ export class PlaceFs {
    * checked before any file is prepared, each file is prepared once, and
    * it is published in one commit — one update, one version, one event —
    * or not at all. A `TypeError` for no file, a key twice or data that is
-   * not a string or bytes; `ENOTSUP` for a disk-origin place. A Promise of
-   * the version of the commit for `sab + virtual`, undefined for a `map`
-   * place.
+   * not a string or bytes; `ENOTSUP` for a disk-origin place; under strict
+   * on Windows, `EACCES` for a key in a stream or 8.3 spelling (see
+   * `writeFile`). A Promise of the version of the commit for
+   * `sab + virtual`, undefined for a `map` place.
    */
   writeFiles(
     files: WriteFilesInput,

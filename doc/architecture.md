@@ -786,6 +786,19 @@ another key. The form is what the strings show: a long name in it is
 refused as well, and a path with no `~` costs one search. The volume
 decides whether short names exist at all, so the rule does not ask.
 
+**On Windows under strict no mutation of the `PlaceFs` facade takes a key
+in either spelling — NTFS stream syntax, or a name in 8.3 form, anywhere in
+the key (`foreign` in `place-fs.js`) — in any place: `writeFile`,
+`appendFile`, `writeFiles`, `unlink`, `mkdir`, `rm` and `rename` are
+`EACCES` once the key is valid, before the place's own checks.** _Why:_ the
+facade takes keys, not paths, so the router never sees them, and
+`writeFiles` reaches a virtual place past every path: a key no strict path
+can name would be an entry `node:fs` under strict never reads. On disk the
+same key is the spelling the router refuses — a stream of a file, the file
+an 8.3 name resolves to. Reads keep the facade's rule for disk files
+(above); a virtual place holds exact keys, so a read of such a key finds
+nothing strict could have written.
+
 **Under strict the registry learns two things from the disk, each once,
 through `realpath.native` captured at load (`aliases.js`): `appRoot`'s real
 path, when the kernel is built, and on Windows what a drive letter other

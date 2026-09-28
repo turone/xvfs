@@ -493,6 +493,14 @@ the patched `node:fs` replace the operating system's isolation.
   name is in this form, in either mode: a legitimate long name that looks
   8.3 (`FOO~1.BIN`) is not served from a place's disk territory, so a short
   name can never make a raw file stand in for a cached one.
+- On Windows under strict the `PlaceFs` facade takes neither spelling for
+  a mutation — a stream (`/a.txt:s`) or a name in 8.3 form
+  (`/SUB~1/a.txt`) anywhere in the key: `writeFile`, `appendFile`,
+  `writeFiles`, `unlink`, `mkdir`, `rm` and `rename` are `EACCES` before
+  the place's own checks, in a virtual place and on disk alike. No path
+  under strict names such a key, and `writeFiles` reaches a virtual place
+  past every path. Without strict, and off Windows, it is a name like any
+  other.
 - On Windows under strict a drive letter other than `appRoot`'s that
   names a share (`net use`), or `appRoot`, a directory above it or below
   it (`subst`), is refused whole: every path on it is `EACCES` before any
