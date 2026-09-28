@@ -852,10 +852,23 @@ out of the place would break the shared directories a release links in.
 junction holds, so neither walks a place's disk under strict; `opendir`,
 `rm` and a recursive `watch` enter none. Node's resolvers take a module's
 real path — through the patched `realpath`, which refuses the link — but
-not with `--preserve-symlinks`, which the load hook covers. Each native
-call on a place's disk pays one `realpath` (tens of microseconds on
-Windows; doc/benchmarks.md); a link swapped in between the answer and the
-call is not seen, as no path-based check can see it.
+not with `--preserve-symlinks`, which the load hook covers. The ops that
+act on the link and not its target — `lstat`, `readlink`, `unlink`,
+`rmdir`, `rm` — are refused too, though `node:fs` would touch nothing the
+link hides: the proof resolves the whole path, so it cannot tell them from
+a call that follows the link. A call that does not follow the last
+component could be proven by its parent's real path plus the leaf name, so
+that such a link can be seen and removed through the patch; the leaf's
+`.`, `..` and trailing-separator forms, which the platforms resolve
+differently, would each need to fall back to the full proof, so the
+boundary stays fail-closed for now (TASKS.md). A native call on a place's
+disk pays one `realpath` for a file, two for a directory listing or a path
+being created, three for a single `cp` or a `require` of a disk-place
+module, and one per directory `glob` walks; a recursive `readdir` pays one
+where it starts and walks below without following links (tens of
+microseconds each on Windows; doc/benchmarks.md). A link swapped in
+between the answer and the call is not seen, as no path-based check can
+see it.
 
 **A place's directory is its own where its real path lies off `appRoot`'s
 real line — a link out of `appRoot`, a media store elsewhere — or at
