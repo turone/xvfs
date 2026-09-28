@@ -1262,6 +1262,20 @@ describe('Windows, strict: short (8.3) names', { skip: NAMESPACES }, () => {
           refused('EACCES', 'open', index),
         );
       }
+      // The long spelling is appRoot's real path: another name for it.
+      for (const p of [
+        at('ro', 'h.bin'),
+        at('ro', 'a.txt'),
+        at('rw', 'w.txt'),
+      ]) {
+        assert.throws(() => fs.readFileSync(p), refused('EACCES', 'open', p));
+      }
+      assert.throws(
+        () => fs.readdirSync(path.dirname(root), { recursive: true }),
+        {
+          code: 'ENOTSUP',
+        },
+      );
     } finally {
       fsPatch.uninstall();
       brief.close();
@@ -1290,6 +1304,196 @@ describe(
         fsPatch.uninstall();
         k.close();
         rm(root);
+      }
+    });
+  },
+);
+
+// A drive letter may name appRoot, a directory above it or below it
+// (`subst`), or its share (`net use`), and appRoot itself may be spelled
+// through a junction or a subst drive, its real path then another name for
+// it. Under strict every path on such a drive, and the real spelling of
+// appRoot, is refused before any native I/O; a drive off appRoot's line
+// stays native. The drives are made here and removed in `finally`; where
+// Windows makes none, the tests skip.
+
+// A drive letter with nothing behind it.
+const freeLetter = () =>
+  [...'MNOPQRSTUVWXY'].find((c) => !onDisk(`${c}:\\`)) ?? null;
+const subst = (target) => {
+  const letter = freeLetter();
+  if (letter === null) return null;
+  const made = spawnSync('subst', [`${letter}:`, target]).status === 0;
+  return made ? letter : null;
+};
+const unsubst = (letter) => spawnSync('subst', [`${letter}:`, '/D']);
+const netUse = (share) => {
+  const letter = freeLetter();
+  if (letter === null) return null;
+  const args = ['use', `${letter}:`, share, '/persistent:no'];
+  return spawnSync('net', args).status === 0 ? letter : null;
+};
+const netDrop = (letter) =>
+  spawnSync('net', ['use', `${letter}:`, '/delete', '/y']);
+
+// The native junction maker, captured before any install.
+const { symlinkSync: linkDisk, rmdirSync: unlinkDir } = fs;
+
+describe(
+  'Windows, strict: drive letters and the real path of appRoot',
+  { skip: NAMESPACES },
+  () => {
+    let root;
+    let outside;
+    let native;
+    const at = (...p) => path.join(root, ...p);
+
+    before(() => {
+      root = writeTree(tmpDir('drives'), NS_TREE);
+      outside = writeTree(tmpDir('drives-outside'), { 'o.txt': 'o' });
+      native = countNative();
+    });
+
+    after(() => {
+      native.restore();
+      rm(root);
+      rm(outside);
+      delete globalThis.__smfsSide;
+    });
+
+    // A strict kernel over `appRoot`, patched in for `run`.
+    const strictly = async (appRoot, run) => {
+      const options = { preparers: PREPARERS };
+      const k = await kernel(appRoot, NS_PLACES, { strict: true }, options);
+      fsPatch.install(k);
+      moduleHook.install(k);
+      try {
+        native.calls.length = 0;
+        await run(k);
+      } finally {
+        moduleHook.uninstall();
+        fsPatch.uninstall();
+        k.close();
+      }
+    };
+
+    // Everything below `base`, which names appRoot: refused, nothing done.
+    const refusedBelow = async (base) => {
+      await refusesEach(FILE_READS, [
+        path.join(base, 'ro', 'h.bin'),
+        path.join(base, 'ro', 'a.txt'),
+      ]);
+      await refusesEach(DIR_READS, [base, path.join(base, 'rw')]);
+      await refusesEach(FILE_MUTATIONS, [path.join(base, 'rw', 'w.txt')]);
+      await refusesEach(DIR_MUTATIONS, [path.join(base, 'rw', 'd')]);
+      await refusesPairs([
+        [path.join(base, 'ro', 'h.bin'), path.join(outside, 'h.bin')],
+        [__filename, path.join(base, 'rw', 'n.txt')],
+      ]);
+      const side = path.join(base, 'lib', 'side.js');
+      assert.throws(() => require(side), { code: 'MODULE_NOT_FOUND' });
+      assert.equal(globalThis.__smfsSide, undefined);
+      assert.deepEqual(native.calls, []);
+      assert.equal(readDisk(at('rw', 'w.txt'), 'utf8'), 'w');
+      assert.deepEqual(listDisk(at('rw')), ['w.txt']);
+      assert.equal(onDisk(path.join(outside, 'h.bin')), false);
+    };
+
+    // A subst drive onto `target`, and what lies below `rest` on it names
+    // appRoot (null: nothing does, the drive lies below appRoot).
+    const substituted = async (t, target, rest) => {
+      const letter = subst(target);
+      if (letter === null) return void t.skip('subst makes no drive here');
+      try {
+        await strictly(root, async () => {
+          const drive = `${letter}:\\`;
+          if (rest !== null) await refusedBelow(path.join(drive, rest));
+          await refusesEach(FILE_READS.slice(0, 3), [`${drive}h.bin`]);
+          await refusesEach(DIR_READS.slice(0, 1), [drive]);
+          assert.deepEqual(native.calls, []);
+        });
+      } finally {
+        unsubst(letter);
+      }
+    };
+
+    it('a subst drive onto appRoot: EACCES, nothing reaches node:fs', (t) =>
+      substituted(t, root, ''));
+
+    it('a subst drive above appRoot: EACCES, nothing reaches node:fs', (t) =>
+      substituted(t, path.dirname(root), path.basename(root)));
+
+    it('a subst drive below appRoot: EACCES, nothing reaches node:fs', (t) =>
+      substituted(t, at('ro'), null));
+
+    it('a subst drive off the line of appRoot stays native', async (t) => {
+      const letter = subst(outside);
+      if (letter === null) return void t.skip('subst makes no drive here');
+      try {
+        await strictly(root, () => {
+          assert.equal(fs.readFileSync(`${letter}:\\o.txt`, 'utf8'), 'o');
+          assert.deepEqual(fs.readdirSync(`${letter}:\\`), ['o.txt']);
+          assert.ok(native.calls.includes('readFileSync'));
+        });
+      } finally {
+        unsubst(letter);
+      }
+    });
+
+    it('a drive mapped to the share of appRoot: EACCES, nothing reaches node:fs', async (t) => {
+      const share = adminShare(root);
+      const letter = onDisk(share) ? netUse(share) : null;
+      if (letter === null) {
+        return void t.skip('no drive maps to the admin share here');
+      }
+      try {
+        await strictly(root, () => refusedBelow(`${letter}:\\`));
+      } finally {
+        netDrop(letter);
+      }
+    });
+
+    it('appRoot through a junction: its real path is refused, its spelling routes', async () => {
+      const junction = path.join(outside, 'j');
+      linkDisk(path.dirname(root), junction, 'junction');
+      try {
+        const spelled = path.join(junction, path.basename(root));
+        await strictly(spelled, async () => {
+          assert.equal(
+            fs.readFileSync(path.join(spelled, 'ro', 'a.txt'), 'utf8'),
+            'RAW',
+          );
+          await refusedBelow(root);
+          assert.throws(
+            () => fs.readdirSync(path.dirname(root), { recursive: true }),
+            { code: 'ENOTSUP', syscall: 'scandir' },
+          );
+        });
+      } finally {
+        unlinkDir(junction);
+      }
+    });
+
+    it('appRoot on a subst drive: its real path is refused, its spelling routes', async (t) => {
+      const letter = subst(path.dirname(root));
+      if (letter === null) return void t.skip('subst makes no drive here');
+      try {
+        const spelled = `${letter}:\\${path.basename(root)}`;
+        await strictly(spelled, async () => {
+          assert.equal(
+            fs.readFileSync(path.join(spelled, 'ro', 'a.txt'), 'utf8'),
+            'RAW',
+          );
+          assert.equal(
+            require(path.join(spelled, 'lib', 'side.js')),
+            'prepared',
+          );
+          delete globalThis.__smfsSide;
+          native.calls.length = 0;
+          await refusedBelow(root);
+        });
+      } finally {
+        unsubst(letter);
       }
     });
   },

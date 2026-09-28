@@ -3,22 +3,6 @@
 Future project work. Priority: **P1** — strict boundary or correctness,
 **P2** — policy gaps and missing implementations, **P3** — improvements.
 
-## P1 — Windows: drive spellings of managed paths
-
-**Problem.** Under strict, a drive letter that names `appRoot` or a
-directory on its line — `subst P: <appRoot>`, `net use Q:` to its share —
-and the drive form of a namespaced `appRoot` reach the disk past the
-routing: they lie outside `appRoot` to the strings. Without strict the
-same spellings pass through as unowned.
-
-**Cause.** Routing is lexical, and what a drive letter names only the
-disk knows. Case, UNC and namespace forms, NTFS stream syntax and 8.3
-names are handled (`doc/architecture.md`, Routing and strict mode).
-
-**Done when.** A decided policy — for instance, under strict, refusing a
-drive whose root the disk resolves onto `appRoot`'s line or to a share —
-is implemented with tests on Windows.
-
 ## P2 — VFS-aware versions of the operations refused today
 
 **Problem.** For managed territory, native operations that walk a tree or

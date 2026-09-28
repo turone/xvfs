@@ -67,6 +67,7 @@ SAB segments ──────────── one physical copy ────
 | `lib/place.js`                  | `Place`: projection (`PlaceFiles`, with its directory index), `visible()`, `cached()`, `scripted()`, `prepared()`, `preparerOf()`, `companions()`         |
 | `lib/place-fs.js`               | `PlaceFs` facade, `VfsReadStream`, view leases, disk territory of `fs.fallback: 'disk'`                                                                   |
 | `lib/registry.js`               | `PlaceRegistry` (path → place, key; `Containment` in `appRoot`) + `FsRouter` (read / mutate / copy / rename / link decisions)                             |
+| `lib/aliases.js`                | `Aliases` (strict): what the disk says, once each, about other spellings of `appRoot` — its real path, what a drive letter names                          |
 | `lib/virtual-store.js`          | `VirtualStore`: the semantics of a virtual place's mutations, once — checks, their order, refusals (`checkHierarchy`, `subtreeMoves()`); `KeysInFlight`   |
 | `lib/map-store.js`              | `MapStore` (a `VirtualStore`): mutations at once on the thread's own Map; the Map sink of the pipeline, atomic publish                                    |
 | `lib/sab-store.js`              | `SabStore` (a `VirtualStore`): main-thread mutations of a `sab + virtual` place, each in its key's turn; keys in flight                                   |
@@ -671,9 +672,11 @@ offer.
 uniform across sync, callback, promise and guarded APIs.
 
 **Containment is lexical: only a real `..` component leaves `appRoot`; the
-router never stats or resolves paths.** _Why:_ `..private` is a legal name
-and must route like any other; the router sits on the hot path of every fs
-call. Symlink / realpath containment is out of scope.
+router never stats or resolves the paths it routes.** _Why:_ `..private` is
+a legal name and must route like any other; the router sits on the hot
+path of every fs call. What only the disk knows about `appRoot` itself —
+its real path, what a drive letter names — it learns once (`aliases.js`,
+below).
 
 **Containment is what `path.relative` says, computed from the strings:
 `appRoot` and a separator are a prefix of the path, on Windows after the
@@ -729,9 +732,7 @@ hides, the raw file of a prepared one, a write into a read-only place, a
 module loaded through a share. Refusing the forms is what a lexical router
 can guarantee; which file a share or a namespace names is the operating
 system's to say, and no list of aliases is complete. Only strict asks,
-so without it the route outside costs nothing more. A drive mapped to a
-share stays unrecognized, so `appRoot` is given in the form the
-application uses.
+so without it the route outside costs nothing more.
 
 **On Windows under strict a path with NTFS stream syntax — a `:` past the
 colon of its drive, in the path as resolved, or in the part below a UNC or
@@ -774,6 +775,35 @@ lies below `C:\Users`. Below `appRoot` any short name may stand for
 another key. The form is what the strings show: a long name in it is
 refused as well, and a path with no `~` costs one search. The volume
 decides whether short names exist at all, so the rule does not ask.
+
+**Under strict the registry learns two things from the disk, each once,
+through `realpath.native` captured at load (`aliases.js`): `appRoot`'s real
+path, when the kernel is built, and on Windows what a drive letter other
+than `appRoot`'s names, the first time a path on it is routed. Where the
+real path differs from `appRoot` as spelled — `appRoot` through a link, a
+subst drive, a namespace or 8.3 names — it is a second spelling: a path in
+or below it is owned by nobody, a directory above it encloses the places,
+and a short name where a path leaves it may stand for it. A drive whose
+root resolves to a UNC or namespace path (a mapped drive), or onto
+`appRoot`'s real line — `appRoot`, above it or below it (subst) — is an
+alias whole: every path on it is owned by nobody. A letter that names
+nothing is asked again; an answer is kept, so a drive mapped anew after it
+is not seen. A failure other than a missing path is thrown when the kernel
+is built, and makes a drive an alias.** _Why:_ `subst P: appRoot`, a
+`net use` of its share — which needs no elevation for the admin share —
+and the real path of an `appRoot` given through a junction or a subst
+drive read what the places hide, as did the long spelling of an `appRoot`
+given with short names: they lie outside `appRoot` to the strings, and
+which directory a letter or a link names only the disk knows. Asking once
+keeps the router off the disk on its hot path: a Map lookup per path on
+another drive, a containment check where `appRoot` has a second spelling.
+A drive is asked when first used, not when the kernel starts: auditing
+every letter at start would touch every mapped drive — its server —
+whether the application uses it or not, and one that is disconnected
+stalls on its timeout. A share names what its server says, so a drive
+mapped to one is refused as the share's own UNC paths are; for the same
+reason the local path behind a share of this machine (`C:\…` behind an
+`appRoot` on `\\localhost\C$\…`) is not recognized.
 
 **A path already in the form `path.resolve` returns is taken as it is: a
 drive letter, `:` and `\` on Windows (UNC paths are resolved), `/` on
@@ -1334,6 +1364,9 @@ workers call `attach()`.** _Why:_ preloads do not run in worker threads.
 | Stripping a stream suffix to route the file before it (`a.txt::$DATA` as `a.txt`)                               | the file system says which stream a name opens, not the strings   |
 | Resolving short names in the router (`GetLongPathName`, `realpath` per path); listing the real aliases          | disk access on the hot path; only the disk knows every alias      |
 | Refusing every short name on `appRoot`'s drive                                                                  | past a differing name none stands for `appRoot` (`SYSTEM~1`)      |
+| Refusing every name where `appRoot` has a short one (its long name may be any)                                  | refuses its siblings; `appRoot`'s real path names the long one    |
+| Auditing every drive letter when the kernel starts                                                              | touches every mapped drive's server; a disconnected one stalls    |
+| Mapping a drive or a share onto the local path it may name                                                      | the server says what a share names; no list of aliases is whole   |
 | Native `cp` with a routing `filter` for managed trees                                                           | raw disk bytes, no virtual entries, no canonical content          |
 | Copying canonical (prepared) content as a copy's input                                                          | the destination prepares it again; its bundle names the source    |
 | Feeding a prepared virtual entry's canonical content back in as raw                                             | stale `meta` / filename / bytecode, a silently different input    |
@@ -1410,7 +1443,8 @@ workers call `attach()`.** _Why:_ preloads do not run in worker threads.
 - Companions never appear in `readdir`, `exists`, routing or the patched fs;
   `Place.companions(key)` enumerates them — never hand-roll key lists.
 - Kernel-internal disk I/O (kernel, the publication sink, watch pipeline,
-  scanner, watcher, `PlaceFs`, the copy engine) uses `lib/disk.js`:
+  scanner, watcher, `PlaceFs`, the copy engine, the aliases of strict)
+  uses `lib/disk.js`:
   functions captured at load time, the synchronous ones that re-enter run
   in a native section — Node's own implementations call the public
   `node:fs` back (`writeFileSync` → `openSync`, `rmSync` → rimraf), and
@@ -1470,6 +1504,11 @@ workers call `attach()`.** _Why:_ preloads do not run in worker threads.
   namespace path outside `appRoot`, no path with NTFS stream syntax and no
   short name below `appRoot` or where a path leaves its spelling on to
   `node:fs` or Node's loader: the router refuses it first.
+- Under strict the router asks the disk once for `appRoot`'s real path,
+  when the kernel is built, and on Windows at most once per drive letter
+  and thread (again only while a letter names nothing); a path in `appRoot`'s
+  real spelling, or on a drive that names a share or `appRoot`'s line,
+  reaches neither `node:fs` nor Node's loader.
 
 ## Protocol
 
