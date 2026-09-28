@@ -10,6 +10,7 @@ is self-contained — no extra build steps unless explicitly noted.
 | [multi-tenant/](multi-tenant/)           | Two `map + virtual` places under one appRoot + global `strict: true` whitelist; demonstrates the boundary `strict` enforces and where it stops.                                            |
 | [worker-static/](worker-static/)         | Static HTTP from several worker threads over one SAB copy: `link()` / `attach()`, view leases, zero-copy Range streams, br / gzip representations, live reload of disk and virtual places. |
 | [prepared-scripts/](prepared-scripts/)   | `prepare` + `fs.script`: handler sources prepared once, run in a worker with shared V8 cached data, and updated from the worker through a `sab + virtual` place.                           |
+| [etag/](etag/)                           | `prepare` computes a per-file ETag in `meta`, identical in every worker; a framework-free `node:http` server answers `If-None-Match` with 304 / 200, live-updated over `sab + virtual`.    |
 
 These examples are docs-grade and are also covered by the automated smoke suite
 in `test-examples/`, run with `npm run test:examples`. That suite is not part of
