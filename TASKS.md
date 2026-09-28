@@ -58,23 +58,6 @@ Hard links into or out of a place stay refused by decision
 (`doc/architecture.md`): one physical file cannot carry two canonical
 contents.
 
-## P2 — Symbolic links
-
-**Problem.** Routing is lexical, and native calls follow links. Under
-strict a native call on a place's disk proves where its path really lies
-(`doc/architecture.md`, Routing and strict mode), but the patch still
-creates links into managed territory — `fs.symlink` to a path a place
-holds, or above `appRoot` (a junction takes no privilege on Windows), a
-hard link to a file of a `disk` place — and a link that already leads into
-`appRoot` from outside it reads past the routing.
-
-**Cause.** A link's target is resolved only when the link is used, where
-the path in hand lies outside `appRoot`.
-
-**Done when.** Under strict the patch refuses to create a link into
-managed territory, with tests on Linux and Windows, and the links that
-remain are documented as not covered.
-
 ## P3 — Publication events of map places
 
 **Problem.** `kernel.on('publish')` announces the publications of shared
@@ -96,6 +79,26 @@ threads), and a watcher epoch that changes shared and map places is one
 event. One way: the kernel hands each `MapStore` an announcer its
 mutations call once each, and a watcher epoch records its map changes
 beside its kernel epoch, which `#flush` joins into the epoch's event.
+
+## P3 — Strict and the links that already lead into `appRoot`
+
+**Problem.** Under strict a link that already leads into `appRoot` from
+outside it reads past the routing: Windows' own junctions
+(`C:\Documents and Settings`, `%USERPROFILE%\Local Settings`,
+`AppData\Local\Application Data`) for any `appRoot` below the user
+profile, `/proc/self/root/…` and `/proc/self/cwd/…` on Linux, a link or
+a hard link another process made, a volume mounted in a folder, the local
+path behind an `appRoot` on a share of this machine. Documented as not
+covered (`doc/architecture.md`, Routing and strict mode): strict is a
+routing policy, not an OS sandbox.
+
+**Cause.** Such a path lies outside `appRoot`, where strict asks nothing;
+only the disk knows where it leads.
+
+**Done when.** Decided and, if taken, implemented with a benchmark: an
+opt-in that proves every native path outside `appRoot` as a place's disk
+is proven today (its real path off `appRoot`'s real line), at one
+`realpath` per call — or the boundary stays as documented.
 
 ## After the next Node.js 26.x release — `doc/alternatives.md`
 

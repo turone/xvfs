@@ -520,14 +520,22 @@ the patched `node:fs` replace the operating system's isolation.
   `PlaceFs` facade serves its disk territory the same way. Each such call
   costs one `realpath` more; a link swapped in between the answer and the
   call is not seen.
+- Under strict the patch makes no link to managed territory: a `symlink`
+  whose target — resolved from the link's directory, as the OS resolves
+  it — lies below `appRoot`, is `appRoot` or a directory above it, and a
+  hard `link` to a file below `appRoot`, are `EACCES` before any native
+  call (a link within one place too: its target lies below `appRoot`). A
+  target off `appRoot`'s line is linked natively. In either mode a
+  symbolic link's target is routed as a read, from the link's directory:
+  a hidden target is refused.
 - A link that already leads into `appRoot` from outside it is not
-  covered: its path lies outside `appRoot`, where strict asks nothing —
-  and every system has such links: Windows' own junctions (`C:\Documents
-and Settings`, `%USERPROFILE%\Local Settings`,
-  `AppData\Local\Application Data`) reach any `appRoot` below the user
+  covered: its path lies outside `appRoot`, where strict asks nothing.
+  Every system has such links — Windows' own junctions,
+  `C:\Documents and Settings`, `%USERPROFILE%\Local Settings` and
+  `AppData\Local\Application Data`, reach any `appRoot` below the user
   profile, and on Linux `/proc/self/root/…` and `/proc/self/cwd/…` reach
-  any `appRoot` at all; so do hard links. Strict is a routing policy, not
-  an OS sandbox.
+  any `appRoot` at all — and so do hard links and links another process
+  makes. Strict is a routing policy, not an OS sandbox.
 - `appRoot` itself is a **managed root**: `readdir(appRoot)` and
   `opendir(appRoot)` list the enabled places and nothing else, and
   `stat(appRoot)` is a directory. `watch` of it — as of any managed
@@ -1243,9 +1251,12 @@ read or written:
   only where the disk says the path really lies (see
   [Strict routing](#strict-routing)), and its recursive `readdir` from a
   walk that enters no link;
+- `symlink`, once its path passes the mutation routing and its target —
+  resolved from the link's directory, as the OS resolves it — the read
+  routing, and under strict lies off `appRoot`'s line (above);
 - the guarded APIs, once the routing of every path argument allows them:
   `chmod` / `lchmod`, `chown` / `lchown`, `utimes` / `lutimes`,
-  `truncate`, `symlink`, `readlink`, `statfs`, `watchFile`, `rmdir`
+  `truncate`, `readlink`, `statfs`, `watchFile`, `rmdir`
   (without `recursive`), `mkdtemp` — its disposable forms too — whose
   path is the directory it makes: its prefix and the six characters it
   appends, `XXXXXX` in its errors, as in `node:fs`'s. A denied path stays

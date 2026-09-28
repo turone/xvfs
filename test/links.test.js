@@ -12,6 +12,7 @@ const { tmpDir, writeTree, rm, kernel } = require('./helpers.js');
 const {
   refused,
   countNative,
+  called,
   refusesEach,
   FILE_READS,
   DIR_READS,
@@ -357,6 +358,103 @@ describe('strict: a recursive listing of a place disk', () => {
   });
 });
 
+// Under strict the patch makes no link to managed territory: a symbolic
+// link whose target — resolved from the link's directory, as the OS
+// resolves it — lies below appRoot, is appRoot or a directory above it,
+// and a hard link to a file below appRoot. A junction takes no privilege
+// on Windows, so these are made or refused for real.
+describe('strict: making a link to managed territory', () => {
+  let tree;
+  let k;
+  let native;
+  const at = (...p) => tree.at(...p);
+  const SYMLINKS = [
+    ['symlinkSync', (t, p) => fs.symlinkSync(t, p, 'junction')],
+    ['symlink', (t, p) => called((cb) => fs.symlink(t, p, 'junction', cb))],
+    ['promises.symlink', (t, p) => fs.promises.symlink(t, p, 'junction')],
+  ];
+  const LINKS = [
+    ['linkSync', (a, b) => fs.linkSync(a, b)],
+    ['link', (a, b) => called((cb) => fs.link(a, b, cb))],
+    ['promises.link', (a, b) => fs.promises.link(a, b)],
+  ];
+
+  before(async () => {
+    tree = linkedTree('links-make', false);
+    const options = { preparers: PREPARERS };
+    k = await kernel(tree.root, PLACES, { strict: true }, options);
+    native = countNative();
+    fsPatch.install(k);
+  });
+
+  after(() => {
+    fsPatch.uninstall();
+    native.restore();
+    k.close();
+    tree.remove();
+  });
+
+  it('a symbolic link to a place, appRoot or above it: EACCES, nothing made', async () => {
+    native.calls.length = 0;
+    const base = path.dirname(tree.root);
+    const cases = [
+      [at('ro'), path.join(tree.outside, 'j1')],
+      [at('ro', 'h.bin'), path.join(tree.outside, 'j2')],
+      [tree.root, path.join(tree.outside, 'j3')],
+      [base, path.join(tree.outside, 'j4')],
+      [path.join('..', 'app', 'ro'), path.join(tree.outside, 'j5')],
+      [at('ro'), at('d', 'j6')],
+      [at('d', 'sub'), at('d', 'j7')],
+      [at('nobody'), path.join(tree.outside, 'j8')],
+    ];
+    for (const [target, link] of cases) {
+      for (const [call, run] of SYMLINKS) {
+        await assert.rejects(
+          async () => run(target, link),
+          refused('EACCES', 'symlink', target, link),
+          `${call} ${target} -> ${link}`,
+        );
+        assert.equal(onDisk(link), false, link);
+      }
+    }
+    assert.deepEqual(native.calls, []);
+  });
+
+  it('a hard link to a file below appRoot: EACCES, nothing made', async () => {
+    native.calls.length = 0;
+    const cases = [
+      [at('d', 'f.bin'), path.join(tree.outside, 'f.bin')],
+      [at('dro', 'r.bin'), at('d', 'r.bin')],
+      [at('d', 'f.bin'), at('d', 'g.bin')],
+    ];
+    for (const [from, to] of cases) {
+      for (const [call, run] of LINKS) {
+        await assert.rejects(
+          async () => run(from, to),
+          refused('EACCES', 'link', from, to),
+          `${call} ${from} -> ${to}`,
+        );
+        assert.equal(onDisk(to), false, to);
+      }
+    }
+    assert.deepEqual(native.calls, []);
+  });
+
+  it('a link to a path off the line of appRoot is made', async () => {
+    const junction = at('d', 'jnew');
+    fs.symlinkSync(tree.outside, junction, 'junction');
+    try {
+      assert.equal(fs.readFileSync(path.join(junction, 'o.bin'), 'utf8'), 'o');
+    } finally {
+      unlinkDir(junction);
+    }
+    const hard = at('d', 'o.bin');
+    fs.linkSync(path.join(tree.outside, 'o.bin'), hard);
+    assert.equal(readDisk(hard, 'utf8'), 'o');
+    unlinkDisk(hard);
+  });
+});
+
 describe('strict: a symbolic link to a file out of a place disk', () => {
   it('reads and writes through it: EACCES, nothing reaches node:fs', async (t) => {
     const root = writeTree(tmpDir('file-links'), TREE);
@@ -401,6 +499,19 @@ describe('without strict: links answer as before', () => {
       assert.deepEqual(fs.readdirSync(tree.at('d', 'jro')), ['a.txt', 'h.bin']);
       fs.writeFileSync(tree.at('d', 'jdro', 'n.bin'), 'n');
       assert.equal(readDisk(tree.at('dro', 'n.bin'), 'utf8'), 'n');
+      const junction = path.join(tree.outside, 'j');
+      fs.symlinkSync(tree.at('ro'), junction, 'junction');
+      assert.equal(readDisk(path.join(junction, 'h.bin'), 'utf8'), 'hidden');
+      unlinkDir(junction);
+      // A hidden target is refused in either mode, resolved from the link's
+      // directory as the OS resolves it.
+      const target = path.join('..', 'app', 'ro', 'h.bin');
+      const link = path.join(tree.outside, 'l');
+      assert.throws(
+        () => fs.symlinkSync(target, link, 'junction'),
+        refused('EACCES', 'symlink', target, link),
+      );
+      assert.equal(onDisk(link), false);
     } finally {
       fsPatch.uninstall();
       k.close();

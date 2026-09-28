@@ -838,6 +838,22 @@ call on a place's disk pays one `realpath` (tens of microseconds on
 Windows; doc/benchmarks.md); a link swapped in between the answer and the
 call is not seen, as no path-based check can see it.
 
+**Under strict the patch makes no link to managed territory
+(`FsRouter.linksInto`): a `symlink` whose target, resolved from the link's
+directory as the OS resolves it, the registry places below `appRoot`, at
+it or above it — in any spelling it knows — and a hard `link` to a file
+below `appRoot` are `EACCES` before any native call, a link within one
+place included. In either mode a symbolic link's target is routed as a
+read from the link's directory, where it was routed from the cwd.** _Why:_
+a junction takes no privilege, so any code under strict could make itself
+a path outside `appRoot` into a place, `appRoot` or a directory above it,
+past every lexical check; a hard link to a file of a read-only `disk`
+place gave it a writable name in a writable one. What a link names is
+what a read through it reaches, so its target is routed where the OS
+resolves it. A link within one place is refused too: which names of a
+place's disk may alias which is the place's to decide, not the code
+running under strict.
+
 **A link that already leads into `appRoot` from outside it is not
 covered: its path lies outside `appRoot`, where strict asks nothing.** _Why:_
 every system has such links — Windows' own junctions (`C:\Documents and
@@ -973,11 +989,11 @@ raw bytes and miss virtual entries.
   `EACCES`.
 - _Native passthrough outside managed territory_: unrelated paths outside
   `appRoot`, `disk` / `node-default` places, disk-territory files,
-  unmanaged paths without strict; and the guarded APIs (`chmod`, `chown`,
-  `utimes`, `truncate`, `symlink`, `readlink`, `statfs`, `watchFile`,
-  `rmdir`, `mkdtemp`, `glob`, and `open` — or `readFile`,
-  `createReadStream` — with a flag that writes) once every path argument
-  is routed.
+  unmanaged paths without strict; `symlink`, its target routed from the
+  link's directory; and the guarded APIs (`chmod`, `chown`, `utimes`,
+  `truncate`, `readlink`, `statfs`, `watchFile`, `rmdir`, `mkdtemp`,
+  `glob`, and `open` — or `readFile`, `createReadStream` — with a flag that
+  writes) once every path argument is routed.
 
 _Why:_ an application must be able to tell which calls the VFS serves, which
 it refuses and which belong to the operating system — and a new API must
@@ -1417,6 +1433,8 @@ workers call `attach()`.** _Why:_ preloads do not run in worker threads.
 | A proof kept per directory of a place's disk                                                                    | a directory swapped for a link after it passes unseen             |
 | The proof in FsRouter, or `realpath` for every native call under strict                                         | the router stays lexical; all other I/O would pay for it          |
 | `node:fs`'s recursive `readdir` or `cp` over a place's disk under strict                                        | they enter junctions, `readdir` even with `withFileTypes`         |
+| A new link within one place under strict                                                                        | the place decides which of its names alias, not code under strict |
+| Routing a symbolic link's target from the cwd                                                                   | the OS resolves it from the link's directory                      |
 | Native `cp` with a routing `filter` for managed trees                                                           | raw disk bytes, no virtual entries, no canonical content          |
 | Copying canonical (prepared) content as a copy's input                                                          | the destination prepares it again; its bundle names the source    |
 | Feeding a prepared virtual entry's canonical content back in as raw                                             | stale `meta` / filename / bytecode, a silently different input    |
@@ -1563,6 +1581,8 @@ workers call `attach()`.** _Why:_ preloads do not run in worker threads.
   facade or the load hook — runs before the disk has said its path really
   lies in the place's directory or off `appRoot`'s line; a recursive
   listing there enters no link, and no native recursive copy walks it.
+- Under strict the patch makes no link, symbolic or hard, to managed
+  territory.
 
 ## Protocol
 
