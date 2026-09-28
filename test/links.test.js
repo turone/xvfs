@@ -183,6 +183,51 @@ describe('strict: a link out of a place disk', () => {
     assert.deepEqual(listDisk(at('lib')), ['e.mjs', 'm.js']);
   });
 
+  // mkdtemp makes its prefix and six characters, a mutation of the place's
+  // disk like any other: proven where the directory would really lie, its
+  // path named as node:fs names it (`XXXXXX`). Through a link that stays
+  // in the place it is made.
+  it('mkdtemp through it: EACCES, nothing made', async () => {
+    const MKDTEMPS = [
+      ['mkdtempSync', (p) => fs.mkdtempSync(p)],
+      ['mkdtemp', (p) => called((cb) => fs.mkdtemp(p, cb))],
+      ['promises.mkdtemp', (p) => fs.promises.mkdtemp(p)],
+    ];
+    if (typeof fs.mkdtempDisposableSync === 'function') {
+      MKDTEMPS.push(
+        ['mkdtempDisposableSync', (p) => fs.mkdtempDisposableSync(p)],
+        ['promises.mkdtempDisposable', (p) => fs.promises.mkdtempDisposable(p)],
+      );
+    }
+    native.calls.length = 0;
+    const prefixes = [
+      at('d', 'jro', 'tmp-'),
+      at('d', 'jdro', 'tmp-'),
+      at('d', 'jup', up(), 'ro', 'tmp-'),
+      at('nd', 'jlib', 'tmp-'),
+    ];
+    for (const prefix of prefixes) {
+      for (const [call, run] of MKDTEMPS) {
+        await assert.rejects(
+          async () => run(prefix),
+          refused('EACCES', 'mkdtemp', `${prefix}XXXXXX`),
+          `${call} ${prefix}`,
+        );
+      }
+    }
+    assert.deepEqual(native.calls, []);
+    assert.deepEqual(listDisk(at('ro')), ['a.txt', 'h.bin']);
+    assert.deepEqual(listDisk(at('dro')), ['r.bin']);
+    assert.deepEqual(listDisk(at('lib')), ['e.mjs', 'm.js']);
+    const made = fs.mkdtempSync(at('d', 'jin', 'tmp-'));
+    try {
+      assert.ok(onDisk(at('d', 'sub', path.basename(made))), made);
+      assert.ok(native.calls.includes('mkdtempSync'));
+    } finally {
+      rmdirDisk(made);
+    }
+  });
+
   it('copies, renames and links through it: EACCES, nothing moves', async () => {
     native.calls.length = 0;
     const pairs = [
