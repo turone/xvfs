@@ -67,7 +67,7 @@ SAB segments ──────────── one physical copy ────
 | `lib/place.js`                  | `Place`: projection (`PlaceFiles`, with its directory index), `visible()`, `cached()`, `scripted()`, `prepared()`, `preparerOf()`, `companions()`         |
 | `lib/place-fs.js`               | `PlaceFs` facade, `VfsReadStream`, view leases, disk territory of `fs.fallback: 'disk'`                                                                   |
 | `lib/registry.js`               | `PlaceRegistry` (path → place, key; `Containment` in `appRoot`) + `FsRouter` (read / mutate / copy / rename / link decisions)                             |
-| `lib/virtual-store.js`          | `VirtualStore`: the semantics of a virtual place's mutations, once — checks, their order, refusals (`checkHierarchy`, `subtreeMoves()`)                   |
+| `lib/virtual-store.js`          | `VirtualStore`: the semantics of a virtual place's mutations, once — checks, their order, refusals (`checkHierarchy`, `subtreeMoves()`); `KeysInFlight`   |
 | `lib/map-store.js`              | `MapStore` (a `VirtualStore`): mutations at once on the thread's own Map; the Map sink of the pipeline, atomic publish                                    |
 | `lib/sab-store.js`              | `SabStore` (a `VirtualStore`): main-thread mutations of a `sab + virtual` place, each in its key's turn; keys in flight                                   |
 | `lib/mutation-queue.js`         | `MutationQueue`: per-(place, key) ordering, exclusive place barrier                                                                                       |
@@ -611,16 +611,22 @@ subtree move — in `map` and `sab` places alike: a file above the key is
 `ENOTDIR`, a directory at it `EISDIR`. A key whose publication has begun
 counts as a file until it commits or fails (`SabStore`'s keys in flight),
 so two mutations running together cannot create `/f` and `/f/x` both as
-files. Directories stay implicit: `mkdir` creates no entry, but answers
-from the same hierarchy (`checkMkdir`: `EEXIST`, `ENOTDIR`); `unlink` of
-a directory is `EISDIR`, `rm` of one without `recursive` the
-`ERR_FS_EISDIR` `node:fs` throws.** _Why:_
-implicit directories let `/f.txt` and `/f.txt/x` both exist — a structure
-no filesystem has, for which listings, `stat`, subtree operations and a
-later copy to disk have no consistent answer. Per-key ordering lets
-mutations of different keys overlap, so the published index alone cannot
-decide; locking every ancestor would serialize all writes of a directory,
-while a set of keys in flight costs nothing when nothing conflicts.
+files. The keys in flight are indexed by the directories above them
+(`KeysInFlight`, a count per directory), so a key in flight above or below
+a key is found in the depth of that key. Directories stay implicit:
+`mkdir` creates no entry, but answers from the same hierarchy
+(`checkMkdir`: `EEXIST`, `ENOTDIR`); `unlink` of a directory is `EISDIR`,
+`rm` of one without `recursive` the `ERR_FS_EISDIR` `node:fs` throws.**
+_Why:_ implicit directories let `/f.txt` and `/f.txt/x` both exist — a
+structure no filesystem has, for which listings, `stat`, subtree
+operations and a later copy to disk have no consistent answer. Per-key
+ordering lets mutations of different keys overlap, so the published index
+alone cannot decide; locking every ancestor would serialize all writes of
+a directory, while a set of keys in flight costs nothing when nothing
+conflicts. Scanned for a key below the one checked, the keys in flight
+made every check linear in their number: with a set of 8000 in flight, a
+second set of 8000 took 99 ms instead of 20, and 500 writes 15 ms
+instead of 3 — indexed, 16 and 3.
 
 **A write's flag reaches the store: `w…` replaces, `a…` appends, `x` is
 `{ exclusive }`, checked in the key's turn like the hierarchy; a flag a
@@ -651,11 +657,12 @@ commit, so a set is one epoch more, not a transaction of its own. Keys
 locked one by one would hold some while waiting for others; the barrier
 of the place would stop writes of keys the set does not touch. Checked
 whole first, a set refused by its hierarchy runs no preparer. Its keys
-checked against each other by their ancestors cost the depth of a key,
-where putting them in `creating` meanwhile would compare every key of the
-set with every other. Files prepared one at a time let a failure stop the
-rest, and nothing stage after the set is abandoned. The disk has no
-commit of a set of files to offer.
+are checked against each other by their ancestors, in the depth of a key;
+put in `creating` while they are checked, a key of the set would refuse
+another as its directory or as its file, whichever came first. Files
+prepared one at a time let a failure stop the rest, and nothing stage
+after the set is abandoned. The disk has no commit of a set of files to
+offer.
 
 ## Routing and strict mode
 
@@ -1262,7 +1269,7 @@ workers call `attach()`.** _Why:_ preloads do not run in worker threads.
 | Replaying the current state to a new listener                                                                   | that is `snapshot()` and the reads                                |
 | Logging what a listener throws                                                                                  | hides the application's error; no emitter of Node does it         |
 | Locking the keys of a set one by one, or under the place's barrier                                              | hold-and-wait; the barrier stops writes of unrelated keys         |
-| The keys of a set in `creating` while it is checked                                                             | every key of the set compared with every other                    |
+| The keys of a set in `creating` while it is checked                                                             | the refusal would depend on the order of the keys                 |
 | Preparing the files of a set in parallel (`pool()`)                                                             | a failure leaves work in flight that stages after the abandon     |
 | Removals or a flag per file in a set                                                                            | widens a write; a second shape of request and of refusal          |
 | A set of a disk-origin place                                                                                    | the disk commits files one by one                                 |
@@ -1296,6 +1303,7 @@ workers call `attach()`.** _Why:_ preloads do not run in worker threads.
 | Locking every ancestor of a created key                                                                         | serializes all writes of one directory                            |
 | One store class over an execution engine, its results sync or thenable                                          | a thenable test of every result; a subclass knows its execution   |
 | Scanning every key for implicit directories                                                                     | linear in the size of the place, on hot paths                     |
+| Scanning the keys in flight for one below a key                                                                 | every check linear in the keys in flight, a set's thousands       |
 | Updating the directory index at each mutation site                                                              | one new call site could forget it                                 |
 | A native watcher for a published file                                                                           | raw disk events are not publications                              |
 | A full copy per stream, or of its unread rest                                                                   | the cost grows with the file; a pin gives the same stability      |
