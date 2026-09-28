@@ -17,6 +17,8 @@ const {
   tap,
   worker,
   nextEvent,
+  within,
+  turn,
 } = require('./helpers.js');
 
 // Publication events: a kernel tells its 'publish' listeners what each
@@ -38,28 +40,6 @@ const changes = (created = [], replaced = [], removed = []) => ({
   replaced,
   removed,
 });
-
-// Every microtask queued so far has run.
-const drained = () => new Promise((resolve) => setImmediate(resolve));
-
-// `promise`, or a failure after `ms`: a test waiting for what never comes
-// fails instead of hanging. The timer holds the event loop meanwhile,
-// which a link port — unref'd — does not.
-const within = (promise, what, ms = 5000) =>
-  new Promise((resolve, reject) => {
-    const late = setTimeout(() => {
-      reject(new Error(`no ${what} within ${ms} ms`));
-    }, ms);
-    promise.finally(() => clearTimeout(late)).then(resolve, reject);
-  });
-
-// The next `event` of `emitter`, within `ms`.
-const next = (emitter, event, ms) =>
-  within(
-    new Promise((resolve) => emitter.once(event, resolve)),
-    `'${event}'`,
-    ms,
-  );
 
 const isDeepFrozen = (value) =>
   value === null ||
@@ -158,7 +138,7 @@ describe('publish: mutations of a virtual place', () => {
       await v.rename('/d', '/d');
       await v.mkdir('/n');
       await v.rm('/gone', { force: true });
-      await drained();
+      await turn();
       assert.deepEqual(events, []);
       await v.unlink('/a.txt');
       assert.deepEqual(events, [
@@ -282,7 +262,7 @@ describe('publish: init, the watcher, compaction', () => {
         return real(file, view);
       };
       fs.writeFileSync(at('a.txt'), 'AA');
-      const rechecked = next(k, 'publish');
+      const rechecked = nextEvent(k, 'publish');
       k.watcher.emit('epoch', new Map([[at('a.txt'), 'change']]));
       await k.watchQueue.idle;
       assert.equal(events.length, 1, 'the failed read published nothing');
@@ -320,7 +300,7 @@ describe('publish: init, the watcher, compaction', () => {
       const closed = nextEvent(k.links.get(w.id), 'close');
       w.port.close();
       await closed;
-      await drained();
+      await turn();
       assert.equal(k.nextUpdateId, updates + 1, 'the relocation');
       assert.equal(k.cache.entry('v', '/c').segmentId, 1);
       assert.deepEqual(events, [
@@ -339,9 +319,9 @@ describe('publish: workers', () => {
     const k = await kernel(root, VIRTUAL);
     const w = worker(k);
     try {
-      const onMain = next(k, 'publish');
-      const inWorker = next(w.kernel, 'publish');
-      const acked = next(w.main, 'message');
+      const onMain = nextEvent(k, 'publish');
+      const inWorker = nextEvent(w.kernel, 'publish');
+      const acked = nextEvent(w.main, 'message');
       await k.fs('v').writeFile('/a.txt', 'a');
       const [main, applied, ack] = await Promise.all([onMain, inWorker, acked]);
       assert.deepEqual(applied, main);
@@ -398,12 +378,12 @@ describe('publish: workers', () => {
         });
       };
       await update('/a.txt', 'a');
-      await drained();
+      await turn();
       assert.equal(w.fs('v').readFile('/a.txt', 'utf8'), 'a', 'applied');
       assert.equal(w.version, 0, 'its version kept');
       assert.deepEqual(events, [], 'announced to no one');
       await update('/b.txt', 'b', 1);
-      await drained();
+      await turn();
       assert.equal(w.version, 1);
       assert.deepEqual(events, [
         { version: 1, places: { v: changes(['/b.txt']) } },
@@ -459,7 +439,7 @@ describe('close', () => {
       k.close();
       k.close();
       assert.deepEqual(closes, [], 'not inside close()');
-      await drained();
+      await turn();
       assert.deepEqual(closes, ['closed']);
       assert.equal(k.listenerCount('publish'), 0);
       assert.equal(k.listenerCount('close'), 0);
@@ -467,7 +447,7 @@ describe('close', () => {
       // A later close() closes nothing: no second 'close'.
       k.on('close', () => closes.push('again'));
       k.close();
-      await drained();
+      await turn();
       assert.deepEqual(closes, ['closed']);
     } finally {
       k.close();
@@ -486,7 +466,7 @@ describe('close', () => {
       k.on('close', () => closes++);
       k.links.set('closing', { postMessage: () => k.close(), close() {} });
       await k.fs('v').writeFile('/a.txt', 'a');
-      await drained();
+      await turn();
       assert.equal(k.version, 1, 'committed');
       assert.equal(closes, 1);
       assert.deepEqual(events, []);
@@ -533,7 +513,7 @@ describe('close', () => {
       assert.deepEqual(seen, [1]);
       assert.equal(err?.name, 'AbortError');
       k.close();
-      await drained();
+      await turn();
       assert.deepEqual(ended, [1, 2], "ended by 'close'");
       assert.equal(k.listenerCount('publish'), 0);
     } finally {
