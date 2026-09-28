@@ -367,6 +367,53 @@ describe('publish: workers', () => {
       rm(root);
     }
   });
+
+  // An update without a version — of a main kernel that sends none — is
+  // applied and announces nothing, and the thread keeps its version: the
+  // next publication is announced as ever.
+  it('an update without a version leaves the version of the thread as it was', async () => {
+    const root = tmpDir('vfs-events');
+    const k = await kernel(root, VIRTUAL);
+    let w = null;
+    try {
+      w = VfsKernel.fromSnapshot(k.snapshot(), k.config, {
+        appRoot: root,
+        console: quiet,
+      });
+      const events = record(w);
+      // An update of one new file, from bytes k placed and never published.
+      const update = async (key, text, version) => {
+        const data = Buffer.from(text);
+        const entry = await k.cache.allocate({
+          data,
+          stat: { size: data.length, mtimeMs: 1 },
+        });
+        const { sab } = k.cache.getSegment(entry.segmentId);
+        w.handleDelta({
+          name: 'vfs-update',
+          updateId: 0,
+          version,
+          places: { v: { entries: [[key, entry]], removals: [] } },
+          newSegments: [{ id: entry.segmentId, sab }],
+        });
+      };
+      await update('/a.txt', 'a');
+      await drained();
+      assert.equal(w.fs('v').readFile('/a.txt', 'utf8'), 'a', 'applied');
+      assert.equal(w.version, 0, 'its version kept');
+      assert.deepEqual(events, [], 'announced to no one');
+      await update('/b.txt', 'b', 1);
+      await drained();
+      assert.equal(w.version, 1);
+      assert.deepEqual(events, [
+        { version: 1, places: { v: changes(['/b.txt']) } },
+      ]);
+    } finally {
+      w?.close();
+      k.close();
+      rm(root);
+    }
+  });
 });
 
 describe('publish: listeners', () => {
