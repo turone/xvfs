@@ -509,8 +509,11 @@ the patched `node:fs` replace the operating system's isolation.
   entry, a disk-origin write — first asks the disk where its path really
   lies (`fs.realpathSync.native`; for a path to create, of its nearest
   existing ancestor; for the place's directory, once): in the place's
-  directory, or off `appRoot`'s line and on no share. A link out of the
-  place into another place, `appRoot` or a directory above it is `EACCES`
+  directory, or off `appRoot`'s line and on no share — and, in the disk
+  territory of `fs.fallback: 'disk'`, on no file of an extension the
+  place caches, which a link can name another way (`t.bin` → `t.txt`). A
+  link out of the place into another place, `appRoot` or a directory
+  above it is `EACCES`
   before any native I/O — reading, writing, listing or removing through
   it, and the link itself — and so, for the module loader, is a module it
   leads to; a link that stays in the place, or leads elsewhere, is

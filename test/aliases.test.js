@@ -195,17 +195,19 @@ describe('Aliases: where a native call on a place disk lands', () => {
   const aliases = new Aliases('C:\\app', path.win32, win32);
   const d = 'C:\\app\\d';
 
-  it('in the place, or off the line of appRoot: proven', () => {
+  it('in the place, or off the line of appRoot: its real path', () => {
     const proven = [
-      'C:\\app\\d',
-      'C:\\app\\d\\x.txt',
-      'c:\\APP\\D\\X.TXT',
-      'C:\\app\\d\\jin',
-      'C:\\app\\d\\jout\\a.bin',
-      'C:\\app\\d\\new\\file.txt',
-      'C:\\app\\d\\jout\\new\\b.bin',
+      ['C:\\app\\d', 'C:\\app\\d'],
+      ['C:\\app\\d\\x.txt', 'C:\\app\\d\\x.txt'],
+      ['c:\\APP\\D\\X.TXT', 'C:\\app\\d\\x.txt'],
+      ['C:\\app\\d\\jin', 'C:\\app\\d\\sub'],
+      ['C:\\app\\d\\jout\\a.bin', 'D:\\data\\a.bin'],
+      ['C:\\app\\d\\new\\file.txt', 'C:\\app\\d\\new\\file.txt'],
+      ['C:\\app\\d\\jout\\new\\b.bin', 'D:\\data\\new\\b.bin'],
     ];
-    for (const p of proven) assert.equal(aliases.territory(d, p), true, p);
+    for (const [p, real] of proven) {
+      assert.equal(aliases.territory(d, p), real, p);
+    }
   });
 
   it('into another place, appRoot, above it, onto a share, or unknown: refused', () => {
@@ -218,19 +220,21 @@ describe('Aliases: where a native call on a place disk lands', () => {
       'C:\\app\\d\\jshare\\x',
       'C:\\app\\d\\locked\\x',
     ];
-    for (const p of refused) assert.equal(aliases.territory(d, p), false, p);
+    for (const p of refused) assert.equal(aliases.territory(d, p), null, p);
   });
 
   it('a place whose directory is a link: its real directory is the place', () => {
-    assert.equal(aliases.territory('C:\\app\\m', 'C:\\app\\m\\a.png'), true);
-    const out = 'C:\\app\\m\\jro\\h.bin';
-    assert.equal(aliases.territory('C:\\app\\m', out), false);
+    const m = 'C:\\app\\m';
+    const png = aliases.territory(m, 'C:\\app\\m\\a.png');
+    assert.equal(png, 'D:\\media\\a.png');
+    assert.equal(aliases.territory(m, 'C:\\app\\m\\jro\\h.bin'), null);
     // One that encloses appRoot holds nothing of its own: only what lies
     // off appRoot's line is proven through it.
     const wide = 'C:\\app\\wide';
     const back = 'C:\\app\\wide\\app\\ro\\x';
-    assert.equal(aliases.territory(wide, back), false);
-    assert.equal(aliases.territory(wide, 'C:\\app\\wide\\other'), true);
+    assert.equal(aliases.territory(wide, back), null);
+    const other = aliases.territory(wide, 'C:\\app\\wide\\other');
+    assert.equal(other, 'C:\\other');
   });
 
   it("asks realpath for the place's directory once", () => {
@@ -243,9 +247,9 @@ describe('Aliases: where a native call on a place disk lands', () => {
     });
     const posix = new Aliases('/app', path.posix, realpath);
     realpath.calls.length = 0;
-    assert.equal(posix.territory('/app/d', '/app/d/a'), true);
-    assert.equal(posix.territory('/app/d', '/app/d/j/h.bin'), false);
-    assert.equal(posix.territory('/app/d', '/app/d/o/x'), true);
+    assert.equal(posix.territory('/app/d', '/app/d/a'), '/app/d/a');
+    assert.equal(posix.territory('/app/d', '/app/d/j/h.bin'), null);
+    assert.equal(posix.territory('/app/d', '/app/d/o/x'), '/data/x');
     const places = realpath.calls.filter((p) => p === '/app/d');
     assert.equal(places.length, 1);
   });
