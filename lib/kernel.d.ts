@@ -254,8 +254,9 @@ export class VfsKernel extends EventEmitter<VfsKernelEvents> {
    */
   initialize(): Promise<void>;
   /**
-   * Final: stops the watcher and every stream (`ERR_VFS_CLOSED`), rejects
-   * queued mutations and those still publishing, drops every projection.
+   * Final: stops the watcher and every stream, rejects queued mutations
+   * and those still publishing — all with `ERR_VFS_CLOSED` — and drops
+   * every projection.
    * The first call emits `'close'` in a microtask, then drops every
    * listener.
    */

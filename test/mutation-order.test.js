@@ -531,21 +531,41 @@ describe('mutation ordering: rename and rm coordination', () => {
 });
 
 describe('mutation lifecycle and cleanup', () => {
-  it('kernel close rejects a still-queued mutation and frees the lock', async () => {
+  it('kernel close rejects a still-queued mutation as the closed kernel and frees the lock', async () => {
     const root = tmpDir('vfs-order');
     const k = await kernel(root, {
       v: { origin: 'virtual', fs: { writable: true } },
     });
     try {
       const v = k.fs('v');
-      let error = null;
-      const pending = v.writeFile('/late.txt', 'late').catch((err) => {
-        error = err;
-      });
+      await v.writeFile('/a.txt', 'a');
+      await v.writeFile('/d/b.txt', 'b');
+      // Every kind of turn: a key, several keys, the place's barrier.
+      const queued = [
+        ['writeFile', v.writeFile('/late.txt', 'late')],
+        [
+          'writeFiles',
+          v.writeFiles([
+            ['/x.txt', 'x'],
+            ['/y.txt', 'y'],
+          ]),
+        ],
+        ['unlink', v.unlink('/a.txt')],
+        ['mkdir', v.mkdir('/n')],
+        ['rename', v.rename('/a.txt', '/c.txt')],
+        ['rm', v.rm('/d', { recursive: true })],
+      ];
       k.close();
-      await pending;
-      assert.notEqual(error, null, 'the queued write settles by rejecting');
-      assert.match(error.message, /requires a ready kernel/);
+      for (const [what, pending] of queued) {
+        await assert.rejects(
+          pending,
+          {
+            code: 'ERR_VFS_CLOSED',
+            message: '[vfs] mutations requires a ready kernel (state: closed)',
+          },
+          what,
+        );
+      }
       assert.equal(k.mutations.size, 0, 'no lock record survives close()');
       assert.equal(k.links.size, 0);
       assert.equal(k.acks.size, 0);

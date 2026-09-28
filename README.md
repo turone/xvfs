@@ -1307,10 +1307,16 @@ not a raw-preserving copy.
 
 Errors carry the same `code`, `errno`, `syscall` and `path` fields as
 `node:fs`, and `dest` for copies, links and renames. A stream stopped by
-`kernel.close()` errors with `ERR_VFS_CLOSED`, and so does a publication
-it cuts short — `initialize()`, a mutation still publishing, a worker's
-mutation its own kernel's `close()` finds waiting: `[vfs] kernel closed
-before publication`.
+`kernel.close()` errors with `ERR_VFS_CLOSED`, and so does every mutation
+a closed kernel refuses: a publication `close()` cuts short —
+`initialize()`, a mutation still publishing, a worker's mutation its own
+kernel's `close()` finds waiting (`[vfs] kernel closed before
+publication`); a mutation still queued when the kernel closes, or asked of
+it afterwards (`[vfs] mutations requires a ready kernel (state:
+closed)`); a worker's mutation whose link to the main kernel closed
+before its answer (`[vfs] link closed before the mutation was answered:
+it may or may not have been published` — the main kernel may have
+published it before it closed).
 
 ## Protocol
 
