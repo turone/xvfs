@@ -619,6 +619,34 @@ and cp's `force: false` / `errorOnExist` are that same exclusive write.**
 _Why:_ exclusive creation is how callers avoid replacing a file; checked
 before the queue, it would not be exclusive.
 
+**`writeFiles` publishes a set of files of a virtual place as one
+accepted mutation: its arguments are checked when it is called; its keys
+are locked in one step (`MutationQueue.run` with every key); in their
+turn, before any file is prepared, the whole set is checked — against the
+place and the keys in flight as a write is, and against itself: a key
+below another key of the set is `ENOTDIR` (`ancestorIn`); then its keys
+count as files in flight (`createAll`) while each file is prepared once,
+in the order given. A `sab` place publishes the set in one epoch of the
+kernel (`publishVirtualBatch`), one file after another, and commits it
+once — one `vfs-update`, one version, one event, one mtime — or abandons
+it (`#abandon`): what its files staged goes back to the pool. A `map`
+place computes every file — its preparer, its bytecode — before it sets
+the first (`#plan`, then `#apply`). Refusals are the set's: `syscall`
+`writeFiles`, `path` the key's. A disk-origin place refuses a set
+(`ENOTSUP`); a set has one flag and no removal.** _Why:_ files that only
+work together — a route table and its handlers, a page and its assets —
+must never be seen apart, by any thread, and a series of writes publishes
+each alone. The index-at-flush already makes an epoch invisible until its
+commit, so a set is one epoch more, not a transaction of its own. Keys
+locked one by one would hold some while waiting for others; the barrier
+of the place would stop writes of keys the set does not touch. Checked
+whole first, a set refused by its hierarchy runs no preparer. Its keys
+checked against each other by their ancestors cost the depth of a key,
+where putting them in `creating` meanwhile would compare every key of the
+set with every other. Files prepared one at a time let a failure stop the
+rest, and nothing stage after the set is abandoned. The disk has no
+commit of a set of files to offer.
+
 ## Routing and strict mode
 
 **The router decides, the adapters execute; `fs-patch` (with `fs-copy`,
@@ -1223,6 +1251,12 @@ workers call `attach()`.** _Why:_ preloads do not run in worker threads.
 | Entries, stats or views in an event                                                                             | a listener would hold shared bytes, or read stale ones            |
 | Replaying the current state to a new listener                                                                   | that is `snapshot()` and the reads                                |
 | Logging what a listener throws                                                                                  | hides the application's error; no emitter of Node does it         |
+| Locking the keys of a set one by one, or under the place's barrier                                              | hold-and-wait; the barrier stops writes of unrelated keys         |
+| The keys of a set in `creating` while it is checked                                                             | every key of the set compared with every other                    |
+| Preparing the files of a set in parallel (`pool()`)                                                             | a failure leaves work in flight that stages after the abandon     |
+| Removals or a flag per file in a set                                                                            | widens a write; a second shape of request and of refusal          |
+| A set of a disk-origin place                                                                                    | the disk commits files one by one                                 |
+| The version as the result of every mutation                                                                     | changes every result; `version(key)` answers it                   |
 | IPC per chunk or per pin                                                                                        | pins of current versions must stay local                          |
 | Freeing a retired version on a timeout                                                                          | reuse under a slow reader returns another file's bytes            |
 | Retirement books that free the bytes themselves                                                                 | a free starts a compaction, whose epoch only the kernel commits   |
@@ -1361,6 +1395,9 @@ workers call `attach()`.** _Why:_ preloads do not run in worker threads.
   or a companion; the destination prepares it once, and a virtual
   destination never gets a disk file.
 - A virtual subtree moves in one publication or not at all.
+- A set of `writeFiles` is published in one commit or not at all: a
+  refusal, a failure or `close()` leaves no allocation, no key in flight
+  and no lock of it.
 - A virtual path is a file or a directory, never both — also while
   mutations overlap.
 - A projection's directory index says what a scan of its keys would say.

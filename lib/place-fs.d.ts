@@ -82,6 +82,24 @@ export interface WriteFileOptions {
   flag?: string;
 }
 
+/**
+ * The files of `writeFiles`: `[key, data]` pairs — an array, a `Map`, any
+ * iterable — or an object of key → data.
+ */
+export type WriteFilesInput =
+  | Iterable<readonly [key: string, data: string | Uint8Array]>
+  | { readonly [key: string]: string | Uint8Array };
+
+export interface WriteFilesOptions {
+  /** Of the strings. */
+  encoding?: BufferEncoding | null;
+  /**
+   * One flag for the set, as node:fs reads it: `w…` replaces, `x` creates
+   * every key only; an append flag is `ENOTSUP`. Default `'w'`.
+   */
+  flag?: string;
+}
+
 export interface MkdirOptions {
   recursive?: boolean;
   /** Disk only. */
@@ -236,6 +254,19 @@ export class PlaceFs {
     data: string | Uint8Array,
     options?: WriteFileOptions | BufferEncoding,
   ): MutationResult;
+  /**
+   * Several files of a virtual place as one publication: the whole set is
+   * checked before any file is prepared, each file is prepared once, and
+   * it is published in one commit — one update, one version, one event —
+   * or not at all. A `TypeError` for no file, a key twice or data that is
+   * not a string or bytes; `ENOTSUP` for a disk-origin place. A Promise of
+   * the version of the commit for `sab + virtual`, undefined for a `map`
+   * place.
+   */
+  writeFiles(
+    files: WriteFilesInput,
+    options?: WriteFilesOptions | BufferEncoding,
+  ): void | Promise<number>;
   /** `ENOTSUP` for a prepared key of a virtual place: no raw input kept. */
   appendFile(
     key: string,
