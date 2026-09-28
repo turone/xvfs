@@ -729,9 +729,9 @@ hides, the raw file of a prepared one, a write into a read-only place, a
 module loaded through a share. Refusing the forms is what a lexical router
 can guarantee; which file a share or a namespace names is the operating
 system's to say, and no list of aliases is complete. Only strict asks,
-so without it the route outside costs nothing more. Spellings in drive
-form — an 8.3 short name, a drive mapped to a share — stay unrecognized,
-so `appRoot` is given in the form the application uses.
+so without it the route outside costs nothing more. A drive mapped to a
+share stays unrecognized, so `appRoot` is given in the form the
+application uses.
 
 **On Windows under strict a path with NTFS stream syntax — a `:` past the
 colon of its drive, in the path as resolved, or in the part below a UNC or
@@ -750,6 +750,30 @@ costs one search of the path. The facade's rule — a cached extension is
 never read from disk — holds in either mode, so it holds against a stream
 too. A relative `x:stream` is a path on drive X to `path.resolve`, and to
 Windows.
+
+**On Windows under strict a name in the form of an 8.3 short name — a
+base of at most eight characters ending in `~` and digits, at most three
+after one dot (`PROGRA~1`, `INDEX~1.HTM`, `AB12CD~1`, in any case) — is
+owned by nobody below `appRoot`, and at the first name where a path on
+`appRoot`'s drive leaves `appRoot`'s own names (compared as `Containment`
+compares them). Past a name that differs from `appRoot`'s, and on another
+drive, it passes. `appRoot` given with short names routes the paths
+spelled as it is. The `PlaceFs` facade takes no file name of that form
+for a disk file, in either mode.** _Why:_ NTFS resolves a short name to
+any long name of its directory, and which one only the disk knows:
+`…\Temp\SMFS-A~1\place\hidden` — `appRoot` by its short name — lay
+outside `appRoot` to the strings and read what the place hides, wrote
+into read-only places and loaded raw modules, and `INDEX~1.HTM` in a
+place with `fs.fallback: 'disk'` read the raw `index.html`, its extension
+taken as `htm`. A short name at the name where a path departs from
+`appRoot`'s spelling may be the short name of `appRoot`'s own name there;
+past a name that differs, the path lies in a directory that is no ancestor
+of `appRoot`, where a short name names an entry of its own — so
+`C:\Windows\SYSTEM~1` passes while `C:\PROGRA~1` does not when `appRoot`
+lies below `C:\Users`. Below `appRoot` any short name may stand for
+another key. The form is what the strings show: a long name in it is
+refused as well, and a path with no `~` costs one search. The volume
+decides whether short names exist at all, so the rule does not ask.
 
 **A path already in the form `path.resolve` returns is taken as it is: a
 drive letter, `:` and `\` on Windows (UNC paths are resolved), `/` on
@@ -1308,6 +1332,8 @@ workers call `attach()`.** _Why:_ preloads do not run in worker threads.
 | Refusing every miss of a cached extension without strict on Windows                                             | the permissive default's unpublished files; unlike on POSIX       |
 | Mapping UNC and namespace spellings (`\\?\C:\…`, `\\localhost\C$\…`) onto `appRoot`                             | no list of aliases is complete; the OS says what a share names    |
 | Stripping a stream suffix to route the file before it (`a.txt::$DATA` as `a.txt`)                               | the file system says which stream a name opens, not the strings   |
+| Resolving short names in the router (`GetLongPathName`, `realpath` per path); listing the real aliases          | disk access on the hot path; only the disk knows every alias      |
+| Refusing every short name on `appRoot`'s drive                                                                  | past a differing name none stands for `appRoot` (`SYSTEM~1`)      |
 | Native `cp` with a routing `filter` for managed trees                                                           | raw disk bytes, no virtual entries, no canonical content          |
 | Copying canonical (prepared) content as a copy's input                                                          | the destination prepares it again; its bundle names the source    |
 | Feeding a prepared virtual entry's canonical content back in as raw                                             | stale `meta` / filename / bytecode, a silently different input    |
@@ -1441,8 +1467,9 @@ workers call `attach()`.** _Why:_ preloads do not run in worker threads.
 - Disk territory never leaves its place (`PlaceFs.#within`) and, under
   strict, never serves or lists a cached extension.
 - On Windows under strict, the patch and the module hooks pass no UNC or
-  namespace path outside `appRoot`, and no path with NTFS stream syntax,
-  on to `node:fs` or Node's loader: the router refuses it first.
+  namespace path outside `appRoot`, no path with NTFS stream syntax and no
+  short name below `appRoot` or where a path leaves its spelling on to
+  `node:fs` or Node's loader: the router refuses it first.
 
 ## Protocol
 
