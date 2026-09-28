@@ -8,7 +8,14 @@ const os = require('node:os');
 const path = require('node:path');
 const { finished } = require('node:stream/promises');
 const fsPatch = require('../lib/adapters/fs-patch.js');
-const { tmpDir, writeTree, rm, kernel, drain } = require('./helpers.js');
+const {
+  tmpDir,
+  writeTree,
+  rm,
+  kernel,
+  drain,
+  diskCalls,
+} = require('./helpers.js');
 
 // The disk as it is, behind the patch: captured before any install.
 const {
@@ -1101,6 +1108,300 @@ describe('fs-patch under strict: open with a flag that writes', () => {
     for (const args of READS) {
       assert.deepEqual(await openEach(file, args), ['ok', 'ok', 'ok']);
     }
+  });
+});
+
+// readFile opens the file with its flag first, so a flag that writes may
+// create or truncate it. Routed as a read alone, readFileSync(p, { flag:
+// 'w' }) truncated a file of a read-only place (and answered EBADF), and
+// { flag: 'a+' } created a file in a virtual place's directory on disk. It
+// is routed as open() with the same flag: a flag that only writes follows
+// the mutation routing, one that can read meets no descriptor to a
+// published entry and stays EACCES on a hidden path; what open() lets
+// through is read natively.
+
+// readFile in each form — sync, callback, promise — with `{ flag }`: the
+// content read ('ok:…') or the error, per form; and the asynchronous disk
+// calls the three made.
+const readEach = async (file, flag) => {
+  const options = { flag };
+  const forms = [
+    () => fs.readFileSync(file, options),
+    () =>
+      new Promise((resolve, reject) => {
+        fs.readFile(file, options, (err, data) =>
+          err ? reject(err) : resolve(data),
+        );
+      }),
+    () => fs.promises.readFile(file, options),
+  ];
+  const calls = diskCalls();
+  const outcomes = [];
+  try {
+    for (const form of forms) {
+      try {
+        outcomes.push(`ok:${await form()}`);
+      } catch (err) {
+        outcomes.push(err);
+      }
+    }
+  } finally {
+    calls.stop();
+  }
+  return { outcomes, calls: calls.count };
+};
+
+// Every form refuses each flag so, before any disk call.
+const refusedReads = async (file, flags, expected) => {
+  for (const flag of flags) {
+    const { outcomes, calls } = await readEach(file, flag);
+    for (const outcome of outcomes) {
+      refused(outcome, { ...expected, file, args: [flag] });
+    }
+    assert.equal(calls, 0, `${file} [${flag}]: no disk call`);
+  }
+};
+
+// What node:fs answers for a plain file outside appRoot with the same flag
+// and content, and what the file holds afterwards: codes, or 'ok:…'.
+const nativeRead = async (plain, content, flag) => {
+  if (content === null) rm(plain);
+  else writeDisk(plain, content);
+  const { outcomes } = await readEach(plain, flag);
+  const after = onDisk(plain) ? readDisk(plain, 'utf8') : null;
+  return { outcomes: outcomes.map((o) => o.code ?? o), after };
+};
+
+describe('fs-patch: readFile with a flag that writes', () => {
+  let root;
+  let outside;
+  let k;
+  const at = (...p) => path.join(root, ...p);
+
+  before(async () => {
+    outside = tmpDir('fspatch-readflag-out');
+    root = writeTree(tmpDir('fspatch-readflag'), {
+      'ro/a.txt': 'published',
+      'ro/raw.bin': 'raw', // not cached: the disk territory
+      'site/a.txt': 'published',
+      'prep/a.txt': 'published', // prepared: served upper-case
+      'drive/d.txt': 'disk',
+    });
+    fs.mkdirSync(at('v', 'sub'), { recursive: true });
+    fs.mkdirSync(at('m'));
+    k = await kernel(
+      root,
+      {
+        ro: { fs: { ext: ['txt'] } },
+        site: { fs: { ext: ['txt'], writable: true } },
+        prep: { fs: { ext: ['txt'], writable: true, prepare: 'upper' } },
+        drive: { provider: 'disk', fs: true },
+        v: { origin: 'virtual', fs: { writable: true } },
+        m: { provider: 'map', origin: 'virtual', fs: { writable: true } },
+      },
+      { watchTimeout: 60000 },
+      { preparers: { upper: (raw) => raw.toString().toUpperCase() } },
+    );
+    k.fs('m').writeFile('/p.txt', 'virtual');
+    await k.fs('v').writeFile('/p.txt', 'virtual');
+    fsPatch.install(k);
+  });
+
+  after(() => {
+    fsPatch.uninstall();
+    k.close();
+    rm(root);
+    rm(outside);
+  });
+
+  it('a read-only place is EROFS: nothing created or truncated', async () => {
+    for (const file of [
+      at('ro', 'new.txt'),
+      at('ro', 'raw.bin'),
+      at('ro', 'a.txt'),
+      at('drive', 'd.txt'),
+      at('drive', 'new.txt'),
+    ]) {
+      const before = onDisk(file) ? readDisk(file, 'utf8') : null;
+      await refusedReads(file, WRITE_ONLY_FLAGS, { code: 'EROFS' });
+      const after = onDisk(file) ? readDisk(file, 'utf8') : null;
+      assert.equal(after, before, file);
+    }
+    // What the read routing passes through is a mutation too.
+    for (const file of [at('ro', 'raw.bin'), at('drive', 'd.txt')]) {
+      await refusedReads(file, READ_WRITE_FLAGS, { code: 'EROFS' });
+    }
+    assert.equal(readDisk(at('ro', 'raw.bin'), 'utf8'), 'raw');
+    assert.equal(readDisk(at('drive', 'd.txt'), 'utf8'), 'disk');
+  });
+
+  it('a virtual place is ENOTSUP: no stray file on disk, no entry', async () => {
+    for (const file of [
+      at('v', 'x.txt'),
+      at('v', 'sub', 'x.txt'),
+      at('m', 'x.txt'),
+    ]) {
+      await refusedReads(file, WRITE_FLAGS, {
+        code: 'ENOTSUP',
+        detail: 'virtual place',
+      });
+    }
+    assert.deepEqual(listDisk(at('v'), { recursive: true }), ['sub']);
+    assert.deepEqual(listDisk(at('m')), []);
+    for (const name of ['v', 'm']) {
+      await refusedReads(at(name, 'p.txt'), WRITE_FLAGS, {
+        code: 'ENOTSUP',
+        detail: 'virtual file',
+      });
+      const entries = k.fs(name).readdir('/', { recursive: true });
+      assert.deepEqual(entries, ['p.txt'], name);
+      assert.equal(k.fs(name).readFile('/p.txt', 'utf8'), 'virtual', name);
+    }
+  });
+
+  it('a published disk-origin entry: a flag that can read is ENOTSUP', async () => {
+    for (const file of [at('ro', 'a.txt'), at('site', 'a.txt')]) {
+      await refusedReads(file, READ_WRITE_FLAGS, {
+        code: 'ENOTSUP',
+        detail: 'virtual file',
+      });
+      assert.equal(readDisk(file, 'utf8'), 'published', file);
+    }
+    // The raw file behind prepared content is not read either.
+    await refusedReads(at('prep', 'a.txt'), READ_WRITE_FLAGS, {
+      code: 'ENOTSUP',
+      detail: 'virtual file',
+    });
+    assert.equal(readDisk(at('prep', 'a.txt'), 'utf8'), 'published');
+    // A flag that only reads keeps the canonical content.
+    for (const flag of READ_FLAGS) {
+      const { outcomes } = await readEach(at('prep', 'a.txt'), flag);
+      assert.deepEqual(outcomes, Array(3).fill('ok:PUBLISHED'), `${flag}`);
+    }
+  });
+
+  it('a writable disk-origin place: what open() lets through, node:fs reads', async () => {
+    const plain = path.join(outside, 'plain.txt');
+    // A published entry opens with a flag that only writes: its raw file,
+    // as node:fs opens a plain one.
+    const file = at('site', 'a.txt');
+    for (const flag of WRITE_ONLY_FLAGS) {
+      writeDisk(file, 'published');
+      const native = await nativeRead(plain, 'published', flag);
+      const { outcomes } = await readEach(file, flag);
+      assert.deepEqual(
+        outcomes.map((o) => o.code ?? o),
+        native.outcomes,
+        `${flag}`,
+      );
+      assert.equal(readDisk(file, 'utf8'), native.after, `${flag}`);
+    }
+    // A new file, with any flag that writes.
+    for (const flag of WRITE_FLAGS) {
+      const fresh = at('site', 'fresh.txt');
+      rm(fresh);
+      const native = await nativeRead(plain, null, flag);
+      const { outcomes } = await readEach(fresh, flag);
+      assert.deepEqual(
+        outcomes.map((o) => o.code ?? o),
+        native.outcomes,
+        `${flag}`,
+      );
+      const after = onDisk(fresh) ? readDisk(fresh, 'utf8') : null;
+      assert.equal(after, native.after, `${flag}`);
+    }
+  });
+});
+
+describe('fs-patch under strict: readFile with a flag that writes', () => {
+  let root;
+  let outside;
+  let k;
+  const at = (...p) => path.join(root, ...p);
+
+  before(async () => {
+    outside = tmpDir('fspatch-readflag-strict-out');
+    root = writeTree(tmpDir('fspatch-readflag-strict'), {
+      'ro/raw.bin': 'raw', // not cached: the disk territory
+      'up/a.txt': 'published',
+      'stray/s.txt': 'unmanaged',
+    });
+    fs.mkdirSync(at('m'));
+    k = await kernel(
+      root,
+      {
+        ro: { fs: { ext: ['txt'], fallback: 'disk' } },
+        up: { fs: { ext: ['txt'], writable: true } },
+        m: { provider: 'map', origin: 'virtual', fs: { writable: true } },
+      },
+      { strict: true, watchTimeout: 60000 },
+    );
+    fsPatch.install(k);
+  });
+
+  after(() => {
+    fsPatch.uninstall();
+    k.close();
+    rm(root);
+    rm(outside);
+  });
+
+  it('a flag that can read a hidden path is EACCES', async () => {
+    for (const file of [
+      at('ro', 'new.txt'),
+      at('up', 'new.txt'),
+      at('m', 'x.txt'),
+      at('stray', 's.txt'),
+    ]) {
+      await refusedReads(file, READ_WRITE_FLAGS, { code: 'EACCES' });
+    }
+    assert.equal(onDisk(at('ro', 'new.txt')), false);
+    assert.equal(onDisk(at('up', 'new.txt')), false);
+    assert.deepEqual(listDisk(at('m')), []);
+    assert.equal(readDisk(at('stray', 's.txt'), 'utf8'), 'unmanaged');
+  });
+
+  it('a flag that only writes follows the mutation routing', async () => {
+    await refusedReads(at('ro', 'new.txt'), WRITE_ONLY_FLAGS, {
+      code: 'EROFS',
+    });
+    await refusedReads(at('ro', 'raw.bin'), WRITE_FLAGS, { code: 'EROFS' });
+    await refusedReads(at('m', 'x.txt'), WRITE_ONLY_FLAGS, {
+      code: 'ENOTSUP',
+      detail: 'virtual place',
+    });
+    await refusedReads(at('stray', 's.txt'), WRITE_ONLY_FLAGS, {
+      code: 'EACCES',
+    });
+    await refusedReads(at('stray', 'new.txt'), WRITE_ONLY_FLAGS, {
+      code: 'EACCES',
+    });
+    assert.equal(onDisk(at('ro', 'new.txt')), false);
+    assert.equal(readDisk(at('ro', 'raw.bin'), 'utf8'), 'raw');
+    assert.deepEqual(listDisk(at('m')), []);
+    assert.equal(readDisk(at('stray', 's.txt'), 'utf8'), 'unmanaged');
+    assert.equal(onDisk(at('stray', 'new.txt')), false);
+    // A writable disk-origin place: its raw file, created as node:fs
+    // creates a plain one, and hidden until the watcher publishes it.
+    const plain = path.join(outside, 'plain.txt');
+    const file = at('up', 'new.txt');
+    for (const flag of WRITE_ONLY_FLAGS) {
+      rm(file);
+      const native = await nativeRead(plain, null, flag);
+      const { outcomes } = await readEach(file, flag);
+      assert.deepEqual(
+        outcomes.map((o) => o.code ?? o),
+        native.outcomes,
+        `${flag}`,
+      );
+      const after = onDisk(file) ? readDisk(file, 'utf8') : null;
+      assert.equal(after, native.after, `${flag}`);
+    }
+    await refusedReads(at('up', 'a.txt'), READ_WRITE_FLAGS, {
+      code: 'ENOTSUP',
+      detail: 'virtual file',
+    });
+    assert.equal(readDisk(at('up', 'a.txt'), 'utf8'), 'published');
   });
 });
 

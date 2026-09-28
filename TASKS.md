@@ -97,13 +97,10 @@ Windows.
 
 ## P2 — Writes that bypass the mutation routing
 
-**Problem.** `fs.readFile*(p, { flag: 'w' })` truncates a disk-territory
-file of a read-only place (and answers `EBADF`); `{ flag: 'a+' }` creates
-a file in a virtual place's directory on disk; `fs.mkdtemp*` is not
-patched and creates directories in read-only and virtual places — under
-strict `mkdtempSync(appRoot/ro/tmp-)` in a read-only `'deny'` place
-creates `ro/tmp-XXXXXX` on disk — and so do `mkdtempDisposableSync` /
-`promises.mkdtempDisposable` (Node 24+).
+**Problem.** `fs.mkdtemp*` is not patched and creates directories in
+read-only and virtual places — under strict `mkdtempSync(appRoot/ro/tmp-)`
+in a read-only `'deny'` place creates `ro/tmp-XXXXXX` on disk — and so do
+`mkdtempDisposableSync` / `promises.mkdtempDisposable` (Node 24+).
 
 **Done when.** These pass the mutation routing as `open` with a writing
 flag does, with tests of all three forms. Since `open` with a flag that
