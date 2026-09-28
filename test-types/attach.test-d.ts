@@ -53,6 +53,7 @@ type Shared = {
   readonly stat: FileStat;
   readonly meta?: object;
   readonly scriptOptions?: ScriptOptions;
+  readonly version?: number;
 };
 type Disk = {
   readonly kind: 'disk';
@@ -60,12 +61,14 @@ type Disk = {
   readonly stat: FileStat;
   readonly meta?: object;
   readonly scriptOptions?: ScriptOptions;
+  readonly version?: number;
 };
 type Projected = {
   readonly data: Buffer | null;
   readonly stat: FileStat;
   readonly meta?: object;
   readonly scriptOptions?: ScriptOptions;
+  readonly version?: number;
   readonly path?: string | null;
 };
 const fill = async () => {

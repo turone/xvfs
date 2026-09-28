@@ -29,6 +29,7 @@ expectType<boolean>()(files.writable);
 expectType<boolean>()(files.zeroCopy);
 expectType<string>()(files.pathOf('/index.html'));
 expectType<boolean>()(files.exists('/index.html'));
+expectType<number | null>()(files.version('/index.html'));
 
 // --- Stats ---
 
@@ -77,6 +78,7 @@ files.readFile('/index.html', { signal: AbortSignal.timeout(100) });
 const lease = files.readFileView('/index.html');
 expectType<{
   readonly view: Buffer;
+  readonly version: number | null;
   readonly release: () => void;
   readonly [Symbol.dispose]: () => void;
 } | null>()(lease);
@@ -199,9 +201,11 @@ expectType<{
   cachedData: Buffer | null;
   scriptOptions: Readonly<ScriptOptions> | null;
   meta: { readonly [key: string]: unknown } | null;
+  version: number | null;
 } | null>()(bundle);
 if (bundle) {
   expectType<Buffer | null>()(bundle.cachedData);
+  expectType<number | null>()(bundle.version);
   expectType<string | undefined>()(bundle.scriptOptions?.filename);
   expectType<number | undefined>()(bundle.scriptOptions?.lineOffset);
   expectType<unknown>()(bundle.meta?.['key']);
@@ -272,6 +276,10 @@ big?.size.toFixed();
 lease!.view = Buffer.alloc(0);
 // @ts-expect-error a lease is frozen
 lease!.release = () => {};
+// @ts-expect-error a lease is frozen
+lease!.version = 1;
+// @ts-expect-error a version is looked up by key
+files.version();
 // @ts-expect-error a getter
 files.name = 'other';
 // @ts-expect-error a facade comes from `kernel.fs(name)`

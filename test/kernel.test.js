@@ -709,6 +709,7 @@ describe('VfsKernel: snapshot, workers, ACK', () => {
       w.handleDelta({
         name: 'vfs-update',
         updateId: 1,
+        version: 2,
         places: {
           site: { entries: [['/new.txt', entry]], removals: ['/a.txt'] },
         },
@@ -716,6 +717,7 @@ describe('VfsKernel: snapshot, workers, ACK', () => {
       });
       assert.equal(w.fs('site').readFile('/new.txt', 'utf8'), 'new');
       assert.equal(w.fs('site').exists('/a.txt'), false);
+      assert.equal(w.version, 2, 'the version of the update');
       assert.deepEqual(w.handleDelta({ name: 'other' }), []);
     } finally {
       k.close();

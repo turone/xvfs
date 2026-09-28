@@ -80,6 +80,8 @@ new VfsKernel(config, {
 const main = async () => {
   expectType<'new' | 'initializing' | 'ready' | 'closed'>()(kernel.state);
   expectType<boolean>()(kernel.ready);
+  expectType<number>()(kernel.version);
+  expectType<string>()(kernel.instance);
   expectType<VfsConfig>()(kernel.config);
   expectType<string>()(kernel.appRoot);
   expectType<Promise<void>>()(kernel.initialize());
@@ -100,6 +102,8 @@ expectType<{
   readonly places: {
     readonly [name: string]: { readonly entries: [string, CacheEntry][] };
   };
+  readonly version: number;
+  readonly instance: string;
 }>()(kernel.snapshot());
 const { vfs, transferList } = kernel.link();
 expectType<{
@@ -112,6 +116,8 @@ expectType<{
       readonly places: {
         readonly [name: string]: { readonly entries: [string, CacheEntry][] };
       };
+      readonly version: number;
+      readonly instance: string;
     };
     config: DeepReadonly<VfsRawConfig>;
     appRoot: string;
@@ -263,6 +269,7 @@ if (found && !('denied' in found)) {
     readonly stat: FileStat;
     readonly meta?: object;
     readonly scriptOptions?: ScriptOptions;
+    readonly version?: number;
     readonly path?: string | null;
   }>()(found.file);
 }
@@ -303,6 +310,10 @@ kernel.fs(config.places[0]);
 kernel.state = 'ready';
 // @ts-expect-error read-only
 kernel.appRoot = '/elsewhere';
+// @ts-expect-error the kernel's own count
+kernel.version = 7;
+// @ts-expect-error the main kernel's id
+kernel.instance = 'other';
 // @ts-expect-error a frozen result
 d.retired.bytes = 0;
 // @ts-expect-error a frozen result

@@ -210,6 +210,30 @@ companions travel together, a companion that failed to rebuild is listed in
 length, not content — a same-length edit next to a stale companion would run
 old bytecode silently.
 
+**A commit that publishes takes a version: the next number of the main
+kernel's count of publications (`#version`), which `#flush` stamps into
+every entry it publishes before the index takes it — the entry is private
+until then — and sends in its `vfs-update`; every snapshot carries the
+kernel's, and each thread takes it in `#apply`: the main thread in
+`#flush`, a worker update by update. A commit that publishes nothing — an
+empty epoch, a mutation that changes nothing — takes none, and neither
+does a relocation (`ep.relocation`): the copies it publishes keep the
+version of the entries they copy. A snapshot also carries `instance`, the
+main kernel's random id. The files of a `map` place and the disk
+territory have no version.** _Why:_ an application needs to tell one
+published content from another — an ETag, a `vm.Script` built from a
+bundle, whether a worker has seen a write — without the clock, which
+repeats within a millisecond and is not one across threads, and without
+the content, whose hash is a pass over every byte. `updateId` counts
+updates for the ACKs, relocations included, which change no file; a
+`retireId` names one retired representation until its free. One counter
+on the main thread, stamped at the commit, is the same number in every
+thread without a message of its own, and the equal versions of one
+commit tell its files published together. A version restarts with the
+process, the pair of `instance` and version does not. A map place's
+content is each thread's own: a count per thread would give one file a
+different version in each.
+
 **Watcher epochs run strictly one at a time, in arrival order
 (`SerialQueue`); rechecks use the same queue.** _Why:_ epochs processed in
 parallel let an older epoch publish over a newer one (new content on disk,
@@ -318,6 +342,9 @@ diagnostics (`kernel.retirements()`, labels like `static:/a.mp4 [fs:br]#17`,
 never parsed back). _Why:_ current entries are identified by (place, key);
 a permanent id would bloat every entry and message for the rare case; a
 never-reused id means a late release can never match a later retirement.
+The public version of a file (Publication) is no `retireId`: it names the
+commit that published the file, shared by every entry of that commit, and
+a relocation does not change it.
 
 **`diagnostics()` is the public, read-only picture of the shared memory:
 the pool's usage and fragmentation; what the published versions take of
@@ -1161,6 +1188,12 @@ workers call `attach()`.** _Why:_ preloads do not run in worker threads.
 | Unbounded jobs of a watcher epoch                                                                               | a descriptor per changed file: `EMFILE` at `ulimit -n 1024`       |
 | A scan's stats pooled per directory, or listed in the order they finish                                         | no faster on sparse trees; init's order would change run to run   |
 | A permanent allocation id in every entry                                                                        | retirement needs an identity only while a version is retired      |
+| `updateId` as the public version                                                                                | it counts relocations, which change no file; the ACKs' books      |
+| A `retireId` as the version of a file                                                                           | one per representation, and only until its free                   |
+| A hash of the content as the version                                                                            | a pass over every byte; no commit identity (a preparer's `meta`)  |
+| A clock or random ids as versions                                                                               | a clock repeats; neither orders commits nor names one             |
+| The version in `stat()`                                                                                         | `VfsStats` stands in for `fs.Stats`, which the patch returns      |
+| A version per thread for the files of a map place                                                               | one file, another version in each thread: a false ETag match      |
 | IPC per chunk or per pin                                                                                        | pins of current versions must stay local                          |
 | Freeing a retired version on a timeout                                                                          | reuse under a slow reader returns another file's bytes            |
 | Retirement books that free the bytes themselves                                                                 | a free starts a compaction, whose epoch only the kernel commits   |
@@ -1239,6 +1272,11 @@ workers call `attach()`.** _Why:_ preloads do not run in worker threads.
   whose `stat` lands after `close()` is dropped.
 - A mutation of a virtual place never resolves without its commit: one
   whose kernel closes before it rejects as the closed kernel.
+- The version is the main kernel's count of publications: a commit that
+  publishes raises it by exactly one and stamps it into every entry it
+  publishes; a relocation and a commit that publishes nothing change
+  neither. An entry has the same version in every thread, and never a
+  wall-clock time or a `retireId`.
 - Companions never appear in `readdir`, `exists`, routing or the patched fs;
   `Place.companions(key)` enumerates them — never hand-roll key lists.
 - Kernel-internal disk I/O (kernel, the publication sink, watch pipeline,
@@ -1302,15 +1340,16 @@ workers call `attach()`.** _Why:_ preloads do not run in worker threads.
 ## Protocol
 
 ```
-snapshot    { segments: [{ id, sab }], places: { <name>: { entries: [[key, entry]] } } }
-vfs-update  { name, updateId, places: { <name>: { entries, removals, retired: [[key, retireId]] } },
-              newSegments: [{ id, sab }] }                                    main → worker
+snapshot    { segments: [{ id, sab }], places: { <name>: { entries: [[key, entry]] } },
+              version, instance }
+vfs-update  { name, updateId, version, places: { <name>: { entries, removals,
+              retired: [[key, retireId]] } }, newSegments: [{ id, sab }] }   main → worker
 vfs-ack     { name: 'vfs-ack', updateId, retained?: [retireId] }              worker → main
 vfs-release { name: 'vfs-release', retireIds: [retireId] }                    worker → main
 vfs-mutate  { name, id, place, op, key, to?, options?, data? }                worker → main
 vfs-mutated { name, id, error?: { code, message, syscall, path, dest } }      main → worker
-entry       shared { kind, segmentId, offset, length, stat, scriptOptions?, meta? }
-            | disk { kind, path, stat, scriptOptions?, meta? }
+entry       shared { kind, segmentId, offset, length, stat, version, scriptOptions?, meta? }
+            | disk { kind, path, stat, version, scriptOptions?, meta? }
 stat        { size, mtimeMs } (+ sourceSize, encoding for compressed companions)
 ```
 

@@ -36,6 +36,8 @@ export interface SharedEntry {
   readonly stat: FileStat;
   readonly meta?: object;
   readonly scriptOptions?: ScriptOptions;
+  /** The kernel's commit that published it; none before it is published. */
+  readonly version?: number;
 }
 
 /** A file left on disk: above `maxFileSize`, no room, `retainRaw: false`. */
@@ -45,6 +47,8 @@ export interface DiskEntry {
   readonly stat: FileStat;
   readonly meta?: object;
   readonly scriptOptions?: ScriptOptions;
+  /** The kernel's commit that published it; none before it is published. */
+  readonly version?: number;
 }
 
 export type CacheEntry = SharedEntry | DiskEntry;
@@ -63,22 +67,33 @@ export interface PlaceSnapshot {
   readonly entries: [string, CacheEntry][];
 }
 
-/** What `kernel.snapshot()` gives a worker: published entries only. */
-export interface VfsSnapshot {
+/** What `FilesystemCache.snapshot()` gives: published entries only. */
+export interface CacheSnapshot {
   readonly segments: Segment[];
   readonly places: { readonly [name: string]: PlaceSnapshot };
 }
 
 /**
+ * What `kernel.snapshot()` gives a worker: published entries only, the
+ * kernel's version and its instance.
+ */
+export interface VfsSnapshot extends CacheSnapshot {
+  readonly version: number;
+  readonly instance: string;
+}
+
+/**
  * One physical version of a file, as a thread projects it: a zero-copy SAB
  * view (shared entry), an owned Buffer (map place) or `null` for an entry
- * kept on disk, which carries its `path`.
+ * kept on disk, which carries its `path`. `version`: the commit that
+ * published a shared entry; none for a map place's file.
  */
 export interface ProjectedFile {
   readonly data: Buffer | null;
   readonly stat: FileStat;
   readonly meta?: object;
   readonly scriptOptions?: ScriptOptions;
+  readonly version?: number;
   readonly path?: string | null;
 }
 
@@ -180,7 +195,7 @@ export class FilesystemCache {
   compact(
     threshold: number,
   ): { name: string; key: string; entry: SharedEntry }[] | null;
-  snapshot(): VfsSnapshot;
+  snapshot(): CacheSnapshot;
   /** What the pool holds, for diagnostics; changes nothing. */
   usage(): PoolUsage;
   stats(): CacheStats;

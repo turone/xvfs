@@ -49,6 +49,9 @@ is unsupported.
 - **Live reload** — watcher batches disk events into epochs processed
   strictly in order, one `vfs-update` per epoch; a replaced version is
   freed after every worker ACKs and no stream or view still reads it.
+- **Versions** — every publication has a number, the same in every
+  thread: `files.version(key)` for a file, `kernel.version` for the
+  published state, `kernel.instance` for the process that owns it.
 - **Five providers** — `sab`, `map`, `sea`, `disk`, `node-default`.
 - **Strict routing** — `strict: true` makes `appRoot` the routing
   boundary (a policy, not OS-level isolation).
@@ -255,8 +258,10 @@ file with independent companions, both built from the one canonical
   source and `dest`; a require-compile failure is best-effort (only its
   own companion is dropped).
 - `kernel.fs(name).script(key)` →
-  `{ source, cachedData, scriptOptions, meta } | null`; `ENOTSUP` when the
-  place has no `fs.script`. It never prepares or compiles anything itself.
+  `{ source, cachedData, scriptOptions, meta, version } | null`; `ENOTSUP`
+  when the place has no `fs.script`. It never prepares or compiles
+  anything itself. `version` is the file's ([Versions](#versions)): a
+  `vm.Script` built from the bundle serves until it changes.
 
 ### SEA provider
 
@@ -546,7 +551,7 @@ no stream or view in any thread still reads them — never on a timeout.
 | API                                           | What you get                                                                                     |
 | --------------------------------------------- | ------------------------------------------------------------------------------------------------ |
 | `readFile()`                                  | Owned `Buffer`: keep it, mutate it                                                               |
-| `readFileView()` / `readFileCompressedView()` | Lease `{ view, release, [Symbol.dispose] }` — needs `fs.zeroCopy`                                |
+| `readFileView()` / `readFileCompressedView()` | Lease `{ view, version, release, [Symbol.dispose] }` — needs `fs.zeroCopy`                       |
 | `withFileView(key, fn)`                       | `fn(view)` under a lease released when `fn` settles; `null` when missing                         |
 | `createReadStream()`, `zeroCopy: false`       | `Readable` of owned chunks; the version is released when the stream ends, errors or is destroyed |
 | `createReadStream()`, `zeroCopy: true`        | `Readable` of borrowed SAB chunks; the version is released only by `stream.release()`            |
@@ -701,7 +706,9 @@ published.
 | -------------------- | ------------------------------------------------------------------------------------------------------------------------------------ |
 | `await initialize()` | Scan / SEA / map through the publication pipeline: preparers, bytecode, compression                                                  |
 | `fs(name)`           | `PlaceFs` for an indexed fs place                                                                                                    |
-| `snapshot()`         | `{ segments, places }` — published entries only                                                                                      |
+| `version`            | The version of the last publication this thread committed or applied; 0 before the first — [Versions](#versions)                     |
+| `instance`           | The main kernel's random id, the same in every thread linked to it                                                                   |
+| `snapshot()`         | `{ segments, places, version, instance }` — published entries only                                                                   |
 | `link()`             | `{ vfs, transferList }` for a worker — the only worker transport                                                                     |
 | `watch()`            | Start `DirWatcher` (also auto if writable disk-origin)                                                                               |
 | `diagnostics()`      | Read-only picture of the shared memory: pool, bytes waiting to be freed, each worker's ACKs and holds — [Diagnostics](#diagnostics)  |
@@ -712,6 +719,51 @@ published.
 transferList }`. The kernel posts every `vfs-update` to the port, reads
 `vfs-ack`, `vfs-release` and mutation requests, and treats port `close`
 as worker exit.
+
+#### Versions
+
+Every commit that publishes something takes the next number of the main
+kernel's count of publications — its **version** — and so does every
+file it publishes:
+
+```js
+const files = kernel.fs('static');
+files.version('/index.html'); // 7: the commit that published this file
+kernel.version; // 9: the last publication this thread has seen
+```
+
+- **What takes one.** A commit that publishes: `initialize()` (one commit,
+  version 1 when anything was published), each watcher epoch, each
+  mutation of a `sab + virtual` place — a write, an append, an `unlink`, a
+  `rm`, the rename of a file or of a subtree, removals included. Writing
+  the same bytes again is a new version, as it is a new mtime on disk.
+- **What takes none.** What publishes nothing: a rename onto itself,
+  `mkdir`, a forced `rm` of nothing, a watcher epoch that finds nothing to
+  change; and a compaction, which moves bytes without changing any file:
+  every entry keeps its version.
+- **One commit, one version.** The files of one commit — a watcher epoch,
+  a `rm -r`, a subtree move — share it: equal versions mean published
+  together.
+- **Every thread.** An entry carries its version into every snapshot and
+  update: `files.version(key)` is the same number in the main thread and in
+  every worker. A worker's `kernel.version` is the version of the last
+  update it applied: it lags while an update is on its way, and is equal
+  once the worker holds the same state.
+- **`null`** for a missing key, a file of a `map` place (per-thread
+  content, which no commit publishes) and the disk territory of
+  `fs.fallback: 'disk'`.
+- Leases carry the version of their file (`lease.version`), and so does a
+  script bundle (`files.script(key).version`): a `vm.Script` built from a
+  bundle serves until the file's version changes.
+- **Not a clock, not an identity across restarts.** A version never
+  depends on the time, and restarts at 0 with each process: alone, it
+  would name another content after a restart. `kernel.instance` — 6
+  random bytes, base64url — names the main kernel that owns the pool, in
+  every thread linked to it, so `${kernel.instance}-${files.version(key)}`
+  never names two contents: a weak validator (an ETag) that changes with
+  each publication of the file. One that stays equal for equal content,
+  whatever process published it, is a hash of the content, which a
+  preparer can compute once and return in `meta`.
 
 #### Diagnostics
 
@@ -805,8 +857,9 @@ code should use `kernel.fs(name)`.
 ### `VfsKernel` (worker)
 
 `attach({ link = workerData.vfs, preparers } = {})` projects the
-snapshot, installs hooks the config asks for, applies `vfs-update` from
-the link port and ACKs **those — and only those** — back, with the
+snapshot — at its `version`, with the main kernel's `instance` — installs
+hooks the config asks for, applies `vfs-update` from the link port, each
+with its version, and ACKs **those — and only those** — back, with the
 retired versions its streams and leases still read. Publishes
 `VfsKernel.current` (also the `kernel` getter of the package's CommonJS
 entry — not an ES module named export: from ESM read `VfsKernel.current`,
@@ -831,25 +884,26 @@ rules. A recursive `readdir` names its entries with `/`, the form of keys,
 on every platform; `sep: path.sep` asks for the native separator — what
 the patched `node:fs` lists with — in the same order, the keys'.
 
-| Method                                       | Returns                                               | Description                                                                                                                                       |
-| -------------------------------------------- | ----------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `readFile(key, opts)`                        | Buffer \| string \| null                              | Owned copy                                                                                                                                        |
-| `readFileView(key)`                          | lease \| null                                         | `{ view, release, [Symbol.dispose] }`; needs `zeroCopy`; null when missing or on disk                                                             |
-| `withFileView(key, fn)`                      | Promise                                               | `fn(view)` under a lease; `null` without calling `fn` when missing                                                                                |
-| `stat(key, opts)`                            | `VfsStats` \| null                                    | Lazy; `{ bigint }` ok                                                                                                                             |
-| `exists(key)`                                | bool                                                  | File or implicit directory                                                                                                                        |
-| `readdir(key, opts)`                         | string[] \| Buffer[] \| Dirent[]                      | Implicit dirs; lex order; `{ withFileTypes, recursive, encoding, sep }` or an encoding; recursive names `/`-separated unless `sep: path.sep`      |
-| `createReadStream(key, opts)`                | `VfsReadStream` \| null                               | `{ start, end }` inclusive, `zeroCopy`; `release()`                                                                                               |
-| `storedEncodings(key)`                       | string[]                                              | `'raw'` plus configured codecs                                                                                                                    |
-| `readFileCompressed(key, enc)`               | Buffer \| null                                        | Owned copy                                                                                                                                        |
-| `readFileCompressedView(key, enc)`           | lease \| null                                         | Pins that representation only; needs `zeroCopy`                                                                                                   |
-| `statCompressed(key, enc)`                   | object \| null                                        | `{ size, sourceSize, encoding, … }`                                                                                                               |
-| `createReadStreamCompressed(key, enc, opts)` | `VfsReadStream` \| null                               | Range is compressed bytes                                                                                                                         |
-| `pathOf(key)`                                | string                                                | Absolute OS path                                                                                                                                  |
-| `script(key)`                                | `{ source, cachedData, scriptOptions, meta }` \| null | `ENOTSUP` when no `fs.script`                                                                                                                     |
-| `meta(key)`                                  | object \| null                                        | Frozen preparer metadata                                                                                                                          |
-| `writeFile` / `appendFile` / `unlink`        | void \| Promise                                       | Sync for map/disk; Promise for `sab + virtual`                                                                                                    |
-| `mkdir` / `rm` / `rename`                    | void \| Promise                                       | `mkdir` creates no entry, checks the hierarchy; a directory `rename` moves a raw-only subtree; `ENOTSUP` for `appendFile` / moving a prepared key |
+| Method                                       | Returns                                                        | Description                                                                                                                                       |
+| -------------------------------------------- | -------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `readFile(key, opts)`                        | Buffer \| string \| null                                       | Owned copy                                                                                                                                        |
+| `readFileView(key)`                          | lease \| null                                                  | `{ view, version, release, [Symbol.dispose] }`; needs `zeroCopy`; null when missing or on disk                                                    |
+| `withFileView(key, fn)`                      | Promise                                                        | `fn(view)` under a lease; `null` without calling `fn` when missing                                                                                |
+| `stat(key, opts)`                            | `VfsStats` \| null                                             | Lazy; `{ bigint }` ok                                                                                                                             |
+| `exists(key)`                                | bool                                                           | File or implicit directory                                                                                                                        |
+| `version(key)`                               | number \| null                                                 | The commit that published the file ([Versions](#versions)); null for a missing key, a `map` place, the disk territory                             |
+| `readdir(key, opts)`                         | string[] \| Buffer[] \| Dirent[]                               | Implicit dirs; lex order; `{ withFileTypes, recursive, encoding, sep }` or an encoding; recursive names `/`-separated unless `sep: path.sep`      |
+| `createReadStream(key, opts)`                | `VfsReadStream` \| null                                        | `{ start, end }` inclusive, `zeroCopy`; `release()`                                                                                               |
+| `storedEncodings(key)`                       | string[]                                                       | `'raw'` plus configured codecs                                                                                                                    |
+| `readFileCompressed(key, enc)`               | Buffer \| null                                                 | Owned copy                                                                                                                                        |
+| `readFileCompressedView(key, enc)`           | lease \| null                                                  | Pins that representation only; needs `zeroCopy`                                                                                                   |
+| `statCompressed(key, enc)`                   | object \| null                                                 | `{ size, sourceSize, encoding, … }`                                                                                                               |
+| `createReadStreamCompressed(key, enc, opts)` | `VfsReadStream` \| null                                        | Range is compressed bytes                                                                                                                         |
+| `pathOf(key)`                                | string                                                         | Absolute OS path                                                                                                                                  |
+| `script(key)`                                | `{ source, cachedData, scriptOptions, meta, version }` \| null | `ENOTSUP` when no `fs.script`                                                                                                                     |
+| `meta(key)`                                  | object \| null                                                 | Frozen preparer metadata                                                                                                                          |
+| `writeFile` / `appendFile` / `unlink`        | void \| Promise                                                | Sync for map/disk; Promise for `sab + virtual`                                                                                                    |
+| `mkdir` / `rm` / `rename`                    | void \| Promise                                                | `mkdir` creates no entry, checks the hierarchy; a directory `rename` moves a raw-only subtree; `ENOTSUP` for `appendFile` / moving a prepared key |
 
 A virtual place keeps the hierarchy of a filesystem: a path is a file or a
 directory, never both. A key under a file is `ENOTDIR`, a file where a
@@ -1156,15 +1210,16 @@ before publication`.
 ## Protocol
 
 ```
-snapshot    { segments: [{ id, sab }], places: { <name>: { entries: [[key, entry]] } } }
-vfs-update  { name, updateId, places: { <name>: { entries, removals, retired: [[key, retireId]] } },
-              newSegments: [{ id, sab }] }                                    main → worker
+snapshot    { segments: [{ id, sab }], places: { <name>: { entries: [[key, entry]] } },
+              version, instance }
+vfs-update  { name, updateId, version, places: { <name>: { entries, removals,
+              retired: [[key, retireId]] } }, newSegments: [{ id, sab }] }   main → worker
 vfs-ack     { name: 'vfs-ack', updateId, retained?: [retireId] }              worker → main
 vfs-release { name: 'vfs-release', retireIds: [retireId] }                    worker → main
 vfs-mutate  { name, id, place, op, key, to?, options?, data? }                worker → main
 vfs-mutated { name, id, error?: { code, message, syscall, path, dest } }      main → worker
-entry       shared { kind, segmentId, offset, length, stat, scriptOptions?, meta? }
-            | disk { kind, path, stat, scriptOptions?, meta? }
+entry       shared { kind, segmentId, offset, length, stat, version, scriptOptions?, meta? }
+            | disk { kind, path, stat, version, scriptOptions?, meta? }
 stat        { size, mtimeMs } (+ sourceSize, encoding for compressed companions)
 ```
 
@@ -1174,7 +1229,9 @@ an update replaces or removes is `retired` under a `retireId` that exists
 only until it is freed. A worker ACKs each update; `retained` lists the
 retired versions its streams or leases still read, and one `vfs-release`
 follows when the last of them is done. Bytes are freed once every linked
-worker has ACKed (or exited) and no thread holds them.
+worker has ACKed (or exited) and no thread holds them. An update's
+`version` is the kernel's after it — a relocation keeps it — and each
+entry carries the version of the commit that published it.
 
 ## Examples
 
