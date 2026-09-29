@@ -489,8 +489,9 @@ describe('fs-patch: strict routing', () => {
   // >= 2 was routed, so an unmanaged first-level directory stayed listable and
   // `cp -r` copied its whole subtree out.
   describe('unmanaged paths under appRoot are denied at every depth', () => {
+    // Beside appRoot, spelled as appRoot is: outside it, and native.
     const outside = () =>
-      path.join(os.tmpdir(), `vfs-escape-${process.pid}-${Date.now()}`);
+      path.join(path.dirname(root), `vfs-escape-${process.pid}-${Date.now()}`);
 
     it('readdir', () => {
       assert.throws(() => fs.readdirSync(at('stray')), { code: 'EACCES' });
