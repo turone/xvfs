@@ -8,6 +8,7 @@ const disk = require('../lib/disk.js');
 const fsPatch = require('../lib/adapters/fs-patch.js');
 const { VfsConfig } = require('../lib/config.js');
 const { VfsKernel } = require('../lib/kernel.js');
+const { LINKED } = require('../lib/errors.js');
 const {
   tmpDir,
   writeTree,
@@ -381,6 +382,14 @@ const RENAMES = [
   ['rename', (a, b) => called((cb) => fs.rename(a, b, cb))],
   ['promises.rename', (a, b) => fs.promises.rename(a, b)],
 ];
+// The recursive removals: `rmdir`'s deprecated `recursive` too, which the
+// refusal answers before node:fs looks at it (Node 26 dropped it).
+const TREE_REMOVALS = [
+  ['rmSync', 'rm', (p) => fs.rmSync(p, { recursive: true })],
+  ['rm', 'rm', (p) => called((cb) => fs.rm(p, { recursive: true }, cb))],
+  ['promises.rm', 'rm', (p) => fs.promises.rm(p, { recursive: true })],
+  ['rmdirSync', 'rmdir', (p) => fs.rmdirSync(p, { recursive: true })],
+];
 
 // Every call of `families` with `args`, refused as `code` names it.
 const refusesAll = async (families, args, expected) => {
@@ -581,6 +590,110 @@ for (const links of MODES) {
           assert.equal(disk.existsSync(to), false);
         } finally {
           fs.chmodSync(inner, 0o755);
+          close();
+        }
+      },
+    );
+
+    // A recursive removal, or a rename of a directory, takes a whole tree:
+    // past a link out of the place that tree is another's, and one moved
+    // out takes its own links along. Each goes only where the place's
+    // directory really is — the link named with a trailing separator too,
+    // which POSIX lstat follows and node:fs rm then walks. `ju`, made after
+    // initialize(), is a link neither mode knows; a worker's kernel answers
+    // the same.
+    it('no tree goes or moves through a link out of the place', async () => {
+      const { k, at, outside, link, close } = await opened(links, { setup });
+      const ju = at('d', 'ju');
+      link(outside, ju);
+      fsPatch.install(k);
+      const w = worker(k);
+      try {
+        const sub = path.join(ju, 'sub');
+        for (const [call, syscall, run] of TREE_REMOVALS) {
+          for (const p of [sub, `${ju}/`, `${ju}${path.sep}`]) {
+            await assert.rejects(
+              async () => run(p),
+              refused('ENOTSUP', syscall, p),
+              `${call} ${p}`,
+            );
+          }
+        }
+        const moved = at('d', 'moved');
+        await refusesAll(
+          RENAMES,
+          [sub, moved],
+          refused('ENOTSUP', 'rename', sub, moved),
+        );
+        const tree = at('d', 'sub');
+        const out = path.join(ju, 'out');
+        await refusesAll(
+          RENAMES,
+          [tree, out],
+          refused('ENOTSUP', 'rename', tree, out),
+        );
+        assert.equal(w.kernel.touchesLink(sub, true), true);
+        assert.equal(w.kernel.movesLink(tree, out), LINKED);
+        assert.equal(disk.readFileSync(path.join(sub, 'x.bin'), 'utf8'), 'x');
+        assert.equal(disk.readFileSync(path.join(tree, 's.bin'), 'utf8'), 's');
+        assert.equal(disk.existsSync(moved), false);
+        assert.equal(disk.existsSync(path.join(outside, 'out')), false);
+      } finally {
+        w.kernel.close();
+        close();
+      }
+    });
+
+    // Only a tree is held to the place's directory. A file through a link
+    // out of it is removed or moved as a path there would be, a missing
+    // path removes nothing, and a tree through a link that stays in the
+    // place is the place's own.
+    it('a file or a missing path through a link, and a tree through a link in the place, go on', async () => {
+      const { k, at, outside, link, close } = await opened(links, { setup });
+      const ju = at('d', 'ju');
+      link(outside, ju);
+      writeTree(at('d', 'sub', 'deep'), { 'y.bin': 'y' });
+      const inside = at('d', 'in');
+      link(at('d', 'sub'), inside);
+      fsPatch.install(k);
+      try {
+        fs.rmSync(path.join(ju, 'missing'), { recursive: true, force: true });
+        const o = path.join(ju, 'o.bin');
+        fs.renameSync(o, at('d', 'o.bin'));
+        fs.renameSync(at('d', 'o.bin'), o);
+        fs.rmSync(o, { recursive: true });
+        assert.equal(disk.existsSync(path.join(outside, 'o.bin')), false);
+        fs.renameSync(path.join(inside, 'deep'), path.join(inside, 'deep2'));
+        fs.rmSync(path.join(inside, 'deep2'), { recursive: true });
+        assert.deepEqual(disk.readdirSync(at('d', 'sub')), ['s.bin']);
+      } finally {
+        close();
+      }
+    });
+
+    // POSIX resolves `..` after a link from where the link leads: the tree
+    // `ju/../victim` names is outside's. Windows node:fs folds `..` first.
+    it(
+      'POSIX: a tree named past `..` after a link is where the OS finds it',
+      { skip: process.platform === 'win32' ? 'Windows folds `..`' : false },
+      async () => {
+        const { k, at, outside, link, close } = await opened(links, { setup });
+        const ju = at('d', 'ju');
+        link(path.join(outside, 'sub'), ju);
+        writeTree(path.join(outside, 'victim'), { 'v.bin': 'v' });
+        fsPatch.install(k);
+        try {
+          const p = `${ju}/../victim`;
+          for (const [call, syscall, run] of TREE_REMOVALS) {
+            await assert.rejects(
+              async () => run(p),
+              refused('ENOTSUP', syscall, p),
+              call,
+            );
+          }
+          const v = path.join(outside, 'victim', 'v.bin');
+          assert.equal(disk.readFileSync(v, 'utf8'), 'v');
+        } finally {
           close();
         }
       },
