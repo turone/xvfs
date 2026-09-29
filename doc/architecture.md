@@ -895,14 +895,19 @@ the OS's own reading of it (`C:d\jro\…`, `\Users\…\jro\…`). Nothing in the
 process changes a link on a place's disk (next), so there is nothing to
 forget but what another process removed — which only refuses more.
 
-**Under strict the patch makes, removes and moves no link on a place's
-disk, in either mode: `symlink` and a hard `link` there, a `cp` of a link
-into it without `dereference`, an `unlink`, `rmdir`, `rm` or `rename` of a
-link there or a `rename` onto one (its `lstat`: `kernel.touchesLink`,
+**Under strict xvfs makes, removes and moves no link it can see on a
+place's disk, in either mode — through the patch, and through the
+`PlaceFs` facade of a writable disk-origin place (the kernel hands it the
+same checks): `symlink` and a hard `link` there, a `cp` of a link into it
+without `dereference`, an `unlink`, `rmdir`, `rm` or `rename` of a link
+there or a `rename` onto one (its `lstat`: `kernel.touchesLink`,
 `movesLink`), a `rename` into a place of a tree from outside `appRoot` that
-holds a link (a walk of it), and — with `'deny'` — a `rename` or a
-recursive `rm` of a directory under which the index knows a link, are
-`ENOTSUP` before any native call (`kernel.makesLink`, fs-patch).** _Why:_
+holds a link (a walk of it; a tree it cannot read is refused too), and —
+with `'deny'` — a `rename` or a recursive `rm` of a directory under which
+the index knows a link, are `ENOTSUP` before any native call
+(`kernel.makesLink`, fs-patch). What it sees is a link's `lstat` and the
+index: a link swapped in between the check and the call is not seen.**
+_Why:_
 no confirmed consumer makes links in managed territory through the patch —
 installs, release switches and log links run in their own process or
 outside `appRoot` — while keeping an index true under the process's own
@@ -1608,7 +1613,7 @@ workers call `attach()`.** _Why:_ preloads do not run in worker threads.
 | Forgetting a known link (a check that finds it gone, a watcher event)                                           | only another process removes one: forgetting only lets more pass  |
 | The index asked about a Windows path as given                                                                   | `C:d\…`, `\Users\…`: node:fs resolves them, the keys did not      |
 | An index kept by the main kernel alone                                                                          | a worker's kernel never initializes: it would know no link        |
-| Walking every renamed or removed directory for links                                                            | a rename's cost would grow with its tree; the index knows them    |
+| Walking every directory renamed or removed within a place for links (a tree moved in from outside is walked)    | a rename's cost would grow with its tree; the index knows them    |
 | `node:fs`'s recursive `readdir` or `cp` over a place's disk under strict                                        | they enter junctions, `readdir` even with `withFileTypes`         |
 | A new link within one place under strict                                                                        | the place decides which of its names alias, not code under strict |
 | Routing a symbolic link's target from the cwd                                                                   | the OS resolves it from the link's directory                      |
@@ -1763,7 +1768,8 @@ workers call `attach()`.** _Why:_ preloads do not run in worker threads.
 - The index of links only grows until the kernel restarts; a place's own
   directory is never in it.
 - Under strict the patch makes no link, symbolic or hard, to managed
-  territory, and makes, removes and moves none on a place's disk.
+  territory, and — with the facade — makes, removes and moves none it can
+  see on a place's disk.
 
 ## Protocol
 

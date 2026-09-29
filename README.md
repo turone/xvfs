@@ -668,9 +668,10 @@ directory on disk (origin `'disk'`, provider `'disk'` or `'node-default'`),
 over `defaults.links`. It is a config error without strict and on a place
 with no directory; there is no mode that lets links through.
 
-**The patch changes no link there.** Under strict, in either mode, a call
-that would make, remove or move a link on a place's disk is `ENOTSUP`
-before any native call, and the disk is as it was:
+**xvfs changes no link it can see there.** Under strict, in either mode, a
+call of the patched `node:fs` — or of the `PlaceFs` facade of a writable
+disk-origin place — that would make, remove or move a link on a place's
+disk is `ENOTSUP` before any native call:
 
 - `symlink` or a hard `link` whose new path lies there — a place's own
   path included — and a `cp` of a link into it without `dereference`;
@@ -682,10 +683,17 @@ before any native call, and the disk is as it was:
 - with `'deny'`, a `rename` or a recursive `rm` of a directory under which
   the index knows a link.
 
-The links on a place's disk are the deployment's, made, replaced and
-removed by whoever owns the environment — outside the process, or with
-strict off. `lstat`, `readlink` and the `l*` forms still look at a link
-itself. Without strict all of this is native.
+What it can see is a link's `lstat` and, with `'deny'`, the index: a link
+another process swaps in between the check and the call is not seen, and
+with `'verify'`, which keeps no index, a directory holding a link is
+renamed or removed like any other — every call through the link is
+proven. A tree moved in from outside `appRoot` that cannot be read to tell
+is `ENOTSUP` too. The links on a place's disk are the deployment's, made,
+replaced and removed by whoever owns the environment — a package manager
+or a release switch that makes links in a `node-default` or `disk` place
+runs in its own process, or with strict off. `lstat`, `readlink` and the
+`l*` forms still look at a link itself. Without strict all of this is
+native.
 
 **`'deny'` (the default) refuses the links the kernel knows.**
 
@@ -708,7 +716,9 @@ itself. Without strict all of this is native.
   more).
 - An ordinary path costs a few lookups in memory — no disk call, no
   `realpath` — and so does a path refused through a known link. A rename or
-  a removal on a place's disk costs one `lstat` (the rule above).
+  a removal on a place's disk costs one `lstat` (the rule above). The index
+  holds every link it has seen since the kernel started
+  (`diagnostics().strict.known`).
 - Every thread refuses the same links. A worker (`link()`, `attach()`)
   receives the index with its snapshot, and each link the main thread's
   watcher finds afterwards as a `vfs-links` message — one way, with the

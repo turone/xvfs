@@ -460,7 +460,7 @@ for (const links of MODES) {
           );
           const onto = at('d', 'f.bin');
           await refusesAll(
-            RENAMES.slice(0, 1),
+            RENAMES,
             [onto, p],
             refused('ENOTSUP', 'rename', onto, p),
           );
@@ -471,6 +471,10 @@ for (const links of MODES) {
         }
         assert.equal(disk.existsSync(at('d', 'moved')), false);
         assert.equal(disk.readFileSync(at('d', 'f.bin'), 'utf8'), 'f');
+        // A copy of a link there, to another name there, would make one.
+        const copy = at('d', 'copy');
+        await refusesAll(CPS, [ju, copy], refused('ENOTSUP', 'cp', ju, copy));
+        assert.equal(disk.existsSync(copy), false);
       } finally {
         close();
       }
@@ -494,6 +498,10 @@ for (const links of MODES) {
           await assert.rejects(
             async () => fs.rmSync(tree, { recursive: true }),
             refused('ENOTSUP', 'rm', tree),
+          );
+          await assert.rejects(
+            async () => fs.rmdirSync(tree, { recursive: true }),
+            refused('ENOTSUP', 'rmdir', tree),
           );
           assert.ok(isLink(at('d', 'tree', 'jt')));
           return;
@@ -528,12 +536,66 @@ for (const links of MODES) {
           );
         }
         assert.ok(isLink(path.join(box, 'deep-link')));
+        // A path through a file names no tree: the rename fails natively.
+        const through = path.join(outside, 'o.bin', 'x');
+        assert.throws(
+          () => fs.renameSync(through, at('d', 'x')),
+          (err) => ['ENOENT', 'ENOTDIR'].includes(err.code),
+        );
         fs.renameSync(plain, at('site'));
         assert.equal(fs.readFileSync(at('site', 'p.bin'), 'utf8'), 'p');
       } finally {
         close();
       }
     });
+  });
+}
+
+// The PlaceFs facade of a writable disk-origin place writes to its disk
+// past the patch, under the same rule: a link there is neither removed nor
+// moved. `jk` is a link the index knows ('deny'), `ju` one no watcher
+// reported.
+for (const links of MODES) {
+  it(`strict, links: ${links}: the facade removes and moves no link on its disk`, async () => {
+    const base = tmpDir('links-facade');
+    const root = writeTree(path.join(base, 'app'), { 'wd/f.bin': 'f' });
+    const outside = writeTree(path.join(base, 'outside'), { 'o.bin': 'o' });
+    const jk = path.join(root, 'wd', 'jk');
+    linkDir(outside, jk);
+    const places = { wd: { fs: { writable: true } } };
+    const defaults = { strict: true, links, watchTimeout: 60000 };
+    const k = await kernel(root, places, defaults);
+    const ju = path.join(root, 'wd', 'ju');
+    linkDir(outside, ju);
+    try {
+      const wd = k.fs('wd');
+      const f = path.join(root, 'wd', 'f.bin');
+      const x = path.join(root, 'wd', 'x');
+      for (const [name, p] of [
+        ['/jk', jk],
+        ['/ju', ju],
+      ]) {
+        assert.throws(() => wd.unlink(name), refused('ENOTSUP', 'unlink', p));
+        assert.throws(() => wd.rm(name), refused('ENOTSUP', 'rm', p));
+        assert.throws(
+          () => wd.rename(name, '/x'),
+          refused('ENOTSUP', 'rename', p, x),
+        );
+        assert.throws(
+          () => wd.rename('/f.bin', name),
+          refused('ENOTSUP', 'rename', f, p),
+        );
+        assert.ok(isLink(p));
+      }
+      wd.rename('/f.bin', '/g.bin');
+      wd.unlink('/g.bin');
+      assert.equal(disk.existsSync(f), false);
+    } finally {
+      k.close();
+      unlinkDir(ju);
+      unlinkDir(jk);
+      rm(base);
+    }
   });
 }
 
