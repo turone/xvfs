@@ -3,7 +3,8 @@
 xvfs puts the files a Node.js process reads, runs and generates into
 **places** over the real paths the application already uses, and
 publishes their content through one pipeline — prepared once, compiled
-and compressed once, committed atomically with a version. Where a place
+and compressed once, committed atomically, with a version where it is
+shared. Where a place
 keeps its bytes is its own choice: **one copy for every `worker_threads`
 thread** in `SharedArrayBuffer` (`sab`), each thread's own memory (`map`),
 a single executable's assets (`sea`), or the disk under the place's policy
@@ -436,10 +437,12 @@ libraries an agent or a plugin may call as a read-only `sab` place with
 `require.compile` — one copy, shared bytecode; its workspace as a
 `map + virtual` place in its worker; the code it generates loaded from
 there with `require()`; a tenant's state in a place of its own; and
-`strict: true`, so the rest of `appRoot` is `EACCES`, the tools cannot be
-written through `node:fs`, and `links: 'deny'` keeps a link in a writable
-place from leading elsewhere (`'verify'` where other processes write into
-it).
+`strict: true`, so the rest of `appRoot` is `EACCES` and the tools cannot
+be written through `node:fs`. Where an agent's output goes to disk — a
+writable `disk` place — `links` refuses a path through a link there that
+the kernel knows (`'deny'`: made through the patch, found at start or
+reported by the watcher) or, with `'verify'`, one into managed territory
+whoever made it — for a directory other processes write into.
 
 ```js
 defaults: { strict: true },
@@ -451,6 +454,7 @@ places: {
     fs: { writable: true },
     require: true,
   },
+  output: { provider: 'disk', fs: { writable: true } }, // links: 'deny'
 }
 ```
 

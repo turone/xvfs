@@ -25,11 +25,11 @@ application's real paths, each with a storage model — memory every
 `worker_threads` thread shares (`sab`), each thread's own memory (`map`),
 the assets of a single executable (`sea`), or the disk under the place's
 policy (`disk`, `node-default`) — and a content origin — the disk,
-scanned and watched, or what the application writes (`virtual`). All
-content goes through one publication pipeline — prepared once, compiled
-and compressed once, committed atomically with a version — and one set of
-routing rules, through the patched `node:fs`, the module hooks and
-`PlaceFs` alike.
+scanned and watched, or what the application writes (`virtual`). The
+content the places hold goes through one publication pipeline — prepared
+once, compiled and compressed once, committed atomically, with a version
+where it is shared — and every place through one set of routing rules,
+through the patched `node:fs`, the module hooks and `PlaceFs` alike.
 
 Shared memory is where most of the machinery lies: Node.js servers that
 run several `worker_threads` over the same files — static assets,

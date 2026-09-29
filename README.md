@@ -15,8 +15,9 @@ single executable, in the shared pool; `disk` and `node-default` — the
 file system itself, under the place's policy. Its **origin** says where
 the content comes from: `disk` — a scan, then a watcher — or `virtual` —
 what the application writes, from code generated at run time to data
-fetched at start, with no file on disk. Every place goes through the same
-publication pipeline, the same hooks and the same routing.
+fetched at start, with no file on disk. Every place is routed by the same
+rules and served through the same hooks, and the places that hold their
+content — `sab`, `map`, `sea` — publish it through the same pipeline.
 
 With `sab`, files are loaded once on the main thread into pooled SAB
 segments. Workers get zero-copy `Buffer` views over the same memory — no
@@ -30,7 +31,8 @@ sessions or tenants (`map` + `virtual`); code generated and compiled at
 run time, loaded with `require()` and never written to disk; applications
 packaged as a single executable; and a declared, reviewable map of what
 an application may touch under `appRoot` — which places, which of them
-writable, through which links. Strict routing is a policy for code that
+writable, what a link on their disks may do. Strict routing is a policy
+for code that
 goes through the patched `node:fs` and the module hooks, not an OS
 sandbox or a security boundary ([Strict routing](#strict-routing)).
 [doc/alternatives.md](doc/alternatives.md) walks through the production
