@@ -7,13 +7,22 @@ const path = require('node:path');
 const { createHook } = require('node:async_hooks');
 const { VfsConfig } = require('../lib/config.js');
 const { VfsKernel } = require('../lib/kernel.js');
+const disk = require('../lib/disk.js');
 
 // Shared test helpers: temp trees, quiet kernels, small configs.
 
 const quiet = { log() {}, warn() {}, error() {}, debug() {} };
 
+// A fresh temporary directory, named by its real path. The system's may be
+// spelled otherwise — through 8.3 names on a Windows CI runner
+// (C:\Users\RUNNER~1\…), through a link on macOS (/var) — and every path
+// below such a spelling is an alias of its real one: strict routing refuses
+// it, realpath.native answers the other spelling, and some Node releases
+// abort a watch of it (lib/watcher.js).
 const tmpDir = (prefix = 'vfs') =>
-  fs.mkdtempSync(path.join(os.tmpdir(), `${prefix}-`));
+  disk.realpathSync.native(
+    fs.mkdtempSync(path.join(os.tmpdir(), `${prefix}-`)),
+  );
 
 // writeTree(root, { 'public/index.html': '<h1>', 'lib/a.js': '...' })
 const writeTree = (root, files) => {
