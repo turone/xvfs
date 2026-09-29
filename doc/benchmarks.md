@@ -455,7 +455,7 @@ Windows (the machine above):
 | ------------------------------------- | -----: | ------: | -----: | ------: |
 | `router.strict.mutate.disk`           |    174 |  65 941 |    255 |  71 154 |
 | `router.strict.read.linked`           |    208 |  37 796 |    649 |  37 725 |
-| `router.strict.read.through`          |   259¹ |  45 152 | 13 935 |  44 611 |
+| `router.strict.read.through`          |   259¹ |  45 152 |   852² |  44 611 |
 | `patch.strict.disk.readFileSync`      | 18 527 |  57 936 | 18 796 |  57 873 |
 | `patch.strict.disk.statSync`          | 12 837 |  50 872 | 12 961 |  50 658 |
 | `patch.strict.disk.readdirSync`       | 31 953 |  68 297 | 32 107 |  68 403 |
@@ -469,12 +469,14 @@ Linux (the same machine, WSL2, Node.js 24.20.0; wider spreads):
 | --------------------------------- | -----: | -----: | ----: | -----: |
 | `router.strict.mutate.disk`       |     82 | 11 049 |   107 | 12 658 |
 | `router.strict.read.linked`       |     98 |  1 456 |   300 |  1 393 |
-| `router.strict.read.through`      |   114¹ |  2 436 | 1 244 |  2 455 |
+| `router.strict.read.through`      |   114¹ |  2 436 |  567² |  2 455 |
 | `patch.strict.disk.readFileSync`  |  2 579 |  3 874 | 2 303 |  3 503 |
 | `patch.strict.disk.statSync`      |    989 |  2 207 |   913 |  2 123 |
 | `patch.strict.territory.statSync` |  1 117 |  2 499 | 1 093 |  2 418 |
 
 ¹ Not refused before the proof: the call went through the link.
+² At `3d2db67` (next section), where a refusal asks no `lstat`; 13 935 on
+Windows and 1 244 on Linux at `c9790c9`.
 
 With `'deny'` a native call on a place's disk costs what it did before the
 proof — within 0–2 % of `de1383f` for reads, stats and listings on
@@ -485,14 +487,39 @@ between the pairs to count). The route alone is 255 ns where the place's
 directory holds no known link (one lookup; 174 ns before the proof, ~20 ns
 of the difference being the strict spelling checks of that work), ~650 ns
 where it holds some (the path's names below `appRoot` looked up), and a
-path through a known link is refused at the cost of one `lstat` (~14 µs
-on Windows, ~1.2 µs on Linux). The listing of the disk territory is 23 %
+path through a known link is refused on the same lookups (~0.85 µs on
+Windows, ~0.57 µs on Linux). The listing of the disk territory is 23 %
 cheaper than before the proof for the facade change measured above.
 `'verify'` costs what the proof did: no row moved beyond the threshold.
 The index keeps the links it knows in memory — a `Set` of paths and a
-`Map` of the directories above them — and finds them at `initialize()`
+`Set` of the directories above them — and finds them at `initialize()`
 in the scan a disk-origin place makes anyway, or in one walk of
 `readdir` calls for a `disk` or `node-default` place.
+
+### The patch changes no link on a place's disk
+
+Since `3d2db67` the patch makes, removes and moves no link on a place's
+disk under strict, and the index of `'deny'` only grows: a refusal asks
+no `lstat`, while a removal or a rename there asks one of its path — a
+rename two, its source and its destination. A/B against `e33ed38`, four
+pairs, `--only router,patch --bench HEAD`; `w` is a writable `disk` place,
+`writeUnlink` a file written and removed, `renameBack` a file renamed and
+back (two renames). ns/op, medians; the busy machine spread the mutation
+rows widely (up to 2.4× between the runs of one side), so they show the
+order of the cost, not a figure to the percent:
+
+| metric                              | Windows before |   after | Linux before |  after |
+| ----------------------------------- | -------------: | ------: | -----------: | -----: |
+| `router.strict.read.through`        |         13 965 |     852 |        1 520 |    567 |
+| `patch.w.writeUnlink` (open)        |        141 878 | 140 927 |       15 685 | 16 066 |
+| `patch.strict.w.writeUnlink`        |        142 078 | 157 057 |       15 296 | 16 959 |
+| `patch.strict.w.renameBack`         |        190 835 | 239 123 |       15 382 | 18 192 |
+| `patch.strict.verify.w.writeUnlink` |        274 131 | 293 938 |       26 071 | 26 552 |
+
+A refused path through a known link is sixteen times cheaper on Windows.
+A strict removal on a place's disk pays one `lstat` more (~15 µs on
+Windows, ~1.7 µs on Linux), a rename two; reads, stats and listings did
+not move.
 
 ## Atomic `writeFiles`: a batch against a series
 
