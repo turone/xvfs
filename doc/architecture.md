@@ -68,12 +68,13 @@ SAB segments ──────────── one physical copy ────
 | `lib/place-fs.js`               | `PlaceFs` facade, `VfsReadStream`, view leases, disk territory of `fs.fallback: 'disk'`                                                                   |
 | `lib/registry.js`               | `PlaceRegistry` (path → place, key; `Containment` in `appRoot`) + `FsRouter` (read / mutate / copy / rename / link decisions)                             |
 | `lib/aliases.js`                | `Aliases` (strict): what the disk says, once each, about other spellings of `appRoot` — its real path, what a drive letter names                          |
+| `lib/links.js`                  | `LinkIndex` (strict, `links: 'deny'`): the links known below the places' directories; whether a path as given passes through one                          |
 | `lib/virtual-store.js`          | `VirtualStore`: the semantics of a virtual place's mutations, once — checks, their order, refusals (`checkHierarchy`, `subtreeMoves()`); `KeysInFlight`   |
 | `lib/map-store.js`              | `MapStore` (a `VirtualStore`): mutations at once on the thread's own Map; the Map sink of the pipeline, atomic publish                                    |
 | `lib/sab-store.js`              | `SabStore` (a `VirtualStore`): main-thread mutations of a `sab + virtual` place, each in its key's turn; keys in flight                                   |
 | `lib/mutation-queue.js`         | `MutationQueue`: per-(place, key) ordering, exclusive place barrier                                                                                       |
 | `lib/mutation-rpc.js`           | `OPS` for both ends; `MutationClient` + `RemoteStore`: worker → main mutations; `serveMutation()`: the main end, checking each request again              |
-| `lib/scanner.js`                | `scan()`: directory walk, then stats `IO_LIMIT` at a time → `Map<key, FileInput>` in the order of the walk                                                |
+| `lib/scanner.js`                | `scan()`: directory walk, then stats `IO_LIMIT` at a time → `Map<key, FileInput>` in the order of the walk; `linksOf()`: the links below a directory      |
 | `lib/watch-pipeline.js`         | `WatchPipeline`: watcher epochs into kernel epochs, one at a time (`SerialQueue`), their jobs `IO_LIMIT` at a time; rechecks                              |
 | `lib/watcher.js`                | `DirWatcher`: `fs.watch` over each place tree (recursive where native, else one per directory) → debounced epochs; `watchPath()`                          |
 | `lib/disk.js`                   | the disk past the patch: `node:fs` captured at load; the native section (`native()`, `inNative()`) for calls that re-enter it; own `fs` for streams       |
@@ -838,9 +839,60 @@ reason the local path behind a share of this machine (`C:\…` behind an
 **Under strict a native route on a place's disk — the disk territory of
 `fs.fallback: 'disk'`, a `disk` or `node-default` place, a disk-backed
 entry, a disk-origin write, the raw source of a copy — names its place
-(`{ kind: 'passthrough', place }`), and the kernel's route API asks the
-disk where the path really lies before it hands the route on
-(`VfsKernel#proven`, `Aliases.territory`): `realpath.native` of the path as
+(`{ kind: 'passthrough', place }`), and the kernel's route API checks it
+by the place's `links` before it hands the route on (`VfsKernel#proven`).
+`links` belongs to a place with a directory on disk, over
+`defaults.links`, and is `'deny'` by default: the kernel keeps an index of
+the links below each such place's directory (`LinkIndex`, links.js) —
+found by a walk at `initialize()` that enters no link (`scanner.linksOf`),
+kept by the watcher (`noteLinks`) and by the patch (`linkMade`,
+`linkMoved`) — and a route whose path passes through a known link,
+wherever it leads, is `EACCES` (`#crosses`). `'verify'` proves each route
+(below).** _Why:_ the proof costs a `realpath` per native call — tens of
+microseconds on Windows, more than many of the calls it guards
+(doc/benchmarks.md) — against what only a link can do; the index answers
+an ordinary path with a few lookups in memory and no disk call. What the
+index cannot see is a link made past the patch before the watcher reports
+it — by another process, in a place no watcher runs for: that is the
+environment owner's part, documented as outside the guarantee, and
+`'verify'` stays for a directory others write into. Without a `realpath`
+the index cannot tell a link that stays in the place from one that leaves
+it, so it refuses every known link. The name follows `fs.fallback:
+'deny'`. There is no `'allow'`: no scenario needs a link followed unchecked
+under strict, and without strict nothing is asked.
+
+**The index is asked about the path as given, name by name, each name
+before a `..` after it applies (`LinkIndex.crosses`); a call that does not
+follow its last name — `lstat`, `readlink`, the `l*` forms, `unlink`,
+`rm`, `rename`, the path a `symlink` makes — leaves that name out
+(`own`), but not with a trailing separator, `.` or `..` after it. A known
+link found gone is dropped the next time a path through it is asked (one
+`lstat`); a directory with no known link below ends the check.** _Why:_
+POSIX resolves `link/..` through the link, and the platforms resolve a
+last name's `.`, `..` and trailing separator differently, so they follow
+it. A forgotten link fails open, a stale one only costs one `lstat` on a
+path that would be refused: so nothing is forgotten ahead of the disk, and
+the patch adds a link before its native call, not after.
+
+**Every thread keeps its own index: a worker's comes in its snapshot, and
+a link one thread makes or moves through the patch reaches the others as
+`vfs-links`, through the main kernel. Before the native call the thread
+that makes one raises a counter in shared memory (`#linksMade`); a thread
+whose own count of what its index holds (`#linksSeen`) differs asks the
+disk (`lstat`) for each name of a path below the place's directory until
+the message comes, and a rename there — or from outside a `'deny'` place
+into one — reads the links below its source from disk
+(`linksBelowSync`).** _Why:_ a worker's kernel never runs `initialize()`,
+so it knew no link; and a message alone left a window in which a link one
+thread had made — its call returned — passed in another. A guarantee of
+the patch holds in every thread of the process from the moment the call
+starts. The counter costs one `Atomics.load` per asked route; the disk is
+asked only inside the window. What is forgotten is not sent: each thread
+drops what it finds gone.
+
+**With `links: 'verify'` the kernel's route API asks the disk where the
+path really lies before it hands the route on (`VfsKernel#proven`,
+`Aliases.territory`): `realpath.native` of the path as
 the OS opens it — not `path.resolve`'s, whose `..` is folded before a
 symbolic link is resolved (`Aliases#absolute` keeps it, so the disk
 resolves `..` from the real directory, as the POSIX kernel does; Windows
@@ -881,8 +933,9 @@ a call that follows the link. A call that does not follow the last
 component could be proven by its parent's real path plus the leaf name, so
 that such a link can be seen and removed through the patch; the leaf's
 `.`, `..` and trailing-separator forms, which the platforms resolve
-differently, would each need to fall back to the full proof, so the
-boundary stays fail-closed for now (TASKS.md). A native call on a place's
+differently, would each need to fall back to the full proof, so with
+`'verify'` the boundary stays fail-closed for now (TASKS.md); `'deny'`
+knows a link by its name and lets them through. A native call on a place's
 disk pays one `realpath` for a file, two for a directory listing or a path
 being created, three for a single `cp` or a `require` of a disk-place
 module, and one per directory `glob` walks; a recursive `readdir` pays one
@@ -1512,6 +1565,12 @@ workers call `attach()`.** _Why:_ preloads do not run in worker threads.
 | Refusing every link out of a place's directory under strict                                                     | one elsewhere reaches nothing new; shared directories of releases |
 | A proof kept per directory of a place's disk                                                                    | a directory swapped for a link after it passes unseen             |
 | The proof in FsRouter, or `realpath` for every native call under strict                                         | the router stays lexical; all other I/O would pay for it          |
+| A `realpath` proof on every place's disk, always (the only mode)                                                | tens of µs a call on Windows against what only a link can do      |
+| `links: 'allow'`                                                                                                | no scenario needs a link followed unchecked under strict          |
+| Forgetting a link when the patch unlinks or renames it                                                          | a call that fails leaves a live link unknown                      |
+| An index kept by the main kernel alone                                                                          | a worker's kernel never initializes: it would know no link        |
+| `vfs-links` messages alone between threads                                                                      | a link made in one thread passed in another until its message     |
+| Walking every renamed directory for its links                                                                   | a rename's cost would grow with its tree; the index knows them    |
 | `node:fs`'s recursive `readdir` or `cp` over a place's disk under strict                                        | they enter junctions, `readdir` even with `withFileTypes`         |
 | A new link within one place under strict                                                                        | the place decides which of its names alias, not code under strict |
 | Routing a symbolic link's target from the cwd                                                                   | the OS resolves it from the link's directory                      |
@@ -1658,9 +1717,14 @@ workers call `attach()`.** _Why:_ preloads do not run in worker threads.
   real spelling, or on a drive that names a share or `appRoot`'s line,
   reaches neither `node:fs` nor Node's loader.
 - Under strict no native call on a place's disk — through the patch, the
-  facade or the load hook — runs before the disk has said its path really
-  lies in the place's directory or off `appRoot`'s line; a recursive
+  facade or the load hook — runs through a link the kernel knows
+  (`links: 'deny'`; in every thread, from the moment the patched call that
+  made it starts), or before the disk has said its path really lies in the
+  place's directory or off `appRoot`'s line (`'verify'`); a recursive
   listing there enters no link, and no native recursive copy walks it.
+- The index of links forgets nothing ahead of the disk: a link leaves it
+  only once a path through it finds it gone, or an event of the watcher
+  names its path gone.
 - Under strict the patch makes no link, symbolic or hard, to managed
   territory.
 
@@ -1668,7 +1732,7 @@ workers call `attach()`.** _Why:_ preloads do not run in worker threads.
 
 ```
 snapshot    { segments: [{ id, sab }], places: { <name>: { entries: [[key, entry]] } },
-              version, instance }
+              version, instance, links?: { known: [path], made: Int32Array, seen } }
 vfs-update  { name, updateId, version, places: { <name>: { entries, removals,
               retired: [[key, retireId]] } }, newSegments: [{ id, sab }] }   main → worker
 vfs-ack     { name: 'vfs-ack', updateId, retained?: [retireId] }              worker → main
@@ -1677,6 +1741,7 @@ vfs-mutate  { name, id, place, op, key, to?, options?, data? }                wo
             writeFiles: { name, id, place, op, keys, sizes, options, data }
 vfs-mutated { name, id, error?: { code, message, syscall, path, dest },
               version? }                                                      main → worker
+vfs-links   { name: 'vfs-links', add: [path], made: 0 | 1 }                   both ways
 entry       shared { kind, segmentId, offset, length, stat, version, scriptOptions?, meta? }
             | disk { kind, path, stat, version, scriptOptions?, meta? }
 stat        { size, mtimeMs } (+ sourceSize, encoding for compressed companions)

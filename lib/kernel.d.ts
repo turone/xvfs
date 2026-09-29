@@ -9,6 +9,7 @@ import type { PoolUsage, ProjectedFile, VfsSnapshot } from './cache.js';
 import type {
   DeepReadonly,
   Encoding,
+  Links,
   VfsConfig,
   VfsRawConfig,
 } from './config.js';
@@ -147,6 +148,15 @@ export interface VfsDiagnostics {
     readonly failures: number;
     readonly places: { readonly [place: string]: number };
   };
+  /**
+   * Strict routing, null without: each place's `links`, for a place with a
+   * directory on disk; how many links the index holds — some possibly gone,
+   * dropped the first time a path through one is checked.
+   */
+  readonly strict: {
+    readonly links: { readonly [place: string]: Links };
+    readonly known: number;
+  } | null;
   readonly queues: {
     /** Watcher epochs queued or running; rechecks waiting. */
     readonly watch: { readonly epochs: number; readonly rechecks: number };
@@ -278,8 +288,12 @@ export class VfsKernel extends EventEmitter<VfsKernelEvents> {
   watch(): void;
   // --- Adapter API (lib/adapters/*): raw routing decisions and borrowed
   // views, without the ownership and ext policies PlaceFs applies.
-  routeRead(filePath: string): ReadRoute;
-  routeMutation(filePath: string): MutationRoute;
+  /**
+   * `own`: the operation does not follow the path's last name (`lstat`,
+   * `readlink`, `unlink`, …), which `links: 'deny'` then lets be a link.
+   */
+  routeRead(filePath: string, own?: boolean): ReadRoute;
+  routeMutation(filePath: string, own?: boolean): MutationRoute;
   /**
    * `loading`: the load hook asks about the file Node's loader is to read;
    * under strict a module of a `disk` or `node-default` place that really

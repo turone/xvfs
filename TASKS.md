@@ -100,13 +100,15 @@ opt-in that proves every native path outside `appRoot` as a place's disk
 is proven today (its real path off `appRoot`'s real line), at one
 `realpath` per call — or the boundary stays as documented.
 
-## P3 — Strict lets a link into managed territory be seen and removed
+## P3 — `links: 'verify'` lets a link into managed territory be seen and removed
 
-**Problem.** Under strict the ops that act on a link and not its target —
-`lstat`, `readlink`, `unlink`, `rmdir`, `rm` — on a link inside a disk
-place that leads into managed territory (`d/jro` → `ro`, another place,
-`appRoot`, above it) are `EACCES`, though `node:fs` would touch nothing
-the link hides: the link cannot be inspected or removed through the patch.
+**Problem.** Under strict with `links: 'verify'` the ops that act on a
+link and not its target — `lstat`, `readlink`, `unlink`, `rmdir`, `rm` —
+on a link inside a disk place that leads into managed territory (`d/jro` →
+`ro`, another place, `appRoot`, above it) are `EACCES`, though `node:fs`
+would touch nothing the link hides: the link cannot be inspected or
+removed through the patch. `links: 'deny'` (the default) knows a link by
+its name and lets these ops through.
 
 **Cause.** The proof (`Aliases.territory`) resolves the whole path, which
 lands in managed territory, so it cannot tell a call that follows the link

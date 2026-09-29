@@ -9,9 +9,11 @@ const { tmpDir, writeTree, cleanup, kernel, memory } = require('../lib.js');
 // over a VFS place, over paths outside the places (outside appRoot) and
 // over the disk territory of `fs.fallback: 'disk'` — the cost of routing.
 // `native` is the same call on the outside paths before the patch.
-// `strict.*` is the same under strict, and over a `disk` place: every
-// native call on a place's disk proves where its path really lies first
-// (one realpath).
+// `strict.*` is the same under strict, and over a `disk` place: with
+// `links: 'deny'`, the default, a native call on a place's disk is checked
+// against the links the kernel knows; `strict.verify.*` proves where its
+// path really lies first (one realpath) — strict as it was where the
+// library does not know `links` (a base of bench/ab.js before it).
 
 const OPS = {
   readFileSync: (p) => fs.readFileSync(p.file),
@@ -46,6 +48,16 @@ const measure = (b, prefix, k, targets) => {
   }
 };
 
+// A strict kernel with `links: 'verify'`, or strict as it was.
+const verifying = async (root) => {
+  try {
+    return await kernel(root, PLACES, { strict: true, links: 'verify' });
+  } catch (err) {
+    if (!/links/.test(err.message)) throw err;
+    return kernel(root, PLACES, { strict: true });
+  }
+};
+
 module.exports = async (b) => {
   const one = Buffer.alloc(1024, 99);
   const root = writeTree(tmpDir('patch'), {
@@ -62,6 +74,7 @@ module.exports = async (b) => {
   });
   const k = await kernel(root, PLACES);
   const strict = await kernel(root, PLACES, { strict: true });
+  const verify = await verifying(root);
   const at = (place) => ({
     file: path.join(root, place, place === 'vfs' ? 'a.txt' : 'a.bin'),
     dir: path.join(root, place, 'dir'),
@@ -80,10 +93,13 @@ module.exports = async (b) => {
     }
     measure(b, 'patch', k, targets);
     measure(b, 'patch.strict', strict, { ...targets, disk: at('d') });
+    const { territory } = targets;
+    measure(b, 'patch.strict.verify', verify, { territory, disk: at('d') });
     memory(b, 'patch', k);
   } finally {
     k.close();
     strict.close();
+    verify.close();
     cleanup(root);
     cleanup(outside);
   }

@@ -4,7 +4,7 @@ const { describe, it, before, after } = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
-const { scan, keyOf } = require('../lib/scanner.js');
+const { scan, keyOf, linksOf } = require('../lib/scanner.js');
 const { tmpDir, writeTree, rm } = require('./helpers.js');
 
 describe('scanner', () => {
@@ -162,5 +162,33 @@ describe('scanner', () => {
     const loose = await scan(root, { followSymlinks: true });
     assert.ok(loose.has('/link.html'));
     assert.ok(![...loose.keys()].some((k) => k.startsWith('/linkdir')));
+  });
+
+  // Every link the walk meets, for the kernel's index of links: scan()
+  // with `links`, and linksOf(), a walk that reads no stats. Junctions
+  // take no privilege on Windows; each would loop, if entered.
+  it('links: every link the walk meets, entering none', async () => {
+    const base = writeTree(tmpDir('scan-links'), {
+      'a/b/f.txt': 'f',
+      'x.txt': 'x',
+    });
+    const j1 = path.join(base, 'a', 'j1');
+    const j2 = path.join(base, 'a', 'b', 'j2');
+    fs.symlinkSync(path.join(base, 'a'), j1, 'junction');
+    fs.symlinkSync(base, j2, 'junction');
+    try {
+      const links = [];
+      const files = await scan(base, { links });
+      assert.deepEqual([...files.keys()].sort(), ['/a/b/f.txt', '/x.txt']);
+      assert.deepEqual(links.sort(), [j1, j2].sort());
+      assert.deepEqual((await linksOf(base)).sort(), [j1, j2].sort());
+      const below = path.join(base, 'a', 'b');
+      assert.deepEqual(await linksOf(base, { startPath: below }), [j2]);
+      assert.deepEqual(await linksOf(path.join(base, 'none')), []);
+    } finally {
+      fs.unlinkSync(j1);
+      fs.unlinkSync(j2);
+      rm(base);
+    }
   });
 });

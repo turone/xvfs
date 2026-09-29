@@ -511,6 +511,116 @@ describe('VfsConfig: compress', () => {
   });
 });
 
+// `links` — how strict routing proves a native call on a place's disk:
+// 'deny' (the index of known links, the default) or 'verify' (the real
+// path of each call); per place over `defaults.links`, for a place with a
+// directory on disk, under strict only.
+describe('VfsConfig: links', () => {
+  const DISKFUL = {
+    s: { fs: { ext: ['txt'], fallback: 'disk' } },
+    m: { provider: 'map', fs: true },
+    d: { provider: 'disk', fs: true },
+    n: { provider: 'node-default', fs: true },
+  };
+  const DISKLESS = {
+    v: { origin: 'virtual', fs: { writable: true } },
+    mv: { provider: 'map', origin: 'virtual', fs: { writable: true } },
+    e: { provider: 'sea', fs: true },
+  };
+  const linksOf = (c) =>
+    Object.fromEntries(c.allPlaces.map((p) => [p.name, p.links]));
+
+  it("strict: 'deny' by default on every place with a directory on disk", () => {
+    const c = make({ ...DISKFUL, ...DISKLESS }, { strict: true });
+    assert.equal(c.global.links, 'deny');
+    assert.deepEqual(linksOf(c), {
+      s: 'deny',
+      m: 'deny',
+      d: 'deny',
+      n: 'deny',
+      v: null,
+      mv: null,
+      e: null,
+    });
+  });
+
+  it("defaults.links and a place's own, which wins", () => {
+    const places = { ...DISKFUL, d: { ...DISKFUL.d, links: 'deny' } };
+    const c = make(places, { strict: true, links: 'verify' });
+    assert.equal(c.global.links, 'verify');
+    assert.deepEqual(linksOf(c), {
+      s: 'verify',
+      m: 'verify',
+      d: 'deny',
+      n: 'verify',
+    });
+    const one = make(
+      { ...DISKFUL, n: { ...DISKFUL.n, links: 'verify' } },
+      {
+        strict: true,
+      },
+    );
+    assert.equal(one.place('n').links, 'verify');
+    assert.equal(one.place('d').links, 'deny');
+  });
+
+  it('without strict: null, and a value is refused', () => {
+    const c = make(DISKFUL);
+    assert.equal(c.global.links, null);
+    assert.ok(c.allPlaces.every((p) => p.links === null));
+    fails(
+      { defaults: { links: 'deny' }, places: DISKFUL },
+      /defaults\.links applies under strict routing only/,
+    );
+    fails(
+      { places: { d: { ...DISKFUL.d, links: 'verify' } } },
+      /places\.d\.links applies under strict routing only/,
+    );
+  });
+
+  it("only 'deny' or 'verify'; no place without a directory on disk", () => {
+    for (const value of ['allow', 'indexed', true, 1, '']) {
+      fails(
+        { defaults: { strict: true, links: value }, places: DISKFUL },
+        /defaults\.links must be "deny" or "verify"/,
+      );
+      fails(
+        {
+          defaults: { strict: true },
+          places: { d: { ...DISKFUL.d, links: value } },
+        },
+        /places\.d\.links must be "deny" or "verify"/,
+      );
+    }
+    for (const [name, place] of Object.entries(DISKLESS)) {
+      fails(
+        {
+          defaults: { strict: true },
+          places: { [name]: { ...place, links: 'deny' } },
+        },
+        new RegExp(
+          `places\\.${name}\\.links applies to places with a directory on disk`,
+        ),
+      );
+    }
+  });
+
+  it('the CLI sets it', () => {
+    const cli = VfsConfig.fromArgv(
+      [
+        'node',
+        'app.js',
+        '--',
+        '--vfs.defaults.strict=true',
+        '--vfs.places.d.links=verify',
+      ],
+      { places: DISKFUL },
+    );
+    assert.equal(cli.place('d').links, 'verify');
+    assert.equal(cli.place('s').links, 'deny');
+  });
+});
+
 describe('VfsConfig: immutability', () => {
   it('is deeply frozen and does not mutate input', () => {
     const input = {

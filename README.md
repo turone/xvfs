@@ -530,49 +530,27 @@ the patched `node:fs` replace the operating system's isolation.
   `\\localhost\C$\…` is reachable as `C:\…` too.
 - Under strict a native call on a place's disk — the disk territory of
   `fs.fallback: 'disk'`, a `disk` or `node-default` place, a disk-backed
-  entry, a disk-origin write — first asks the disk where its path really
-  lies (`fs.realpathSync.native`; for a path to create, of its nearest
-  existing ancestor; for the place's directory, once). The path is proven
-  as the OS opens it: `..` is resolved from the real directory before it,
-  past a symbolic link, not folded lexically, so `d/link/../secret` cannot
-  slip past — and a path that leaves `appRoot` through `..` after a name
-  inside it is `EACCES` (on Windows `node:fs` folds `..` before the OS, so
-  this changes nothing there). It holds where it lands: in the place's
-  directory, or off `appRoot`'s line and on no share — and, in the disk
-  territory of `fs.fallback: 'disk'`, on no file of an extension the
-  place caches, which a link can name another way (`t.bin` → `t.txt`). A
-  link out of the place into another place, `appRoot` or a directory
-  above it is `EACCES`
-  before any native I/O — reading, writing, listing or removing through
-  it, and inspecting or removing the link itself (`lstat`, `readlink`,
-  `unlink`, `rmdir`, `rm`), which the proof cannot tell from following it
-  — and so, for the module loader, is a module it
-  leads to; a link that stays in the place, or leads elsewhere, is
-  followed. A recursive listing of such a disk names a link and never
-  enters it — `node:fs`'s own `readdir` does, on Windows even with
-  `withFileTypes` — and a recursive `cp` of or into it is `ENOTSUP`. The
-  `PlaceFs` facade serves its disk territory the same way. Each such call
-  proves its path with `realpath`, so it costs more than the string
-  routing: one for a file read, write or `stat`; two for a directory
-  listing or a path being created (its parent too); one where a recursive
-  `readdir` starts (it walks below without following links); one per
-  directory `glob` walks (it re-routes each); three for a single `cp` or a
-  `require` of a disk-place module (source, destination and what the
-  resolver reads). A link swapped in between the answer and the call is not
-  seen. A place's directory may itself be a link out of
-  `appRoot` — a media store elsewhere — and is then the place's own disk;
-  one that resolves into the territory `appRoot` manages — another place,
-  `appRoot`, a directory above it — is a configuration error under
-  strict: `initialize()` rejects (`[vfs config] places.<name>: …`) before
-  anything is read.
+  entry, a disk-origin write — passes through no link the kernel knows
+  (`links: 'deny'`, the default), or first proves where it really lands
+  (`links: 'verify'`): see [Links on a place's disk](#links-on-a-places-disk-links).
+  A recursive listing of such a disk names a link and never enters it —
+  `node:fs`'s own `readdir` does, on Windows even with `withFileTypes` —
+  and a recursive `cp` of or into it is `ENOTSUP`. The `PlaceFs` facade
+  serves its disk territory the same way. A place's directory may itself
+  be a link out of `appRoot` — a media store elsewhere — and is then the
+  place's own disk; one that resolves into the territory `appRoot`
+  manages — another place, `appRoot`, a directory above it — is a
+  configuration error under strict: `initialize()` rejects (`[vfs config]
+places.<name>: …`) before anything is read.
 - Under strict the patch makes no link to managed territory: a `symlink`
   whose target — resolved from the link's directory, as the OS resolves
   it — lies below `appRoot`, is `appRoot` or a directory above it, and a
   hard `link` to a file below `appRoot`, are `EACCES` before any native
   call (a link within one place too: its target lies below `appRoot`). A
-  target off `appRoot`'s line is linked natively. In either mode a
-  symbolic link's target is routed as a read, from the link's directory:
-  a hidden target is refused.
+  target off `appRoot`'s line is linked natively — in a place with
+  `links: 'deny'`, known from then on, so nothing passes through it. In
+  either mode a symbolic link's target is routed as a read, from the
+  link's directory: a hidden target is refused.
 - A link that already leads into `appRoot` from outside it is not
   covered: its path lies outside `appRoot`, where strict asks nothing.
   Every system has such links — Windows' own junctions,
@@ -612,6 +590,96 @@ the patched `node:fs` replace the operating system's isolation.
   at every call (`ENOTSUP`, see [Patched `node:fs`](#patched-nodefs)).
 - Same-process places are not firewalled from each other, and a linked
   worker receives the whole config and snapshot.
+
+### Links on a place's disk: `links`
+
+```js
+new VfsConfig({
+  defaults: { strict: true }, // links: 'deny' by default
+  places: {
+    media: { provider: 'disk', fs: true },
+    uploads: { provider: 'disk', fs: { writable: true }, links: 'verify' },
+  },
+});
+```
+
+Under strict a native call on a place's disk may meet a link — a symbolic
+link, a junction, any entry `node:fs` reports as a symbolic link — and
+through it land where the routing never looked: another place, `appRoot`,
+anywhere. `links` says how the kernel stands in the way: per place with a
+directory on disk (origin `'disk'`, provider `'disk'` or `'node-default'`),
+over `defaults.links`. It is a config error without strict and on a place
+with no directory; there is no mode that lets links through.
+
+**`'deny'` (the default) refuses the links the kernel knows.**
+
+- `initialize()` walks each such place's directory — `readdir` only,
+  entering no link — and indexes every link below it. The kernel's
+  watcher keeps the index where one runs (`watch: true`, a disk-origin
+  place): a link that appears, a directory moved in with links, a path
+  gone. The patched `node:fs` keeps it too: a `symlink` made in the place,
+  a `rename` that moves a link or a directory holding some, within the
+  place or into it from outside.
+- A call whose path passes through a known link — wherever it leads, the
+  place itself included — is `EACCES` before any native I/O: reading,
+  writing, listing, creating, copying or renaming through it, and, for the
+  module loader, a module behind it. `..` after a link is through it, as
+  the OS resolves it on POSIX. A call that names the link itself does not
+  follow it and proceeds: `lstat`, `readlink`, `lutimes`, `lchmod`,
+  `lchown`, `unlink`, `rm`, `rename`.
+- An ordinary path costs a few lookups in memory — no disk call, no
+  `realpath`. A known link found gone (removed, renamed, replaced by a
+  directory) is dropped the first time a path through it is checked, at
+  the cost of one `lstat`.
+- Every thread refuses the same links. A worker (`link()`, `attach()`)
+  receives the index with its snapshot; a link one thread makes or moves
+  through the patch reaches the others as a `vfs-links` message, the main
+  thread passing a worker's on. A counter in shared memory, raised before
+  the native call, tells a thread its index may lack one: until the
+  message comes, that thread asks the disk (`lstat`) for each name of a
+  path below the place's directory — so a link made through the patch is
+  refused in every thread from the moment the call that makes it starts.
+- **Not guaranteed:** a link made past the patch — by another process, a
+  child process, a native addon, a `node:fs` function captured before the
+  patch — is unknown until the watcher reports it, and in a place no
+  watcher runs for (`disk`, `node-default`, a disk-origin place without
+  `watch`) until the next start. Meanwhile a call through it lands where
+  it leads. Who may write into a place's directory is the responsibility
+  of whoever owns the environment; where others do, use `'verify'`.
+
+**`'verify'` proves where each call lands.** A native call first asks the
+disk where its path really lies (`fs.realpathSync.native`; for a path to
+create, of its nearest existing ancestor; for the place's directory,
+once). The path is proven as the OS opens it: `..` is resolved from the
+real directory before it, past a symbolic link, not folded lexically, so
+`d/link/../secret` cannot slip past — and a path that leaves `appRoot`
+through `..` after a name inside it is `EACCES` (on Windows `node:fs` folds
+`..` before the OS, so this changes nothing there). It holds where it
+lands: in the place's directory, or off `appRoot`'s line and on no share —
+and, in the disk territory of `fs.fallback: 'disk'`, on no file of an
+extension the place caches, which a link can name another way (`t.bin` →
+`t.txt`). A link out of the place into another place, `appRoot` or a
+directory above it is `EACCES` before any native I/O — reading, writing,
+listing or removing through it, and inspecting or removing the link itself
+(`lstat`, `readlink`, `unlink`, `rmdir`, `rm`), which the proof cannot
+tell from following it — and so, for the module loader, is a module it
+leads to; a link that stays in the place, or leads elsewhere, is
+followed, whoever made it and whenever. Each such call proves its path
+with `realpath`, so it costs more than the string routing: one for a file
+read, write or `stat`; two for a directory listing or a path being created
+(its parent too); one where a recursive `readdir` starts (it walks below
+without following links); one per directory `glob` walks (it re-routes
+each); three for a single `cp` or a `require` of a disk-place module
+(source, destination and what the resolver reads) — a few microseconds on
+Linux, tens on Windows ([benchmarks](doc/benchmarks.md)). A link swapped
+in between the answer and the call is not seen: the proof and the call
+are two steps, and strict is no OS sandbox.
+
+In both modes the Windows spellings above — namespace, device, UNC and
+admin-share paths, NTFS streams, 8.3 forms — are refused before either
+applies; read-only places, prepared content and `fs.fallback` route the
+same. `kernel.diagnostics().strict` shows each place's mode and how many
+links the index holds.
 
 ### Partial disk cache: `fs.fallback`
 
@@ -730,6 +798,7 @@ cloneable so workers rebuild from it.
 | `watch`                | bool   | `false`    | Watch disk-origin places            |
 | `watchTimeout`         | number | `1000`     | Watcher debounce (ms)               |
 | `strict`               | bool   | `false`    | Routing policy inside `appRoot`     |
+| `links`                | string | `'deny'`   | Under strict: `deny` \| `verify`    |
 
 Sizes accept `metautil.sizeToBytes` strings or numbers: a bare integer
 (bytes), or one followed by a decimal (`kb`, `mb`, `gb`, `tb`, `pb`, `eb`,
@@ -753,7 +822,8 @@ the disk-origin cached places — `sab` + `disk` and `map` + `disk` alike;
 virtual places have no disk to watch. It is unrelated to the patched
 `fs.watch`, which refuses managed territory with `ENOTSUP` (see
 [Patched `node:fs`](#patched-nodefs)). `strict` is described in
-[Strict routing](#strict-routing); it is not an OS sandbox.
+[Strict routing](#strict-routing); it is not an OS sandbox. `links` —
+also per place — in [Links on a place's disk](#links-on-a-places-disk-links).
 
 | `places.<name>.*` | Type   | Default       | Description                                                                  |
 | ----------------- | ------ | ------------- | ---------------------------------------------------------------------------- |
@@ -764,6 +834,7 @@ virtual places have no disk to watch. It is unrelated to the patched
 | `fs`              | domain | off           | `true` or `{ ext, writable, zeroCopy, compress, script, prepare, fallback }` |
 | `require`         | domain | off           | `true` or `{ ext, compile, prepare }` (compile default true)                 |
 | `import`          | domain | off           | `true` or `{ ext, prepare }`                                                 |
+| `links`           | string | from defaults | Under strict, a place with a directory on disk: `deny` \| `verify`           |
 
 Place name: ASCII `[A-Za-z0-9][A-Za-z0-9._-]*`, no trailing dot, no
 Windows reserved names, unique after lowercasing.
@@ -982,6 +1053,10 @@ of the call — a frozen plain object, a new one each time:
   preparation: {
     failures,           // preparations that failed since initialize()
     places,             // { [place]: failures }, each place that declares `prepare`
+  },
+  strict: {             // null without strict
+    links,              // { [place]: 'deny' | 'verify' }, each place with a directory on disk
+    known,              // links the index holds; one found gone is dropped when next crossed
   },
   queues: {
     watch: { epochs, rechecks }, // watcher epochs queued or running; rechecks waiting
@@ -1423,7 +1498,7 @@ not a raw-preserving copy.
 
 | Code            | Meaning                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                 |
 | --------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `EACCES`        | Strict routing denial: unowned path under `appRoot`, place with no fs domain, or an unpublished / excluded-ext entry in an indexed mount; any unpublished entry of a place with `fs.fallback: 'deny'`, strict or not; the hidden source of a copy, rename or link                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                       |
+| `EACCES`        | Strict routing denial: unowned path under `appRoot`, place with no fs domain, or an unpublished / excluded-ext entry in an indexed mount; any unpublished entry of a place with `fs.fallback: 'deny'`, strict or not; the hidden source of a copy, rename or link; under strict a path through a link on a place's disk (`links`)                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                       |
 | `EROFS`         | Place has `fs.writable: false` (or provider `sea`) — also for `open` / `createWriteStream` / `readFile` / `createReadStream` with a flag that writes                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                    |
 | `ENOTSUP`       | No file descriptor for a virtual entry (`open`, whatever its flags) or for the canonical content of a published disk-origin entry (`open` with a flag that can read, `+` included) — nor for `readFile` or `createReadStream` with a flag that writes, which open as `open` does; `*View` or a `{ zeroCopy: true }` stream without `fs.zeroCopy`; compressed API for an unconfigured encoding; `appendFile`, `rename` or a copy of a prepared virtual key; a write whose preparer is not registered in this thread; a `*Sync` mutation or copy into a `sab + virtual` place; a copy option the VFS cannot honor; a recursive `cp` of or into managed territory; a hard link into or out of a place; `watch` of managed territory; a recursive walk or `rename` of a tree that holds places; a directory renamed across a place's boundary (a place's root included) — under strict a directory or a link leaving any place; a virtual subtree rename that is not raw-only; `rm` / `rename` of a place's own directory; a guarded mutation in a virtual place, `open` / `createWriteStream` / `readFile` / `createReadStream` with a flag that writes included; a `glob` loaded before the patch whose walk starts in or above managed territory; under strict, a `node:fs` function the patch does not know (`syscall` names it); `writeFiles` of a disk-origin place, or with a flag that neither replaces nor creates |
 | `ENOENT`        | Missing key in a writable place; `readdir` of a missing directory                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                       |
@@ -1454,7 +1529,7 @@ may have published it before it closed).
 
 ```
 snapshot    { segments: [{ id, sab }], places: { <name>: { entries: [[key, entry]] } },
-              version, instance }
+              version, instance, links?: { known: [path], made: Int32Array, seen } }
 vfs-update  { name, updateId, version, places: { <name>: { entries, removals,
               retired: [[key, retireId]] } }, newSegments: [{ id, sab }] }   main → worker
 vfs-ack     { name: 'vfs-ack', updateId, retained?: [retireId] }              worker → main
@@ -1463,6 +1538,7 @@ vfs-mutate  { name, id, place, op, key, to?, options?, data? }                wo
             writeFiles: { name, id, place, op, keys, sizes, options, data }
 vfs-mutated { name, id, error?: { code, message, syscall, path, dest },
               version? }                                                      main → worker
+vfs-links   { name: 'vfs-links', add: [path], made: 0 | 1 }                   both ways
 entry       shared { kind, segmentId, offset, length, stat, version, scriptOptions?, meta? }
             | disk { kind, path, stat, version, scriptOptions?, meta? }
 stat        { size, mtimeMs } (+ sourceSize, encoding for compressed companions)
@@ -1479,7 +1555,12 @@ worker has ACKed (or exited) and no thread holds them. An update's
 entry carries the version of the commit that published it. A worker's
 `writeFiles` is one `vfs-mutate`: its keys, the size of each file and
 their bytes one after another in `data`; its answer carries the version
-of the commit.
+of the commit. Under strict with `links: 'deny'` a snapshot carries the
+links the main kernel knows and a counter in shared memory (`made`) of
+the links threads made through the patch, with how many of them the
+index holds (`seen`); `vfs-links` hands on the links a thread learned —
+`made: 1` for one it made, which it counted — and main passes a worker's
+on to the others ([Links on a place's disk](#links-on-a-places-disk-links)).
 
 ## Examples
 

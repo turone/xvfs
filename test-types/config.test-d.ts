@@ -36,8 +36,10 @@ new VfsConfig({
     watch: true,
     watchTimeout: 250,
     strict: true,
+    links: 'deny',
   },
   places: {
+    uploads: { provider: 'disk', fs: { writable: true }, links: 'verify' },
     application: {
       fs: {
         ext: ['js', 'css'],
@@ -111,6 +113,7 @@ expectType<{
   readonly watch: boolean;
   readonly watchTimeout: number;
   readonly strict: boolean;
+  readonly links: 'deny' | 'verify' | null;
 }>()(quickStart.global);
 
 type Place = {
@@ -124,6 +127,7 @@ type Place = {
   readonly import: ResolvedImportDomain | null;
   readonly scanExt: readonly string[] | null;
   readonly prepare: { readonly [ext: string]: string } | null;
+  readonly links: 'deny' | 'verify' | null;
 };
 expectType<Place[]>()(quickStart.places);
 expectType<Place[]>()(quickStart.allPlaces);
@@ -210,6 +214,10 @@ new VfsConfig({
 });
 // @ts-expect-error unknown fallback
 new VfsConfig({ places: { p: { fs: { fallback: 'never' } } } });
+// @ts-expect-error `links` is 'deny' or 'verify': no 'allow'
+new VfsConfig({ defaults: { strict: true, links: 'allow' } });
+// @ts-expect-error `links` is 'deny' or 'verify'
+new VfsConfig({ places: { p: { provider: 'disk', fs: true, links: true } } });
 // @ts-expect-error a preparer is named, never passed as a function
 new VfsConfig({ places: { p: { fs: { ext: ['js'], prepare: () => 'x' } } } });
 new VfsConfig({

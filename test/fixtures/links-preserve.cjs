@@ -5,7 +5,8 @@
 // path: under strict a module that a link in a node-default place takes
 // into another place is not found — the load hook proves where the file
 // really lies — while one of the place's own loads. The tree and its link
-// are the test's (argv[2]). Prints one JSON line.
+// are the test's (argv[2]), and so is `links` (argv[3]). Prints one JSON
+// line.
 
 const path = require('node:path');
 const { pathToFileURL } = require('node:url');
@@ -13,7 +14,7 @@ const fsPatch = require('../../lib/adapters/fs-patch.js');
 const moduleHook = require('../../lib/adapters/module-hook.js');
 const { kernel } = require('../helpers.js');
 
-const [root] = process.argv.slice(2);
+const [root, links] = process.argv.slice(2);
 
 const PLACES = {
   nd: { provider: 'node-default', fs: true, require: { compile: false } },
@@ -32,7 +33,8 @@ const outcome = async (load) => {
 };
 
 const main = async () => {
-  const k = await kernel(root, PLACES, { strict: true }, { preparers });
+  const defaults = { strict: true, links };
+  const k = await kernel(root, PLACES, defaults, { preparers });
   fsPatch.install(k);
   moduleHook.install(k);
   try {

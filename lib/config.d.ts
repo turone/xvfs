@@ -17,6 +17,14 @@ export type Encoding = 'gzip' | 'deflate' | 'br' | 'zstd';
 export type Fallback = 'disk' | 'deny';
 
 /**
+ * How strict routing proves a native call on a place's disk: `'deny'`
+ * refuses a path through a link the kernel knows (an index, no disk call
+ * for an ordinary path); `'verify'` refuses one whose real path lies in
+ * managed territory (a `realpath` per call). README, "Strict routing".
+ */
+export type Links = 'deny' | 'verify';
+
+/**
  * `prepare` of a domain: a preparer name for every extension of the
  * domain's own finite `ext`, or `{ name: [ext, …] }`. Names are registered
  * as functions in the kernel option `preparers`.
@@ -55,6 +63,8 @@ export interface VfsDefaults {
   watchTimeout?: number;
   /** Routing policy inside `appRoot`. Default false. */
   strict?: boolean;
+  /** Under strict only. Default `'deny'`. */
+  links?: Links | null;
 }
 
 export interface CodecConfig {
@@ -122,6 +132,11 @@ export interface PlaceConfig {
   fs?: FsDomainConfig | boolean;
   require?: RequireDomainConfig | boolean;
   import?: ImportDomainConfig | boolean;
+  /**
+   * Under strict, for a place with a directory on disk (origin `'disk'`,
+   * provider `'disk'` or `'node-default'`). Default `defaults.links`.
+   */
+  links?: Links | null;
 }
 
 /** The raw configuration: hardcoded defaults → `defaults` → per place. */
@@ -150,6 +165,8 @@ export interface VfsGlobal {
   readonly watch: boolean;
   readonly watchTimeout: number;
   readonly strict: boolean;
+  /** `'deny'` or as set under strict; null without. */
+  readonly links: Links | null;
 }
 
 export interface ResolvedCodec {
@@ -204,6 +221,8 @@ export interface ResolvedPlace {
   readonly scanExt: readonly string[] | null;
   /** The preparation index `{ [ext]: preparer }`, or null. */
   readonly prepare: { readonly [ext: string]: string } | null;
+  /** Under strict, for a place with a directory on disk; else null. */
+  readonly links: Links | null;
 }
 
 /**
