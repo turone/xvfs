@@ -125,6 +125,38 @@ differently, fall back to the full proof, and `stat` / `chmod` / `chown` /
 mutation that a following op wrongly reuses the own proof. Or the boundary
 stays fail-closed as documented (README, doc/architecture.md).
 
+## P3 — Under strict a disk-origin write is hidden until it is published
+
+**Problem.** Under strict — `fs.fallback: 'deny'`, strict's default — a
+file the process writes into a disk-origin place is neither readable nor
+renamable until the kernel's watcher publishes it: `writeFile` and then
+`rename` of the same file is `EACCES` or not by timing, through the patch
+and the `PlaceFs` facade alike (README, Copies and renames).
+
+**Cause.** The read routing serves published entries only, and a rename
+routes its source as a read (a hidden source, `FsRouter.rename`); the
+write lands on disk and the watcher republishes it later.
+
+**Done when.** A thread's own write is visible to its next call in order —
+published before the call returns, or a pending set the router consults —
+or the timing stays documented, with `kernel.on('publish')` the way to
+wait.
+
+## P3 — The strict rules in a module of their own
+
+**Problem.** `lib/kernel.js` holds the strict rules beside the
+orchestration: the wiring of `Aliases`, the index of links and its
+replication, `#proven` / `#territory` / `#nodeLoads`, the rules of links
+on a place's disk (`makesLink`, `touchesLink`, `movesLink`, `#inPlace`),
+`keepsRoot` and `diagnostics().strict`.
+
+**Done when.** They live in one module the kernel owns (`lib/strict.js`),
+with no behavior change and the tests unchanged — only if that removes
+more than the new seam adds. The strict reference of the README may move
+to `doc/strict.md` alike, the README keeping a summary; and the tests of
+links (`links.test.js`, `links-deny.test.js`, `link-index.test.js`) be
+grouped by behavior, without duplicates.
+
 ## After the next Node.js 26.x release — `doc/alternatives.md`
 
 **Problem.** The comparison describes Node v26.10.0; `main` already removes
