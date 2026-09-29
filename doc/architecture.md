@@ -905,9 +905,14 @@ there or a `rename` onto one (its `lstat`: `kernel.touchesLink`,
 holds a link (a walk of it; a tree it cannot read is refused too), and —
 with `'deny'` — a `rename` or a recursive `rm` of a directory under which
 the index knows a link, are `ENOTSUP` before any native call
-(`kernel.makesLink`, fs-patch). What it sees is a link's `lstat` and the
-index: a link swapped in between the check and the call is not seen.**
-_Why:_
+(`kernel.makesLink`, fs-patch). Nor does it remove or move a tree through
+one: a recursive `rm` or `rmdir` of a directory, or a `rename` of one,
+goes only where its real path — for a rename, its destination's too — lies
+in the place's directory (`VfsKernel#inPlace`: `Aliases.territory`,
+`placed`), in either mode; a link named with a trailing separator is the
+link (`disk.leafStats`). What it sees is a link's `lstat`, a directory's
+`realpath` and the index: a link swapped in between the check and the call
+is not seen.** _Why:_
 no confirmed consumer makes links in managed territory through the patch —
 installs, release switches and log links run in their own process or
 outside `appRoot` — while keeping an index true under the process's own
@@ -918,7 +923,19 @@ index need not follow. The `lstat` of a removal or a rename is one disk
 call on a mutation, never on a read; it also catches a link the watcher
 has not reported yet. With `'verify'` the index knows nothing, and a
 directory holding a link moves or goes: every call through the link is
-proven anyway.
+proven anyway. A tree is another matter: a recursive removal through a
+link out of the place — `link/sub`, `link/` (POSIX `lstat` follows a
+trailing separator, and Node 24's native `rm` then empties the target),
+`link/../x` on POSIX — deleted a tree outside managed territory, which
+`'verify'` let through as reaching what a path there reaches anyway and
+`'deny'` saw only for a link it knew. A directory renamed through a link
+moved a foreign tree in past the move-in walk, or took its own links out
+of the place — `d/sub` holding `jro` → `ro`, moved to `d/jl/moved`, read
+what `ro` hides. Both modes pay the `realpath`: a `disk` or `node-default`
+place has no watcher, so its index knows the links of `initialize()`
+only. Only a directory is held so — a file through a link is what a path
+there reaches, a missing path removes nothing (`rm -rf` stays an idiom) —
+and one through a link that stays in the place is the place's own.
 
 **Every thread keeps its own index: a worker's comes in its snapshot, with
 the main index's generation — how many links it has come to know — and
@@ -960,8 +977,9 @@ junction needs no privilege on Windows, and a link inside a place's disk
 read, write, listing or `require` into another place, a hidden file, a
 read-only place or above `appRoot`. The router's string answer covers the
 path's top, which is where the link is not. A link to elsewhere reaches
-what a path there reaches anyway, so it is followed; refusing every link
-out of the place would break the shared directories a release links in.
+what a path there reaches anyway, so it is followed — but for a tree
+removed or moved through it (above); refusing every link out of the place
+would break the shared directories a release links in.
 `node:fs`'s own recursive `readdir` enters a junction even with
 `withFileTypes` (Node 22 to 26 on Windows) and its `cp` copies what a
 junction holds, so neither walks a place's disk under strict; `opendir`,
@@ -1324,6 +1342,16 @@ or a link that leaves the place takes them out of it, where a link into
 virtual entry has no raw input, and its bundle may embed the old key
 (`scriptOptions.filename`, `meta`, bytecode). A copy and a delete across
 places would not be atomic, and a virtual place is a filesystem of its own.
+
+**The patch removes no place's own directory that `PlaceFs` keeps — an
+indexed place's, and under strict any place's: `rm` and `rmdir` of it are
+`ENOTSUP` (`place root`), an `unlink` `EISDIR`, as `PlaceFs` answers
+(`kernel.keepsRoot`), before any native call.** _Why:_ the facade refused
+it while `rm -r` through the patch deleted a disk-origin place's directory
+under its watcher. A `disk` place's directory may still be renamed into
+place from outside — a tree without links, how a release lays one down —
+and without strict a `disk` or `node-default` place is `node:fs`
+territory.
 
 **A virtual directory renames as a whole subtree when every source under it
 is raw-only — not prepared, not compiled (`require.compile`,
@@ -1769,7 +1797,9 @@ workers call `attach()`.** _Why:_ preloads do not run in worker threads.
   directory is never in it.
 - Under strict the patch makes no link, symbolic or hard, to managed
   territory, and — with the facade — makes, removes and moves none it can
-  see on a place's disk.
+  see on a place's disk, and removes or moves no directory past one out of
+  the place's directory.
+- The patch removes no place's own directory that `PlaceFs` keeps.
 
 ## Protocol
 

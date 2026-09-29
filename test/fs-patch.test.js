@@ -2259,3 +2259,55 @@ describe('fs-patch: realpath.native', () => {
     }
   });
 });
+
+// A place's own directory is its mount: the patch removes none that PlaceFs
+// keeps — an indexed place's, and under strict any place's — as PlaceFs
+// answers, before any native call: `rm`, recursive or not, and `rmdir` are
+// ENOTSUP, an `unlink` EISDIR. Without strict a `disk` place's directory is
+// node:fs territory.
+describe("fs-patch: a place's own directory stays", () => {
+  const TREE = { 'w/a.txt': 'a', 'd/b.bin': 'b', 'e/c.bin': 'c' };
+  const PLACES = {
+    w: { fs: { writable: true } },
+    d: { provider: 'disk', fs: { writable: true } },
+    e: { provider: 'disk', fs: { writable: true } },
+  };
+
+  for (const strict of [false, true]) {
+    it(
+      strict ? 'under strict: every place' : 'without strict: an indexed place',
+      async () => {
+        const root = writeTree(tmpDir('patch-root'), TREE);
+        const at = (...p) => path.join(root, ...p);
+        const k = await kernel(root, PLACES, { strict, watchTimeout: 60000 });
+        fsPatch.install(k);
+        try {
+          for (const dir of strict ? [at('w'), at('d')] : [at('w')]) {
+            for (const p of [dir, `${dir}${path.sep}`]) {
+              const kept = (code, syscall) => ({ code, syscall, path: p });
+              const mount = { ...kept('ENOTSUP', 'rm'), message: /place root/ };
+              assert.throws(() => fs.rmSync(p, { recursive: true }), mount);
+              assert.throws(() => fs.rmSync(p), mount);
+              await assert.rejects(
+                fs.promises.rm(p, { recursive: true }),
+                mount,
+              );
+              assert.throws(() => fs.rmdirSync(p), kept('ENOTSUP', 'rmdir'));
+              assert.throws(() => fs.unlinkSync(p), kept('EISDIR', 'unlink'));
+            }
+          }
+          assert.equal(readDisk(at('w', 'a.txt'), 'utf8'), 'a');
+          assert.equal(readDisk(at('d', 'b.bin'), 'utf8'), 'b');
+          if (!strict) {
+            fs.rmSync(at('e'), { recursive: true });
+            assert.equal(onDisk(at('e')), false);
+          }
+        } finally {
+          fsPatch.uninstall();
+          k.close();
+          rm(root);
+        }
+      },
+    );
+  }
+});
