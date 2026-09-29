@@ -157,8 +157,10 @@ syntax and 8.3 short names where they may stand for `appRoot` are refused
 before any native I/O; what only the disk knows of `appRoot` itself — its
 real path, what a drive letter names — is learned once, and a drive that
 names it or a share is refused whole, as is its real path when it is
-spelled through a link; a native call on a place's disk proves where its
-path really lands, and the patch makes no link into managed territory. A
+spelled through a link; a native call on a place's disk passes through no
+link the kernel knows (`links: 'deny'`, the default) or first proves where
+its path really lands (`'verify'`), and the patch makes no link into
+managed territory. A
 link that already leads into `appRoot` from outside it is not covered:
 strict is a routing policy, not an OS sandbox. The watcher works around a
 Windows abort on 8.3 aliases in watched paths (nodejs/node#63638). → README
