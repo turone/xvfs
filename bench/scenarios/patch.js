@@ -15,8 +15,11 @@ const { tmpDir, writeTree, cleanup, kernel, memory } = require('../lib.js');
 // path really lies first (one realpath) — strict as it was where the
 // library does not know `links` (a base of bench/ab.js before it).
 // `*.w.*` are mutations of a writable `disk` place — a file written and
-// removed, a file renamed and back — where under strict a removal or a
-// rename also asks whether its path is a link (one lstat each).
+// removed, a file renamed and back, a directory made and removed with
+// `recursive`, a directory renamed and back — where under strict a
+// removal or a rename also asks whether its path is a link (one lstat
+// each), and a recursive removal or a directory's rename where it really
+// lies (one realpath).
 
 const OPS = {
   readFileSync: (p) => fs.readFileSync(p.file),
@@ -33,6 +36,14 @@ const MUTATIONS = {
   renameBack: (p) => {
     fs.renameSync(p.file, p.moved);
     fs.renameSync(p.moved, p.file);
+  },
+  mkdirRmTree: (p) => {
+    fs.mkdirSync(p.tree);
+    fs.rmSync(p.tree, { recursive: true });
+  },
+  renameDirBack: (p) => {
+    fs.renameSync(p.dir, p.movedDir);
+    fs.renameSync(p.movedDir, p.dir);
   },
 };
 
@@ -85,6 +96,7 @@ module.exports = async (b) => {
     'd/a.bin': one,
     ...dirOf('d', 'bin'),
     'w/a.bin': one,
+    'w/dir/a.bin': one,
   });
   const outside = writeTree(tmpDir('patch-out'), {
     'a.txt': one,
@@ -98,6 +110,8 @@ module.exports = async (b) => {
     dir: path.join(root, place, 'dir'),
     fresh: path.join(root, place, 'n.bin'),
     moved: path.join(root, place, 'b.bin'),
+    tree: path.join(root, place, 't'),
+    movedDir: path.join(root, place, 'dir2'),
   });
   const targets = {
     vfs: at('vfs'),
