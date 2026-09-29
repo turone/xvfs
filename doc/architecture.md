@@ -20,12 +20,27 @@ Contents: [Purpose](#purpose) · [Module map](#module-map) ·
 
 ## Purpose
 
-Node.js servers that run several `worker_threads` over the same files —
-static assets, templates, handler sources, modules. Files are loaded once on
-the main thread into pooled `SharedArrayBuffer` segments; every thread reads
-zero-copy views of the same bytes. Live changes are published to all threads
-atomically; V8 cached data and compressed representations are built once and
-shared the same way.
+A managed file layer for a Node.js process: places over the
+application's real paths, each with a storage model — memory every
+`worker_threads` thread shares (`sab`), each thread's own memory (`map`),
+the assets of a single executable (`sea`), or the disk under the place's
+policy (`disk`, `node-default`) — and a content origin — the disk,
+scanned and watched, or what the application writes (`virtual`). All
+content goes through one publication pipeline — prepared once, compiled
+and compressed once, committed atomically with a version — and one set of
+routing rules, through the patched `node:fs`, the module hooks and
+`PlaceFs` alike.
+
+Shared memory is where most of the machinery lies: Node.js servers that
+run several `worker_threads` over the same files — static assets,
+templates, handler sources, modules. Files are loaded once on the main
+thread into pooled `SharedArrayBuffer` segments; every thread reads
+zero-copy views of the same bytes. Live changes are published to all
+threads atomically; V8 cached data and compressed representations are
+built once and shared the same way. The same places serve what one thread
+keeps to itself — an agent's or a session's workspace (`map` +
+`virtual`), code generated at run time — through the same pipeline, hooks
+and routing.
 
 It is deliberately **not** a general-purpose virtual filesystem (see
 [alternatives.md](alternatives.md) for `node:vfs`), not a sandbox for

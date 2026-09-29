@@ -1,16 +1,40 @@
 # xvfs
 
 Extended virtual filesystem for Node.js: places over the application's
-real paths, content prepared once at publication, one shared copy for
-all `worker_threads`, live updates published atomically to every
-thread, and strict routing — through `node:fs` and
+real paths, each with its own storage and content origin; content
+prepared once and published atomically, with a version, to every thread;
+one shared copy for all `worker_threads` where a place asks for it; and
+strict routing of what the application may reach — through `node:fs` and
 `module.registerHooks` adapters or the explicit `PlaceFs` API.
 
-Files are loaded once on the main thread into pooled SAB segments. Workers
-get zero-copy `Buffer` views over the same memory — no per-worker copies,
-no serialization, no IPC for reads. Optional V8 bytecode
-(`require.compile`) is compiled once and stored in SAB so workers skip
-parse + compile. There is no ESM bytecode cache.
+A place is a directory under `appRoot`. Its **provider** says where the
+bytes live: `sab` — one copy in pooled `SharedArrayBuffer` segments that
+every thread reads zero-copy; `map` — each thread's own `Map`, written
+synchronously and seen by that thread only; `sea` — the assets of a
+single executable, in the shared pool; `disk` and `node-default` — the
+file system itself, under the place's policy. Its **origin** says where
+the content comes from: `disk` — a scan, then a watcher — or `virtual` —
+what the application writes, from code generated at run time to data
+fetched at start, with no file on disk. Every place goes through the same
+publication pipeline, the same hooks and the same routing.
+
+With `sab`, files are loaded once on the main thread into pooled SAB
+segments. Workers get zero-copy `Buffer` views over the same memory — no
+per-worker copies, no serialization, no IPC for reads. Optional V8
+bytecode (`require.compile`) is compiled once and stored in SAB so
+workers skip parse + compile. There is no ESM bytecode cache.
+
+What it is used for: worker pools over one copy of static assets,
+templates, configuration and modules; worker-local workspaces of agents,
+sessions or tenants (`map` + `virtual`); code generated and compiled at
+run time, loaded with `require()` and never written to disk; applications
+packaged as a single executable; and a declared, reviewable map of what
+an application may touch under `appRoot` — which places, which of them
+writable, through which links. Strict routing is a policy for code that
+goes through the patched `node:fs` and the module hooks, not an OS
+sandbox or a security boundary ([Strict routing](#strict-routing)).
+[doc/alternatives.md](doc/alternatives.md) walks through the production
+scenarios.
 
 Requires Node.js 22.22.3+ or 24.12.0+ or 26+ (`module.registerHooks`;
 CJS `--import` bootstrap of memory-only modules). Node 24 below 24.12.0
@@ -30,13 +54,26 @@ is unsupported.
 
 ## Features
 
-- **Zero-copy sharing** — internal projections are
-  `Buffer.from(sab, offset, length)` views.
+Storage and origins:
+
+- **Five providers** — `sab` (shared memory), `map` (each thread's own
+  memory), `sea` (SEA assets in shared memory), `disk` (a managed mount),
+  `node-default` (ordinary Node) — over the same paths, API and routing.
+- **Zero-copy sharing** — a `sab` place's projections are
+  `Buffer.from(sab, offset, length)` views: one copy for every thread.
 - **Pooled segments** — files packed into 64 MiB SAB segments; emptied
   segments are reused, never returned to the OS.
+- **Worker-local places** — a `map` place keeps its files in each
+  thread's own memory; with `origin: 'virtual'` it is that thread's own
+  filesystem: synchronous writes, a filesystem's hierarchy, `require()` of
+  what is written, compiled on write, invisible to every other thread.
 - **Two content origins** — `origin: 'disk'` (scanner + watcher fill the
   place) or `origin: 'virtual'` (the application writes the content —
-  from the main thread or, for `sab`, from a worker over the link port).
+  from the main thread or, for `sab`, from a worker over the link port):
+  generated code, fetched data, fixtures, with no file on disk.
+
+Publication:
+
 - **`prepare`** — a synchronous callback, declared by the `fs`,
   `require` or `import` domain per extension, turns a raw input into the
   file's one canonical content (bundling, wrapping, templating…), shared by
@@ -59,16 +96,27 @@ is unsupported.
   what each publication changed, once it is committed.
 - **Atomic sets** — `files.writeFiles(…)` publishes several files of a
   virtual place in one commit, or none of them.
-- **Five providers** — `sab`, `map`, `sea`, `disk`, `node-default`.
+
+Control:
+
 - **Strict routing** — `strict: true` makes `appRoot` the routing
-  boundary (a policy, not OS-level isolation).
+  boundary: a path no place owns is `EACCES` before any native I/O,
+  read-only places stay read-only through every `node:fs` form, and
+  `fs.fallback` and `links` decide what reaches a place's disk — a
+  declared policy, not OS-level isolation.
+- **Immutable published versions** — a reader finishes the version it
+  started with; a failed preparation keeps the last good one; nothing is
+  freed on a timeout.
+- **Diagnostics** — `kernel.diagnostics()`: pool usage and fragmentation,
+  bytes waiting to be freed, a worker that does not ACK, files the pool
+  had no room for, failed preparations, strict's links; read-only.
+
+Integration:
+
 - **Hooks** — `hooks.fs` patches `node:fs`; `hooks.module` is one
   `module.registerHooks` chain for `require()` and `import`.
 - **Chunked streaming** — `PlaceFs.createReadStream()` with HTTP Range;
   a stream always finishes the version it started with.
-- **Diagnostics** — `kernel.diagnostics()`: pool usage and fragmentation,
-  bytes waiting to be freed, a worker that does not ACK, files the pool
-  had no room for, failed preparations; read-only.
 
 ## Install
 
@@ -229,6 +277,12 @@ never in the snapshot and mutations of one thread are invisible to
 others. Writes via `PlaceFs` are local to that thread and synchronous.
 JS is compiled to V8 bytecode when `require.compile` and/or
 `fs.script.compile` are on.
+
+It is a worker's own workspace — an agent's or a session's files, the
+code it generates and loads — with the preparation, compilation, hooks
+and strict routing of a shared place, and nothing on disk to clean up
+after it. What it does not have: sharing (a `sab` place is for that),
+versions shared across threads and `'publish'` events (TASKS.md).
 
 ```js
 places: {
