@@ -522,6 +522,46 @@ describe('strict, links: deny: edges', () => {
     }
   });
 
+  // A release renamed into place — a directory onto a place's own path —
+  // brings the links it holds into the index; the directory is no link.
+  it("a directory renamed onto a place's own directory brings its links", async () => {
+    const base = tmpDir('links-deploy');
+    const root = writeTree(path.join(base, 'app'), { 'ro/h.bin': 'hidden' });
+    const build = writeTree(path.join(base, 'build'), { 'x.bin': 'x' });
+    const at = (...p) => path.join(root, ...p);
+    linkDir(at('ro'), path.join(build, 'jro'));
+    const places = {
+      ro: PLACES.ro,
+      site: { provider: 'disk', fs: { writable: true } },
+    };
+    const k = await kernel(
+      root,
+      places,
+      { strict: true },
+      {
+        preparers: PREPARERS,
+      },
+    );
+    fsPatch.install(k);
+    try {
+      fs.renameSync(build, at('site'));
+      assert.equal(fs.readFileSync(at('site', 'x.bin'), 'utf8'), 'x');
+      const hidden = at('site', 'jro', 'h.bin');
+      assert.throws(
+        () => fs.readFileSync(hidden),
+        refused('EACCES', 'open', hidden),
+      );
+      assert.equal(k.diagnostics().strict.known, 1);
+    } finally {
+      fsPatch.uninstall();
+      k.close();
+      for (const j of [at('site', 'jro'), path.join(build, 'jro')]) {
+        if (disk.existsSync(j)) unlinkDir(j);
+      }
+      rm(base);
+    }
+  });
+
   // rmdir does not follow its last name: a link there is removed on
   // Windows, ENOTDIR on POSIX — never EACCES.
   it('rmdir of the link itself is not refused', async () => {
