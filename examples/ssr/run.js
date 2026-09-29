@@ -96,7 +96,10 @@ const kernel = new VfsKernel(config, {
 });
 
 // Ask every worker to render `round`, and collect their replies. Listeners
-// go on before any postMessage, so a fast reply can never be missed.
+// go on before any postMessage, so a fast reply can never be missed. The
+// command carries the version this thread has published: the update and
+// the command reach a worker on two channels, which keep no order between
+// them, so the worker waits for that version before it renders.
 const renderRound = (workers, round) => {
   const replies = Promise.all(
     workers.map(
@@ -114,7 +117,10 @@ const renderRound = (workers, round) => {
         }),
     ),
   );
-  for (const worker of workers) worker.postMessage({ cmd: 'render', round });
+  const { version } = kernel;
+  for (const worker of workers) {
+    worker.postMessage({ cmd: 'render', round, version });
+  }
   return replies;
 };
 
