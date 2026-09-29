@@ -92,7 +92,7 @@ describe('LinkIndex, POSIX paths', () => {
     assert.equal(x.crosses('/tmp/into/jx/f'), false);
   });
 
-  it('delete and deleteBelow forget; the early exit follows', () => {
+  it('delete forgets; the early exit follows', () => {
     const x = new LinkIndex(path.posix);
     x.add('/app/d/a/j1');
     x.add('/app/d/a/b/j2');
@@ -100,14 +100,15 @@ describe('LinkIndex, POSIX paths', () => {
     assert.equal(x.size, 3);
     x.delete('/app/d/c/j3');
     assert.equal(x.crosses('/app/d/c/j3/f'), false);
-    x.deleteBelow('/app/d/a');
+    x.delete('/app/d/a/j1');
+    x.delete('/app/d/a/b/j2');
     assert.equal(x.size, 0);
     assert.equal(x.crosses('/app/d/a/b/j2/f'), false);
     assert.deepEqual(x.list(), []);
   });
 
   it('with a floor: the same answers, the names down to it compared at once', () => {
-    const x = new LinkIndex(path.posix, null, '/app');
+    const x = new LinkIndex(path.posix, { floor: '/app' });
     x.add('/app/d/jro');
     assert.equal(x.crosses('/app/d/jro/h.bin'), true);
     assert.equal(x.crosses('/app//d/./jro/h.bin'), true);
@@ -122,25 +123,45 @@ describe('LinkIndex, POSIX paths', () => {
     assert.equal(x.crosses('/app/d/jro/x'), true);
   });
 
-  it('a known link found gone is dropped: its lstat, only on a path that would be refused', () => {
-    const table = { '/app/d/j': 'dir' };
+  // A known link is asked of the disk only on a path that would be
+  // refused. Nothing there — a link the patch is still making, or one gone
+  // — lets the path through and keeps it; a directory or a file there
+  // drops it; an lstat that fails refuses.
+  it('a known link is checked by its lstat: kept while nothing is there, dropped for a directory', () => {
+    const table = {};
     const asked = [];
     const lstat = (p, o) => {
       asked.push(p);
       return lstatOf(table)(p, o);
     };
-    const x = new LinkIndex(path.posix, lstat);
-    x.add('/app/d/j');
-    assert.equal(x.crosses('/app/d/other/f'), false);
-    assert.deepEqual(asked, []);
-    assert.equal(x.crosses('/app/d/j/f'), false);
-    assert.deepEqual(asked, ['/app/d/j']);
-    assert.equal(x.size, 0);
-    table['/app/d/j'] = 'link';
-    x.add('/app/d/j');
-    assert.equal(x.crosses('/app/d/j/f'), true);
-    table['/app/d/j'] = 'fail';
-    assert.equal(x.crosses('/app/d/j/f'), true, 'an lstat that fails keeps it');
+    for (const floor of [null, '/app']) {
+      const x = new LinkIndex(path.posix, { lstat, floor });
+      asked.length = 0;
+      x.add('/app/d/j');
+      assert.equal(x.crosses('/app/d/other/f'), false);
+      assert.deepEqual(asked, []);
+      assert.equal(x.crosses('/app/d/j/f'), false, 'nothing there yet');
+      assert.deepEqual(asked, ['/app/d/j']);
+      assert.equal(x.size, 1, 'kept');
+      table['/app/d/j'] = 'link';
+      assert.equal(x.crosses('/app/d/j/f'), true, 'made meanwhile');
+      table['/app/d/j'] = 'fail';
+      assert.equal(x.crosses('/app/d/j/f'), true, 'an lstat that fails');
+      table['/app/d/j'] = 'dir';
+      assert.equal(x.crosses('/app/d/j/f'), false);
+      assert.equal(x.size, 0, 'a directory took its name');
+      delete table['/app/d/j'];
+    }
+  });
+
+  it('caseless: on POSIX paths too (macOS)', () => {
+    const x = new LinkIndex(path.posix, { caseless: true, floor: '/App' });
+    x.add('/App/d/JRO');
+    assert.equal(x.crosses('/app/D/jro/x'), true);
+    assert.equal(x.crosses('/APP/d/jro', true), false);
+    const exact = new LinkIndex(path.posix);
+    exact.add('/App/d/JRO');
+    assert.equal(exact.crosses('/app/D/jro/x'), false);
   });
 
   it('below: each name under the directory is asked of the disk', () => {
@@ -151,7 +172,7 @@ describe('LinkIndex, POSIX paths', () => {
       '/app/d/e': 'fail',
       '/app': 'link', // above the directory: never asked
     };
-    const x = new LinkIndex(path.posix, lstatOf(table));
+    const x = new LinkIndex(path.posix, { lstat: lstatOf(table) });
     assert.equal(x.crosses('/app/d/a/j/f', false, '/app/d'), true);
     assert.equal(x.crosses('/app/d/a/j', true, '/app/d'), false);
     assert.equal(x.crosses('/app/d/b/f', false, '/app/d'), false);
@@ -177,17 +198,36 @@ describe('LinkIndex, Windows paths', () => {
   });
 
   it('with a floor: in any case and either separator; a drive root', () => {
-    const x = new LinkIndex(path.win32, null, 'C:\\App');
+    const x = new LinkIndex(path.win32, { floor: 'C:\\App' });
     x.add('C:\\App\\d\\JRO');
     assert.equal(x.crosses('c:/APP/d/jro/x'), true);
     assert.equal(x.crosses('C:\\app\\d\\jro', true), false);
     assert.equal(x.crosses('C:\\app\\d\\x'), false);
     assert.equal(x.crosses('C:\\Apple\\d\\jro\\x'), false);
-    const top = new LinkIndex(path.win32, null, 'D:\\');
+    const top = new LinkIndex(path.win32, { floor: 'D:\\' });
     top.add('D:\\j');
     assert.equal(top.crosses('d:\\J\\x'), true);
     assert.equal(top.crosses('D:\\k\\x'), false);
   });
+
+  // node:fs resolves a path before the OS opens it: a drive-relative one
+  // against its drive's cwd, a root-relative one against the cwd's drive.
+  // The cwd is this host's, so on Windows only.
+  it(
+    'a drive-relative or root-relative path, as node:fs resolves it',
+    { skip: process.platform !== 'win32' },
+    () => {
+      const cwd = process.cwd();
+      for (const floor of [null, cwd]) {
+        const x = new LinkIndex(path.win32, { floor });
+        x.add(path.win32.join(cwd, 'd', 'j'));
+        assert.equal(x.crosses(`${cwd.slice(0, 2)}d\\j\\x`), true);
+        assert.equal(x.crosses(`${cwd.slice(2)}\\d\\j\\x`), true);
+        assert.equal(x.crosses(`${cwd.slice(2)}\\d\\k\\x`), false);
+        assert.equal(x.crosses('d\\j\\x'), true);
+      }
+    },
+  );
 
   it('list gives the keys as kept; add takes them back', () => {
     const x = new LinkIndex(path.win32);

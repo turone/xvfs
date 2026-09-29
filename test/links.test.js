@@ -178,10 +178,10 @@ const outOfPlace = (links) => () => {
     await refusesEach(FILE_MUTATIONS, files);
     const dirs = [at('d', 'jro', 'sub'), at('d', 'jdro', 'sub')];
     await refusesEach(DIR_MUTATIONS, dirs);
-    // The link itself: 'deny' lets rm remove it (below).
+    // The link itself: 'deny' lets rmdir and rm remove it (below).
     const own = verify
       ? DIR_MUTATIONS
-      : DIR_MUTATIONS.filter(([call]) => call !== 'rmSync recursive');
+      : DIR_MUTATIONS.filter(([call]) => !/^(promises\.)?rm/.test(call));
     await refusesEach(own, [at('d', 'jro')]);
     assert.deepEqual(native.calls, []);
     assert.deepEqual(listDisk(at('ro')), ['a.txt', 'h.bin']);

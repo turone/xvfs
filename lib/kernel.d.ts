@@ -150,8 +150,8 @@ export interface VfsDiagnostics {
   };
   /**
    * Strict routing, null without: each place's `links`, for a place with a
-   * directory on disk; how many links the index holds — some possibly gone,
-   * dropped the first time a path through one is checked.
+   * directory on disk; how many links the index holds — some perhaps
+   * removed since, kept until a directory or a file takes their names.
    */
   readonly strict: {
     readonly links: { readonly [place: string]: Links };

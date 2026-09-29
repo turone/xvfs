@@ -858,11 +858,13 @@ entry, a disk-origin write, the raw source of a copy — names its place
 by the place's `links` before it hands the route on (`VfsKernel#proven`).
 `links` belongs to a place with a directory on disk, over
 `defaults.links`, and is `'deny'` by default: the kernel keeps an index of
-the links below each such place's directory (`LinkIndex`, links.js) —
-found by a walk at `initialize()` that enters no link (`scanner.linksOf`),
-kept by the watcher (`noteLinks`) and by the patch (`linkMade`,
-`linkMoved`) — and a route whose path passes through a known link,
-wherever it leads, is `EACCES` (`#crosses`). `'verify'` proves each route
+the links strictly below each such place's directory (`LinkIndex`,
+links.js) — met by the scan at `initialize()`, or found by a walk that
+enters no link (`scanner.linksOf`) where no scan runs, kept by the watcher
+(`noteLinks`) and by the patch (`linkMade`, `linkMoved`) — and a route
+whose path passes through a known link, wherever it leads, is `EACCES`
+(`#crosses`). The place's own directory is never indexed: it may be a link
+out of `appRoot`, its own disk (below). `'verify'` proves each route
 (below).** _Why:_ the proof costs a `realpath` per native call — tens of
 microseconds on Windows, more than many of the calls it guards
 (doc/benchmarks.md) — against what only a link can do; the index answers
@@ -876,18 +878,25 @@ it, so it refuses every known link. The name follows `fs.fallback:
 'deny'`. There is no `'allow'`: no scenario needs a link followed unchecked
 under strict, and without strict nothing is asked.
 
-**The index is asked about the path as given, name by name, each name
-before a `..` after it applies (`LinkIndex.crosses`); a call that does not
-follow its last name — `lstat`, `readlink`, the `l*` forms, `unlink`,
-`rm`, `rename`, the path a `symlink` makes — leaves that name out
-(`own`), but not with a trailing separator, `.` or `..` after it. A known
-link found gone is dropped the next time a path through it is asked (one
-`lstat`); a directory with no known link below ends the check.** _Why:_
-POSIX resolves `link/..` through the link, and the platforms resolve a
-last name's `.`, `..` and trailing separator differently, so they follow
-it. A forgotten link fails open, a stale one only costs one `lstat` on a
-path that would be refused: so nothing is forgotten ahead of the disk, and
-the patch adds a link before its native call, not after.
+**The index is asked about the path as the OS gets it — on Windows as
+`node:fs` resolves it first, a drive-relative or root-relative one
+included; on POSIX as given — name by name, each name before a `..` after
+it applies (`LinkIndex.crosses`), without case on Windows and macOS; a
+call that does not follow its last name — `lstat`, `readlink`, the `l*`
+forms, `unlink`, `rmdir`, `rm`, `rename`, the path a `symlink` makes —
+leaves that name out (`own`), but not with a trailing separator, `.` or
+`..` after it. A path through a known link asks the disk once (`lstat`,
+`#still`): a link there refuses it, a directory or a file there drops the
+link, and nothing there lets the path through and keeps the link; a
+directory with no known link below ends the check.** _Why:_ POSIX resolves
+`link/..` through the link, and the platforms resolve a last name's `.`,
+`..` and trailing separator differently, so they follow it. A key built
+from the path as given missed the OS's own reading of it (`C:d\jro\…`,
+`\Users\…\jro\…`). The patch adds a link before its native call, not
+after — so a check that finds nothing there may be looking at a link the
+call is still making, and forgetting it then lost it for good. A link
+removed and not replaced therefore stays known: memory, and one `lstat`
+for a path through its name.
 
 **Every thread keeps its own index: a worker's comes in its snapshot, and
 a link one thread makes or moves through the patch reaches the others as
@@ -899,11 +908,14 @@ the message comes, and a rename there — or from outside a `'deny'` place
 into one — reads the links below its source from disk
 (`linksBelowSync`).** _Why:_ a worker's kernel never runs `initialize()`,
 so it knew no link; and a message alone left a window in which a link one
-thread had made — its call returned — passed in another. A guarantee of
-the patch holds in every thread of the process from the moment the call
-starts. The counter costs one `Atomics.load` per asked route; the disk is
-asked only inside the window. What is forgotten is not sent: each thread
-drops what it finds gone.
+thread had made — its call returned — passed in another. A link made
+through the patch is known in every thread of the process from the moment
+the call starts; a call not ordered after it may still find nothing there,
+as a proof per call may. The counter costs one `Atomics.load` per asked
+route; the disk is asked only inside the window. A closed kernel counts
+nothing, and a worker kernel without a port keeps a count of its own —
+it hears of no link, and would otherwise ask the disk for good. Nothing
+dropped is sent: each thread drops what it finds replaced.
 
 **With `links: 'verify'` the kernel's route API asks the disk where the
 path really lies before it hands the route on (`VfsKernel#proven`,
@@ -1583,6 +1595,8 @@ workers call `attach()`.** _Why:_ preloads do not run in worker threads.
 | A `realpath` proof on every place's disk, always (the only mode)                                                | tens of µs a call on Windows against what only a link can do      |
 | `links: 'allow'`                                                                                                | no scenario needs a link followed unchecked under strict          |
 | Forgetting a link when the patch unlinks or renames it                                                          | a call that fails leaves a live link unknown                      |
+| Forgetting a known link a check finds missing, or a watcher event names gone                                    | one the patch was still making was lost for good                  |
+| The index asked about a Windows path as given                                                                   | `C:d\…`, `\Users\…`: node:fs resolves them, the keys did not      |
 | An index kept by the main kernel alone                                                                          | a worker's kernel never initializes: it would know no link        |
 | `vfs-links` messages alone between threads                                                                      | a link made in one thread passed in another until its message     |
 | Walking every renamed directory for its links                                                                   | a rename's cost would grow with its tree; the index knows them    |
@@ -1732,14 +1746,15 @@ workers call `attach()`.** _Why:_ preloads do not run in worker threads.
   real spelling, or on a drive that names a share or `appRoot`'s line,
   reaches neither `node:fs` nor Node's loader.
 - Under strict no native call on a place's disk — through the patch, the
-  facade or the load hook — runs through a link the kernel knows
-  (`links: 'deny'`; in every thread, from the moment the patched call that
-  made it starts), or before the disk has said its path really lies in the
-  place's directory or off `appRoot`'s line (`'verify'`); a recursive
-  listing there enters no link, and no native recursive copy walks it.
+  facade or the load hook — runs through a link the kernel knows and finds
+  there (`links: 'deny'`; known in every thread from the moment the
+  patched call that makes it starts), or before the disk has said its path
+  really lies in the place's directory or off `appRoot`'s line
+  (`'verify'`); a recursive listing there enters no link, and no native
+  recursive copy walks it.
 - The index of links forgets nothing ahead of the disk: a link leaves it
-  only once a path through it finds it gone, or an event of the watcher
-  names its path gone.
+  only once a check finds a directory or a file in its place. A place's
+  own directory is never in it.
 - Under strict the patch makes no link, symbolic or hard, to managed
   territory.
 
