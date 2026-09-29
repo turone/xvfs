@@ -1,17 +1,23 @@
 # Use cases and alternatives
 
-xvfs gives a Node.js process **one copy of the files its
-`worker_threads` serve** — static assets, templates, configuration,
-handler sources, modules — under the real paths the application already
-uses, with every change published to every thread at once.
-`SharedArrayBuffer` is the mechanism. The subject is how many copies of a
-file a process holds, which work on it is done once, and how every thread
-comes to serve the same version at the same moment.
+xvfs puts the files a Node.js process reads, runs and generates into
+**places** over the real paths the application already uses, and
+publishes their content through one pipeline — prepared once, compiled
+and compressed once, committed atomically with a version. Where a place
+keeps its bytes is its own choice: **one copy for every `worker_threads`
+thread** in `SharedArrayBuffer` (`sab`), each thread's own memory (`map`),
+a single executable's assets (`sea`), or the disk under the place's policy
+(`disk`, `node-default`). So is where its content comes from: the disk,
+scanned and watched, or the application itself (`virtual`). The subject is
+how many copies of a file a process holds, which work on it is done once,
+how every thread comes to serve the same version at the same moment — and
+what the application may reach, declared in one place.
 
-This page says what the library does, where it fits in production, what it
-leaves out on purpose, and how it compares with its neighbours. Figures are
-quoted from [benchmarks.md](benchmarks.md): one machine, one revision, the
-method described there.
+This page says what the library does, where it fits in production —
+content shared across workers, worker-local and generated content,
+packaging and control — what it leaves out on purpose, and how it compares
+with its neighbours. Figures are quoted from [benchmarks.md](benchmarks.md):
+one machine, one revision, the method described there.
 
 Contents: [What it does](#what-it-does) ·
 [What it does not do](#what-it-does-not-do) ·
@@ -120,16 +126,21 @@ space, a workspace of one worker. Both keep a filesystem's hierarchy
 same pipeline. → README [Providers](../README.md#providers),
 [Map provider](../README.md#map-provider).
 
-**`strict` as an access policy; `fs.fallback`.** `strict: true` makes
-`appRoot` the routing boundary: a path under it that no place owns is
+**`strict` as an access policy; `fs.fallback`; `links`.** `strict: true`
+makes `appRoot` the routing boundary: a path under it that no place owns is
 `EACCES` before the disk is touched, `readdir(appRoot)` lists the places,
-and `require` and `import` follow the same rule. `fs.fallback: 'disk'` lets
-a disk-origin place serve from disk what its cache filters do not select —
-html and js from memory, media from disk — inside that place only. Both
-are routing policies for code that goes through `node:fs` and the module
-hooks, not isolation of untrusted code. → README
+and `require` and `import` follow the same rule. What stays reachable is
+what the config declares: which places, which of them writable,
+`fs.fallback: 'disk'` to let a disk-origin place serve from disk what its
+cache filters do not select — html and js from memory, media from disk —
+inside that place only, and `links` to refuse a path through a link on a
+place's disk (`'deny'`, the links the kernel knows) or through one into
+managed territory (`'verify'`, a proof per call). These are routing
+policies for code that goes through `node:fs` and the module hooks, not
+isolation of untrusted code. → README
 [Strict routing](../README.md#strict-routing),
-[Partial disk cache](../README.md#partial-disk-cache-fsfallback).
+[Partial disk cache](../README.md#partial-disk-cache-fsfallback),
+[Links on a place's disk](../README.md#links-on-a-places-disk-links).
 
 **SEA assets.** `provider: 'sea'` loads the `node:sea` assets under
 `<name>/…` into the pool at `initialize()`, then behaves as a `sab` place:
@@ -192,10 +203,11 @@ The contract is narrow on purpose ([architecture.md → Purpose](architecture.md
 - **No module-cache invalidation.** Replacing a source publishes new bytes;
   a module already loaded stays loaded until the application deletes it
   from `require.cache`. Node offers no API to evict an ES module instance.
-- **No change events.** A thread reads what is published when it reads;
-  nothing tells the application that a key changed, and `fs.watch` of
-  managed territory is `ENOTSUP`. `stat(key)` (55 ns) shows a new version's
-  `mtimeMs` and `size`.
+- **No `fs.watch` of managed territory.** A thread reads what is published
+  when it reads; `kernel.on('publish')` tells each thread which keys a
+  publication of a shared place changed, but `fs.watch` of managed
+  territory is `ENOTSUP`, and a `map` place announces nothing (TASKS.md).
+  `stat(key)` (55 ns) shows a new version's `mtimeMs` and `size`.
 - **One process.** A `SharedArrayBuffer` is shared between the threads of
   one process; `cluster` and `child_process` get nothing from it.
 - **No persistence, no eviction.** Virtual content lives as long as the
@@ -214,6 +226,21 @@ The contract is narrow on purpose ([architecture.md → Purpose](architecture.md
 
 Each scenario names what to configure, what it gives over the usual way,
 and what stays the application's job.
+
+- Content shared across workers (`sab`):
+  [static assets and templates](#static-assets-and-server-side-templates-in-a-worker-pool),
+  [an application cache](#an-application-cache-configuration-i18n-feature-flags-reference-data),
+  [hot reload](#hot-reload-of-content-and-handlers-without-a-restart),
+  [shared module bytecode](#shared-module-bytecode),
+  [preprocessing at publication](#preprocessing-at-publication).
+- Worker-local and generated content (`map`, `virtual`):
+  [worker-local workspaces](#worker-local-workspaces),
+  [agent, plugin and tenant environments](#agent-plugin-and-tenant-environments),
+  [plugin code generated at run time](#plugin-code-generated-at-run-time),
+  [virtual-only deployments and test fixtures](#virtual-only-deployments-and-test-fixtures).
+- Packaging and control:
+  [SEA assets for many workers](#sea-assets-for-many-workers),
+  [file access an application can review](#file-access-an-application-can-review).
 
 ### Static assets and server-side templates in a worker pool
 
@@ -364,23 +391,86 @@ and copies of a prepared virtual key are `ENOTSUP`; the result must fit
 places. → README [Preparation](../README.md#preparation-prepare),
 [integration.md → Preparing sources](integration.md#preparing-sources).
 
-### SEA assets for many workers
+### Worker-local workspaces
 
-A single executable bundles its assets; `sea.getAsset()` returns a copy
-per call, in the thread that calls it. `provider: 'sea'` copies each asset
-once into the pool at `initialize()`; the workers project them zero-copy
-and get the same `PlaceFs` API, leases, representations and cached data as
-a directory would give. The same server runs with `provider: 'sab'` from a
-directory in development. Node's own `useVfs` mounts the assets read-only
-under `node:fs`, excludes `useCodeCache` and `useSnapshot`, and describes
-no sharing across threads.
+A `map + virtual` place is each thread's own filesystem under a real
+path. A worker that runs a session, a job or an agent keeps its files
+there — drafts, intermediate results, the code it generates — and writes
+them synchronously through `PlaceFs` or the patched `node:fs`, with a
+filesystem's hierarchy (`ENOTDIR`, `EISDIR`), listings, streams,
+`writeFiles` for a set, and `require()` or `import` of what it wrote. The
+same place in another worker is another filesystem.
 
-**Not covered:** building the executable; the assets are read-only
-(`EROFS`) and have no watcher; the main script is not served from the
-place; each asset must fit `maxFileSize`; outside a SEA build the place is
-empty and logs a warning. →
-[examples/sea-static/](../examples/sea-static/),
-[integration.md → SEA bundling](integration.md#single-executable-application-bundling).
+```js
+places: {
+  workspace: {
+    provider: 'map',
+    origin: 'virtual',
+    fs: { writable: true },
+    require: true,
+  },
+}
+// in a worker
+kernel.fs('workspace').writeFile('/plan.md', text);
+fs.readFileSync(path.join(appRoot, 'workspace', 'plan.md'), 'utf8');
+```
+
+**Against the usual way** — a temporary directory per worker
+(`fs.mkdtemp`) or an in-memory filesystem library: the paths the code
+already uses, in memory (a lease ~45 ns, a 1 KiB copy ~280 ns, where the
+syscalls of a 1 KiB read take 18.6 µs), nothing on disk to remove after a
+crash, the preparation and compilation of shipped code, and under
+`strict` nothing outside the declared places.
+
+**Not covered:** persistence — the content lives as long as its thread;
+sharing — a `sab + virtual` place is for what every thread reads;
+versions shared across threads and `'publish'` events of `map` places
+(TASKS.md); isolation between workers beyond the data flow — they share a
+process. → README [Map provider](../README.md#map-provider),
+[integration.md → AI agent / plugin workspace](integration.md#ai-agent--plugin-workspace).
+
+### Agent, plugin and tenant environments
+
+Places combine into an environment one config describes: the tools and
+libraries an agent or a plugin may call as a read-only `sab` place with
+`require.compile` — one copy, shared bytecode; its workspace as a
+`map + virtual` place in its worker; the code it generates loaded from
+there with `require()`; a tenant's state in a place of its own; and
+`strict: true`, so the rest of `appRoot` is `EACCES`, the tools cannot be
+written through `node:fs`, and `links: 'deny'` keeps a link in a writable
+place from leading elsewhere (`'verify'` where other processes write into
+it).
+
+```js
+defaults: { strict: true },
+places: {
+  tools: { fs: { ext: ['js'] }, require: { ext: ['js'], compile: true } },
+  workspace: {
+    provider: 'map',
+    origin: 'virtual',
+    fs: { writable: true },
+    require: true,
+  },
+}
+```
+
+**Against the usual way** — a working directory per agent on disk, with
+path checks written into the application: what exists, what is writable
+and what is refused is declared once and enforced for every `node:fs`
+call and module load, in its sync, callback and promise forms, before any
+native I/O; generated code goes through the prepare, compile and publish
+stages of shipped code, and a failed preparation keeps the last good
+version.
+
+**Not covered:** isolation. An agent's or a plugin's code runs in the
+process with the application's privileges: `strict` refuses paths, not
+capabilities — a native addon, a child process, `process.binding` or a
+`node:fs` function taken before the patch reach the OS directly — the
+threads of one process share its memory, and tenants in one process can
+reach each other's places. Untrusted code needs an OS boundary — a
+process, a container — around it; xvfs keeps what runs inside it orderly.
+→ [examples/multi-tenant/](../examples/multi-tenant/),
+[examples/hot-reload-routes/](../examples/hot-reload-routes/).
 
 ### Plugin code generated at run time
 
@@ -404,6 +494,82 @@ worker's writes into its `map` places need `attach({ preparers })` when the
 extension has a preparer. →
 [examples/multi-tenant/](../examples/multi-tenant/),
 [integration.md → AI agent / plugin workspace](integration.md#ai-agent--plugin-workspace).
+
+### Virtual-only deployments and test fixtures
+
+Places with `origin: 'virtual'` only: the content is what the application
+writes at start and on change — pulled from a database, an object store or
+a build service, rendered from templates — and none of it is a file. A
+`sab + virtual` place serves it to every worker from one copy;
+`writeFiles` publishes a related set in one commit; `version` and
+`kernel.on('publish')` tell every thread what changed. In tests the same
+places are fixtures without a temporary directory: write what a test
+needs, run the code under test against its real paths, `close()`.
+
+**Against the usual way** — writing the content into a directory at start
+and serving it from there: no disk writes and no files left from a
+previous run, a related set never half-updated, the same version in every
+thread at the same moment, and nothing on disk for another process to
+change underneath.
+
+**Not covered:** persistence and replication — the source of truth stays
+where it is, and the application fills the places again after a restart;
+the content must fit `memory.limit`; `sab + virtual` writes are
+asynchronous (`*Sync` forms are `ENOTSUP`). →
+[integration.md → Testing with virtual fixtures](integration.md#testing-with-virtual-fixtures),
+[examples/async-worker/](../examples/async-worker/).
+
+### SEA assets for many workers
+
+A single executable bundles its assets; `sea.getAsset()` returns a copy
+per call, in the thread that calls it. `provider: 'sea'` copies each asset
+once into the pool at `initialize()`; the workers project them zero-copy
+and get the same `PlaceFs` API, leases, representations and cached data as
+a directory would give. The same server runs with `provider: 'sab'` from a
+directory in development. Node's own `useVfs` mounts the assets read-only
+under `node:fs`, excludes `useCodeCache` and `useSnapshot`, and describes
+no sharing across threads.
+
+**Not covered:** building the executable; the assets are read-only
+(`EROFS`) and have no watcher; the main script is not served from the
+place; each asset must fit `maxFileSize`; outside a SEA build the place is
+empty and logs a warning. →
+[examples/sea-static/](../examples/sea-static/),
+[integration.md → SEA bundling](integration.md#single-executable-application-bundling).
+
+### File access an application can review
+
+`strict: true` and a config that names every place the application needs.
+Under `appRoot` whatever is not declared is `EACCES` at every depth,
+before the disk is touched; `readdir(appRoot)` lists the places; `require`
+and `import` follow the same rule; a read-only place stays read-only
+through every `node:fs` form; `fs.fallback: 'deny'` serves published
+content only; `links` refuses a path through a link on a place's disk;
+and on Windows the spellings that could name the same file another way —
+UNC and `\\?\` paths, NTFS streams, 8.3 short names — are refused. The
+config is the list of what the application may touch there;
+`kernel.diagnostics()` shows what it holds.
+
+```js
+defaults: { strict: true },
+places: {
+  public: { fs: { ext: ['html', 'css', 'js'] } }, // read-only, from memory
+  uploads: { provider: 'disk', fs: { writable: true }, links: 'verify' },
+}
+```
+
+**Against the usual way** — path checks spread through the application
+and its dependencies, each with its own idea of `..`, case and links: one
+declaration, enforced for every call of the patched `node:fs` and every
+module load, in sync, callback and promise forms alike, refused before any
+native I/O, the same answer in every thread.
+
+**Not covered:** it is a routing policy, not a sandbox or a security
+boundary. Paths outside `appRoot` are ordinary Node; a link that already
+leads into `appRoot` from outside it, a link another process makes before
+the watcher reports it (with `links: 'deny'`), native addons, child
+processes and code that took `node:fs` before the patch are not covered.
+→ README [Strict routing](../README.md#strict-routing).
 
 ### A read-through cache in front of Redis or a database (deferred idea)
 
@@ -455,6 +621,7 @@ The library's own costs
 | figure                                            |                                 value |
 | ------------------------------------------------- | ------------------------------------: |
 | lease (`readFileView`), any size                  |                               ~100 ns |
+| the same from a `map` place                       |                                ~45 ns |
 | `readFile` copy, 1 KiB / 8 MiB                    |                       374 ns / 1.3 ms |
 | `readFileSync` from the page cache, 1 KiB / 8 MiB |                      18.6 µs / 1.7 ms |
 | `stat` / `exists` / `readdir` of 100 entries      |                 55 ns / 18 ns / 51 µs |
@@ -712,18 +879,20 @@ own module graph and `node_modules`, the library for the published places.
 
 ## When not to use it
 
-- **One thread, or many processes.** A single-threaded server has nothing
-  to share; `cluster` and `child_process` do not share memory. Then
-  `node:fs`, a cache per process, or Node's compile cache.
+- **Sharing, with one thread or many processes.** A single-threaded
+  server has no copies to share, and `cluster` and `child_process` do not
+  share memory: for that alone, `node:fs`, a cache per process, or Node's
+  compile cache. Virtual and `map` places, preparation and strict routing
+  work in one thread as in many.
 - **The full `node:fs` contract.** Descriptors, `watch`, symlinks,
   recursive operations over managed trees, `node_modules` from memory,
   native addons: `node:vfs`, memfs, or the disk.
 - **Isolation of untrusted code.** Nothing here is a security boundary;
   processes, users, containers are.
-- **Data that is written more than read**, request-scoped state, or
-  anything larger than memory: a publication is a write into shared memory
-  (~20 µs for 64 KiB), one key at a time, ACKed by every worker; the pool
-  holds everything it has published.
+- **Shared data that is written more than read**, request-scoped state, or
+  anything larger than memory: a publication into a `sab` place is a write
+  into shared memory (~20 µs for 64 KiB), a key or a `writeFiles` set at a
+  time, ACKed by every worker; the pool holds everything it has published.
 - **State shared across processes or machines**, or that must survive the
   process: Redis, memcached, a database.
 - **ESM bytecode**: Node's compile cache covers it; the library does not.
