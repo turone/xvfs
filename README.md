@@ -668,31 +668,43 @@ with no directory; there is no mode that lets links through.
 **`'deny'` (the default) refuses the links the kernel knows.**
 
 - `initialize()` walks each such place's directory — `readdir` only,
-  entering no link — and indexes every link below it. The kernel's
-  watcher keeps the index where one runs (`watch: true`, a disk-origin
-  place): a link that appears, a directory moved in with links, a path
-  gone. The patched `node:fs` keeps it too: a `symlink` made in the place,
-  a `rename` that moves a link or a directory holding some, within the
-  place or into it from outside.
+  entering no link; the scan of a disk-origin place does it — and indexes
+  every link below it. The kernel's watcher keeps the index where one
+  runs (`watch: true`, a disk-origin place): a link that appears, a
+  directory moved in with links, a directory or a file where a link was.
+  The patched `node:fs` keeps it too: a `symlink` made in the place, a
+  `rename` that moves a link or a directory holding some, within the place
+  or into it from outside. The place's own directory is never a known
+  link: it may be a link out of `appRoot` (below).
 - A call whose path passes through a known link — wherever it leads, the
   place itself included — is `EACCES` before any native I/O: reading,
   writing, listing, creating, copying or renaming through it, and, for the
   module loader, a module behind it. `..` after a link is through it, as
   the OS resolves it on POSIX. A call that names the link itself does not
   follow it and proceeds: `lstat`, `readlink`, `lutimes`, `lchmod`,
-  `lchown`, `unlink`, `rm`, `rename`.
+  `lchown`, `unlink`, `rmdir`, `rm`, `rename`. The path is read as
+  `node:fs` hands it to the OS — on Windows resolved first, a
+  drive-relative or root-relative one included — and names compare
+  without case on Windows and macOS, as their file systems do by default
+  (a case-sensitive volume there only refuses more).
 - An ordinary path costs a few lookups in memory — no disk call, no
-  `realpath`. A known link found gone (removed, renamed, replaced by a
-  directory) is dropped the first time a path through it is checked, at
-  the cost of one `lstat`.
+  `realpath`. A path through a known link costs one `lstat`: a link there
+  is refused; a directory or a file there drops it from the index; nothing
+  there lets the path through and keeps it known — the patch may be making
+  it still. So a link removed and not replaced stays known, a cost of
+  memory only (`diagnostics().strict.known`).
 - Every thread refuses the same links. A worker (`link()`, `attach()`)
   receives the index with its snapshot; a link one thread makes or moves
   through the patch reaches the others as a `vfs-links` message, the main
   thread passing a worker's on. A counter in shared memory, raised before
   the native call, tells a thread its index may lack one: until the
   message comes, that thread asks the disk (`lstat`) for each name of a
-  path below the place's directory — so a link made through the patch is
-  refused in every thread from the moment the call that makes it starts.
+  path below the place's directory. So a link made through the patch is
+  known in every thread from the moment the call that makes it starts,
+  and refused wherever it is there; a call that runs while that call is
+  still in flight — not ordered after it — may find nothing there yet and
+  pass, as it may with a proof per call (`'verify'`). A worker kernel made
+  from a snapshot without a port hears of no link after it.
 - **Not guaranteed:** a link made past the patch — by another process, a
   child process, a native addon, a `node:fs` function captured before the
   patch — is unknown until the watcher reports it, and in a place no
@@ -1110,7 +1122,7 @@ of the call — a frozen plain object, a new one each time:
   },
   strict: {             // null without strict
     links,              // { [place]: 'deny' | 'verify' }, each place with a directory on disk
-    known,              // links the index holds; one found gone is dropped when next crossed
+    known,              // links the index holds, some perhaps removed since (see links)
   },
   queues: {
     watch: { epochs, rechecks }, // watcher epochs queued or running; rechecks waiting
