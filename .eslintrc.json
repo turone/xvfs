@@ -1,4 +1,5 @@
 {
+  "root": true,
   "extends": ["metarhia", "plugin:prettier/recommended"],
   "env": {
     "browser": true,
@@ -13,7 +14,7 @@
     "class-methods-use-this": "off",
     "import/no-unresolved": [
       "error",
-      { "commonjs": true, "ignore": ["^shared-memory-fs(/|$)"] }
+      { "commonjs": true, "ignore": ["^xvfs(/|$)"] }
     ]
   },
   "overrides": [

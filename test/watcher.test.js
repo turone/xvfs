@@ -5,6 +5,7 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
 const { bytecodeKey, compressedKey } = require('../lib/companion.js');
+const { IO_LIMIT } = require('../lib/pool.js');
 const fsPatch = require('../lib/adapters/fs-patch.js');
 const {
   tmpDir,
@@ -15,6 +16,8 @@ const {
   tap,
   quiet,
   nextMessage,
+  diskCalls,
+  within,
 } = require('./helpers.js');
 
 // The disk behind the patch, captured before any install. Not rmSync: on
@@ -115,18 +118,25 @@ describe('watcher pipeline', () => {
     for (const m of msgs.slice(n)) k.handleAck(m.updateId, w.id);
   });
 
+  // The tests below read the updates the port delivers, so they wait for
+  // those, not for the projection: #flush applies an update to the main
+  // thread's projection before it posts it, and the port delivers it later.
+
   it('syntax error: source published, stale bytecode removed in the same message', async () => {
     const n = msgs.length;
-    fs.writeFileSync(at('a.js'), 'module.exports = (;');
-    await until(
-      () => site.readFile('/a.js', 'utf8') === 'module.exports = (;',
-      4000,
-    );
-    const msg = msgs
-      .slice(n)
-      .findLast((m) => m.places.site.entries.some(([key]) => key === '/a.js'));
-    assert.ok(msg.places.site.entries.some(([key]) => key === '/a.js'));
+    const source = 'module.exports = (;';
+    fs.writeFileSync(at('a.js'), source);
+    // The update of this source: the first to carry it — an epoch that
+    // publishes it again (one more event) removes nothing.
+    const publishes = (m) =>
+      m.places.site?.entries.some(
+        ([key, entry]) => key === '/a.js' && entry.stat.size === source.length,
+      );
+    const arrived = await until(() => msgs.slice(n).some(publishes), 4000);
+    assert.ok(arrived, 'the update of /a.js arrived');
+    const msg = msgs.slice(n).find(publishes);
     assert.ok(msg.places.site.removals.includes(bytecodeKey('/a.js')));
+    assert.equal(site.readFile('/a.js', 'utf8'), source);
     assert.ok(!place().files.has(bytecodeKey('/a.js')));
     assert.deepEqual(site.storedEncodings('/a.js'), ['raw', 'gzip']);
     for (const m of msgs.slice(n)) k.handleAck(m.updateId, w.id);
@@ -135,11 +145,25 @@ describe('watcher pipeline', () => {
   it('deleting a directory removes sources and companions in one message', async () => {
     const n = msgs.length;
     fs.rmSync(at('mod'), { recursive: true });
-    await until(() => !site.exists('/mod'), 4000);
-    const removals = msgs.slice(n).flatMap((m) => m.places.site.removals);
-    assert.ok(removals.includes('/mod/deep/x.js'));
-    assert.ok(removals.includes(bytecodeKey('/mod/deep/x.js')));
-    assert.ok(removals.includes(compressedKey('/mod/y.html', 'gzip')));
+    // Each source, and the message that removes it.
+    const removing = (key) =>
+      msgs.slice(n).find((m) => m.places.site?.removals.includes(key));
+    const sources = ['/mod/deep/x.js', '/mod/y.html'];
+    const arrived = await until(() => sources.every(removing), 4000);
+    assert.ok(arrived, 'the removals of both sources arrived');
+    const companions = {
+      '/mod/deep/x.js': [
+        bytecodeKey('/mod/deep/x.js'),
+        compressedKey('/mod/deep/x.js', 'gzip'),
+      ],
+      '/mod/y.html': [compressedKey('/mod/y.html', 'gzip')],
+    };
+    for (const source of sources) {
+      const { removals } = removing(source).places.site;
+      for (const companion of companions[source]) {
+        assert.ok(removals.includes(companion), `${companion} with ${source}`);
+      }
+    }
     assert.ok(!place().files.has(bytecodeKey('/mod/deep/x.js')));
     assert.deepEqual(site.readdir('/'), ['a.js', 'page.html']);
     for (const m of msgs.slice(n)) k.handleAck(m.updateId, w.id);
@@ -357,7 +381,7 @@ describe('watcher: epoch ordering', () => {
     try {
       ctx.gateFirst(false);
       ctx.change();
-      await entered.promise;
+      await within(entered.promise, 'epoch A at its gate');
       fs.writeFileSync(abs, 'NEW2');
       ctx.change();
       assert.equal(k.watchQueue.size, 2, 'B is queued behind A');
@@ -365,7 +389,7 @@ describe('watcher: epoch ordering', () => {
       assert.equal(ctx.published(), 0, 'nothing published yet');
       assert.equal(ctx.read(), 'OLD1');
       gate.resolve();
-      await k.watchQueue.idle;
+      await within(k.watchQueue.idle, 'epochs A and B');
       assert.equal(reads.length, 2);
       assert.equal(ctx.published(), 2, 'A then B, one update each');
       assert.equal(ctx.read(), 'NEW2');
@@ -382,12 +406,12 @@ describe('watcher: epoch ordering', () => {
     try {
       ctx.gateFirst(true);
       ctx.change();
-      await entered.promise;
+      await within(entered.promise, 'epoch A at its gate');
       fs.writeFileSync(abs, 'NEW2');
       ctx.change();
       assert.equal(k.watchQueue.size, 2);
       gate.resolve();
-      await k.watchQueue.idle;
+      await within(k.watchQueue.idle, 'epochs A and B');
       assert.equal(ctx.published(), 1, 'only B published');
       assert.equal(ctx.read(), 'NEW2');
       assert.ok(warnings.some((w) => /not published/.test(w)));
@@ -412,18 +436,263 @@ describe('watcher: epoch ordering', () => {
     try {
       ctx.gateFirst(false);
       ctx.change();
-      await entered.promise;
+      await within(entered.promise, 'epoch A at its gate');
       fs.writeFileSync(abs, 'NEW2');
       ctx.change();
       const idle = k.watchQueue.idle;
       k.close();
       gate.resolve();
-      await idle;
+      await within(idle, 'epochs A and B');
       assert.equal(commits, 0, 'neither A nor B was committed');
       assert.equal(k.watchQueue.size, 0);
       assert.deepEqual(errors, [], 'a closed kernel stays quiet');
     } finally {
       ctx.done();
+    }
+  });
+});
+
+// The jobs of one epoch run IO_LIMIT (16) at a time: a whole checkout at
+// once would hold a descriptor per file (EMFILE). A read, once it has read
+// its file, waits at a gate the test opens, so how many run at once is
+// decided by the epoch alone; it still commits as one update. Epochs are
+// emitted by hand, as above. A bound other than 16 fails within seconds and
+// never hangs: the waits for the gate have a deadline, and the gate opens
+// in `finally`.
+describe('watcher: a bounded epoch', () => {
+  const setup = async (count, console = quiet) => {
+    const files = {};
+    for (let i = 0; i < count; i++) files[`site/d${i % 4}/f${i}.txt`] = 'v1';
+    const root = writeTree(tmpDir('watch-bounded'), files);
+    const k = await kernel(
+      root,
+      { site: { fs: true } },
+      { watch: true, watchTimeout: 60000 },
+      { console },
+    );
+    // Epochs by hand only: the fs.watch handles are closed, so no event of
+    // their own stats a path.
+    k.watcher.close();
+    const t = tap(k);
+    const at = (rel) => path.join(root, rel);
+    const real = k.cache.reader;
+    // Reads that reached the gate, done with the disk, those waiting at it,
+    // those not done yet (`now`), and the most of those at once.
+    const reads = { arrived: 0, waiting: [], now: 0, peak: 0, open: false };
+    k.cache.reader = async (file, view) => {
+      reads.peak = Math.max(reads.peak, ++reads.now);
+      try {
+        await real(file, view);
+        reads.arrived++;
+        if (!reads.open) {
+          await new Promise((resolve) => reads.waiting.push(resolve));
+        }
+      } finally {
+        reads.now--;
+      }
+    };
+    // Once `count` reads have reached the gate; a bound that never lets
+    // them fails after a deadline.
+    const arrived = async (count) => {
+      const reached = await until(() => reads.arrived >= count, 4000, 5);
+      assert.ok(reached, `${reads.arrived} of ${count} reads at the gate`);
+    };
+    // Lets the reads at the gate through; the gate holds the next ones.
+    const release = () => {
+      for (const go of reads.waiting.splice(0)) go();
+    };
+    const open = () => {
+      reads.open = true;
+      release();
+    };
+    const done = async () => {
+      open();
+      try {
+        await within(k.watchQueue.idle, 'the epoch, its gate open');
+      } finally {
+        k.close();
+        rm(root);
+      }
+    };
+    const rels = Object.keys(files);
+    return { k, t, at, rels, reads, arrived, release, open, done };
+  };
+
+  it('reads at most 16 files at a time and publishes all in one update', async () => {
+    const { k, t, at, rels, reads, arrived, release, done } = await setup(40);
+    try {
+      const events = new Map();
+      for (const rel of rels) {
+        fs.writeFileSync(at(rel), `v2 ${rel}`);
+        events.set(at(rel), 'change');
+      }
+      const first = k.nextUpdateId;
+      const delivered = nextMessage(t.port);
+      k.watcher.emit('epoch', events);
+      // Waves of 16, 16 and 8: a wave reaches the gate and no read joins it
+      // until it is let through; each read that ends lets the next job in,
+      // while the reads of the wave before may still run.
+      for (let passed = 0; passed < rels.length; passed += IO_LIMIT) {
+        const wave = Math.min(IO_LIMIT, rels.length - passed);
+        await arrived(passed + wave);
+        assert.equal(reads.waiting.length, wave, 'the rest wait for a slot');
+        assert.ok(reads.now <= IO_LIMIT, `${reads.now} reads at once`);
+        release();
+      }
+      await within(k.watchQueue.idle, 'the epoch');
+      assert.equal(reads.peak, 16, 'never more than 16 reads at once');
+      assert.equal(reads.arrived, rels.length, 'every file read once');
+      assert.equal(k.nextUpdateId - first, 1, 'one update');
+      await delivered;
+      const [update] = t.updates();
+      const keys = rels.map((rel) => rel.slice('site'.length));
+      assert.deepEqual(
+        update.places.site.entries.map(([key]) => key).sort(),
+        keys.sort(),
+      );
+      const site = k.fs('site');
+      for (const key of keys) {
+        assert.equal(site.readFile(key, 'utf8'), `v2 site${key}`);
+      }
+    } finally {
+      await done();
+    }
+  });
+
+  // A job that started would make a disk call: the delete stats its path.
+  it('close() starts none of the jobs still waiting for a slot', async () => {
+    const errors = [];
+    const log = (m) => errors.push(m);
+    const capture = { ...quiet, warn: log, error: log };
+    const { k, at, rels, reads, arrived, open, done } = await setup(
+      IO_LIMIT + 1,
+      capture,
+    );
+    let calls = null;
+    try {
+      // IO_LIMIT reads fill the pool; the delete of a gone file waits behind.
+      const [gone, ...changed] = rels;
+      fs.unlinkSync(at(gone));
+      const events = new Map(changed.map((rel) => [at(rel), 'change']));
+      events.set(at(gone), 'delete');
+      const first = k.nextUpdateId;
+      k.watcher.emit('epoch', events);
+      await arrived(IO_LIMIT);
+      // The reads at the gate are done with the disk; nothing else runs.
+      calls = diskCalls();
+      const idle = k.watchQueue.idle;
+      k.close();
+      open();
+      await within(idle, 'the epoch, closed');
+      assert.equal(calls.count, 0, 'no disk call after close()');
+      assert.equal(reads.arrived, IO_LIMIT, 'no read after close()');
+      assert.equal(k.nextUpdateId, first, 'nothing published');
+      assert.deepEqual(errors, [], 'nothing logged');
+    } finally {
+      calls?.stop();
+      await done();
+    }
+  });
+});
+
+// A job still running when close() is called resumes over a closed kernel:
+// it returns without work or log. The disk call it waits for finishes; none
+// starts after close(), counted by async_hooks whatever function makes it.
+// Epochs by hand; the fs.watch handles are closed, so nothing else runs.
+describe('watcher: a job in flight at close()', () => {
+  it('returns without work or log', async () => {
+    const root = writeTree(tmpDir('watch-inflight'), {
+      'site/d/a.txt': 'a',
+      'site/d/sub/b.txt': 'b',
+      'site/moved/c.txt': 'c',
+    });
+    const logs = [];
+    const log = (m) => logs.push(m);
+    const k = await kernel(
+      root,
+      { site: { fs: true } },
+      { watch: true, watchTimeout: 60000 },
+      { console: { ...quiet, warn: log, error: log } },
+    );
+    k.watcher.close();
+    const calls = diskCalls();
+    try {
+      const at = (...p) => path.join(root, 'site', ...p);
+      // Four jobs, each at its first disk call when the kernel closes: the
+      // delete of a gone file and the change of one (a stat, then the
+      // unpublish of their keys), the delete of what is a directory now (a
+      // stat, then a rescan) and a rescan (its walk, a readdir).
+      const events = new Map([
+        [at('gone.txt'), 'delete'],
+        [at('missing.txt'), 'change'],
+        [at('moved'), 'delete'],
+        [at('d'), 'scan'],
+      ]);
+      const first = k.nextUpdateId;
+      k.watcher.emit('epoch', events);
+      await calls.started(4);
+      const idle = k.watchQueue.idle;
+      k.close();
+      const atClose = calls.count;
+      await within(idle, 'the epoch, closed');
+      assert.equal(atClose, 4, 'one disk call in flight per job');
+      assert.equal(calls.count, atClose, 'no disk call after close()');
+      assert.deepEqual(logs, [], 'nothing logged');
+      assert.equal(k.nextUpdateId, first, 'nothing published');
+    } finally {
+      calls.stop();
+      k.close();
+      rm(root);
+    }
+  });
+
+  // The change of a prepared file: its job stats it, then reads it, and the
+  // kernel closes while the read is in flight. The read finishes — its
+  // file handle's stat, read, stat and close — but the preparer, the
+  // application's code, never runs on the closed kernel.
+  it('a read in flight finishes; its preparer never runs', async () => {
+    const root = writeTree(tmpDir('watch-inflight-prep'), {
+      'site/a.txt': 'a',
+    });
+    let closed = false;
+    let prepared = 0; // preparer calls after close()
+    const preparers = {
+      upper: (raw) => {
+        if (closed) prepared++;
+        return raw.toString().toUpperCase();
+      },
+    };
+    const logs = [];
+    const log = (m) => logs.push(m);
+    const k = await kernel(
+      root,
+      { site: { fs: { ext: ['txt'], prepare: 'upper' } } },
+      { watch: true, watchTimeout: 60000 },
+      { preparers, console: { ...quiet, warn: log, error: log } },
+    );
+    k.watcher.close();
+    const at = path.join(root, 'site', 'a.txt');
+    fs.writeFileSync(at, 'b');
+    const calls = diskCalls();
+    try {
+      const first = k.nextUpdateId;
+      k.watcher.emit('epoch', new Map([[at, 'change']]));
+      // Its stat, then the open of its read.
+      await calls.started(2);
+      const idle = k.watchQueue.idle;
+      closed = true;
+      k.close();
+      const atClose = calls.count;
+      await within(idle, 'the epoch, closed');
+      assert.equal(atClose, 2);
+      assert.equal(calls.count - atClose, 4, 'the rest of the read only');
+      assert.equal(prepared, 0, 'no preparer after close()');
+      assert.deepEqual(logs, [], 'nothing logged');
+      assert.equal(k.nextUpdateId, first, 'nothing published');
+    } finally {
+      calls.stop();
+      k.close();
+      rm(root);
     }
   });
 });
@@ -488,32 +757,142 @@ describe('watcher: unstable source', () => {
       { site: { fs: true } },
       { watch: true, watchTimeout: 60 },
     );
-    const site = k.fs('site');
-    const realOpen = k.cache.reader;
-    k.cache.reader = async (file, view) => {
-      if (
-        file.path.endsWith(`${path.sep}a.txt`) ||
-        file.path.endsWith('/a.txt')
-      ) {
+    try {
+      const site = k.fs('site');
+      const realOpen = k.cache.reader;
+      k.cache.reader = async (file, view) => {
+        if (
+          file.path.endsWith(`${path.sep}a.txt`) ||
+          file.path.endsWith('/a.txt')
+        ) {
+          throw new Error('source changed during read');
+        }
+        return realOpen(file, view);
+      };
+      fs.writeFileSync(path.join(root, 'site', 'a.txt'), 'a2');
+      fs.writeFileSync(path.join(root, 'site', 'b.txt'), 'b2');
+      await until(() => site.readFile('/b.txt', 'utf8') === 'b2', 4000);
+      assert.equal(
+        site.readFile('/a.txt', 'utf8'),
+        'a1',
+        'failed source retained',
+      );
+      assert.equal(
+        site.readFile('/b.txt', 'utf8'),
+        'b2',
+        'stable sibling published',
+      );
+    } finally {
+      k.close();
+      rm(root);
+    }
+  });
+
+  // A read that fails is rechecked once, after the debounce; when the file
+  // reads consistently then, the recheck publishes it, in one update. The
+  // fs.watch handles are closed: the epoch comes by hand, the recheck from
+  // its own timer.
+  it('a recheck that reads the file publishes it', async () => {
+    const root = writeTree(tmpDir('watch-recheck'), { 'site/a.txt': 'v1' });
+    const k = await kernel(
+      root,
+      { site: { fs: true } },
+      { watch: true, watchTimeout: 30 },
+    );
+    try {
+      k.watcher.close();
+      const site = k.fs('site');
+      const abs = path.join(root, 'site', 'a.txt');
+      fs.writeFileSync(abs, 'v2');
+      const real = k.cache.reader;
+      let attempts = 0;
+      k.cache.reader = async (file, view) => {
+        if (++attempts === 1) throw new Error('source changed during read');
+        return real(file, view);
+      };
+      const first = k.nextUpdateId;
+      k.watcher.emit('epoch', new Map([[abs, 'change']]));
+      await k.watchQueue.idle;
+      assert.equal(site.readFile('/a.txt', 'utf8'), 'v1', 'kept');
+      assert.equal(k.rechecks.size, 1, 'one deferred recheck');
+      const read = () => site.readFile('/a.txt', 'utf8') === 'v2';
+      assert.ok(await until(read, 4000), 'the recheck published it');
+      await k.watchQueue.idle;
+      assert.equal(attempts, 2);
+      assert.equal(k.rechecks.size, 0);
+      assert.equal(k.nextUpdateId - first, 1, 'one update');
+    } finally {
+      k.close();
+      rm(root);
+    }
+  });
+
+  // close() drops a pending recheck along with the kernel.
+  it('close() drops a pending recheck', async () => {
+    const root = writeTree(tmpDir('watch-recheck-close'), {
+      'site/a.txt': 'v1',
+    });
+    const k = await kernel(
+      root,
+      { site: { fs: true } },
+      { watch: true, watchTimeout: 60000 },
+    );
+    try {
+      k.watcher.close();
+      k.cache.reader = async () => {
         throw new Error('source changed during read');
-      }
-      return realOpen(file, view);
-    };
-    fs.writeFileSync(path.join(root, 'site', 'a.txt'), 'a2');
-    fs.writeFileSync(path.join(root, 'site', 'b.txt'), 'b2');
-    await until(() => site.readFile('/b.txt', 'utf8') === 'b2', 4000);
-    assert.equal(
-      site.readFile('/a.txt', 'utf8'),
-      'a1',
-      'failed source retained',
+      };
+      const abs = path.join(root, 'site', 'a.txt');
+      k.watcher.emit('epoch', new Map([[abs, 'change']]));
+      await k.watchQueue.idle;
+      assert.equal(k.rechecks.size, 1, 'one deferred recheck');
+      k.close();
+      assert.equal(k.rechecks.size, 0, 'none left to run');
+    } finally {
+      k.close();
+      rm(root);
+    }
+  });
+});
+
+// A map place of a disk origin keeps a copy of each file of its own, in
+// this thread: read at init through the kernel's reader, replaced by a
+// change and dropped by a delete, the watcher publishing into the place's
+// Map. Epochs by hand; the fs.watch handles are closed.
+describe('watcher: a map + disk place', () => {
+  it('reads its files at init, takes a change and a delete', async () => {
+    const root = writeTree(tmpDir('watch-map'), {
+      'm/a.txt': 'a1',
+      'm/sub/b.txt': 'b1',
+    });
+    const k = await kernel(
+      root,
+      { m: { provider: 'map', fs: true } },
+      { watch: true, watchTimeout: 60000 },
     );
-    assert.equal(
-      site.readFile('/b.txt', 'utf8'),
-      'b2',
-      'stable sibling published',
-    );
-    k.close();
-    rm(root);
+    try {
+      k.watcher.close();
+      const m = k.fs('m');
+      const at = (...p) => path.join(root, 'm', ...p);
+      assert.equal(m.readFile('/a.txt', 'utf8'), 'a1');
+      assert.equal(m.readFile('/sub/b.txt', 'utf8'), 'b1');
+      fs.writeFileSync(at('a.txt'), 'a2');
+      fs.unlinkSync(at('sub', 'b.txt'));
+      k.watcher.emit(
+        'epoch',
+        new Map([
+          [at('a.txt'), 'change'],
+          [at('sub', 'b.txt'), 'delete'],
+        ]),
+      );
+      await k.watchQueue.idle;
+      assert.equal(m.readFile('/a.txt', 'utf8'), 'a2');
+      assert.equal(m.exists('/sub/b.txt'), false);
+      assert.deepEqual([...k.registry.get('m').files.keys()], ['/a.txt']);
+    } finally {
+      k.close();
+      rm(root);
+    }
   });
 });
 
@@ -528,35 +907,39 @@ describe('watcher: linux edge events', () => {
       { site: { fs: true, require: true } },
       { watch: true, watchTimeout: 60 },
     );
-    const site = k.fs('site');
-    const at = (...p) => path.join(root, 'site', ...p);
+    try {
+      const site = k.fs('site');
+      const at = (...p) => path.join(root, 'site', ...p);
 
-    const fd = fs.openSync(at('page.html'), 'w');
-    fs.writeSync(fd, '<p>');
-    fs.writeSync(fd, 'two');
-    fs.writeSync(fd, '</p>');
-    fs.closeSync(fd);
-    await until(
-      () => site.readFile('/page.html', 'utf8') === '<p>two</p>',
-      4000,
-    );
+      const fd = fs.openSync(at('page.html'), 'w');
+      fs.writeSync(fd, '<p>');
+      fs.writeSync(fd, 'two');
+      fs.writeSync(fd, '</p>');
+      fs.closeSync(fd);
+      await until(
+        () => site.readFile('/page.html', 'utf8') === '<p>two</p>',
+        4000,
+      );
 
-    fs.renameSync(at('a.js'), at('z.js'));
-    await until(() => site.exists('/z.js') && !site.exists('/a.js'), 4000);
-    assert.equal(site.readFile('/z.js', 'utf8'), 'module.exports = 1;');
+      fs.renameSync(at('a.js'), at('z.js'));
+      await until(() => site.exists('/z.js') && !site.exists('/a.js'), 4000);
+      assert.equal(site.readFile('/z.js', 'utf8'), 'module.exports = 1;');
 
-    fs.unlinkSync(at('page.html'));
-    fs.writeFileSync(at('page.html'), '<p>new</p>');
-    await until(
-      () => site.readFile('/page.html', 'utf8') === '<p>new</p>',
-      4000,
-    );
+      fs.unlinkSync(at('page.html'));
+      fs.writeFileSync(at('page.html'), '<p>new</p>');
+      await until(
+        () => site.readFile('/page.html', 'utf8') === '<p>new</p>',
+        4000,
+      );
 
-    const handles = k.watcher.watchers.size;
-    assert.ok(handles >= 1);
-    k.close();
-    assert.equal(k.watcher, null);
-    rm(root);
+      const handles = k.watcher.watchers.size;
+      assert.ok(handles >= 1);
+      k.close();
+      assert.equal(k.watcher, null);
+    } finally {
+      k.close();
+      rm(root);
+    }
   });
 });
 

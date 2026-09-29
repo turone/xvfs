@@ -11,7 +11,11 @@ const moduleHook = require('../lib/adapters/module-hook.js');
 const { tmpDir, writeTree, rm, kernel } = require('./helpers.js');
 
 // Disk edits behind the VFS's back: captured before any patch is installed.
-const { writeFileSync: writeDisk } = fs;
+const {
+  writeFileSync: writeDisk,
+  readdirSync: listDisk,
+  mkdirSync: mkdirDisk,
+} = fs;
 
 // Strict appRoot as a managed root, and `fs.fallback` — what a disk-origin
 // place does with a path it does not serve: 'deny' (published canonical
@@ -20,6 +24,10 @@ const { writeFileSync: writeDisk } = fs;
 
 const resolved = (places, defaults) =>
   new VfsConfig({ places, defaults }).places.map((p) => p.fs?.fallback);
+
+// The names of a recursive listing through the patched node:fs: the keys'
+// '/' becomes path.sep, as native node:fs names them.
+const natives = (names) => names.map((name) => name.split('/').join(path.sep));
 
 describe('fs.fallback: config', () => {
   it('is normalized explicitly for disk-origin places, null elsewhere', () => {
@@ -60,6 +68,13 @@ describe('fs.fallback: config', () => {
       resolved({ a: { fs: { ext: ['html'], fallback: 'deny' } } }),
       ['deny'],
     );
+    // The value the non-strict default resolves to is valid input: on a
+    // place without a finite ext it means the same permissive reads.
+    assert.deepEqual(resolved({ a: { fs: { fallback: 'disk' } } }), ['disk']);
+    assert.deepEqual(
+      resolved({ a: { fs: { fallback: 'disk' }, require: true } }),
+      ['disk'],
+    );
     const cli = VfsConfig.fromArgv(
       ['node', 'app', '--', '--vfs.defaults.strict=true'],
       { places: { a: { fs: { ext: ['html'] } } } },
@@ -90,9 +105,25 @@ describe('fs.fallback: config', () => {
       { a: { provider: 'node-default', fs: { fallback: 'disk' } } },
       /not applicable to provider "node-default"/,
     );
-    fails(
+    // Under strict an unrestricted place would serve nothing from disk.
+    for (const places of [
       { a: { fs: { fallback: 'disk' } } },
-      /"disk" needs a finite ext list/,
+      { a: { provider: 'map', fs: { fallback: 'disk' }, import: true } },
+    ]) {
+      assert.throws(
+        () => new VfsConfig({ places, defaults: { strict: true } }),
+        /places\.a\.fs\.fallback: "disk" needs a finite ext list under strict/,
+      );
+    }
+    assert.throws(
+      () =>
+        VfsConfig.fromArgv(
+          ['node', 'app', '--', '--vfs.defaults.strict=true'],
+          {
+            places: { a: { fs: { fallback: 'disk' } } },
+          },
+        ),
+      /needs a finite ext list under strict/,
     );
   });
 
@@ -172,15 +203,18 @@ describe('strict: appRoot is a managed root', () => {
 
   it('a recursive listing descends through each place own routing', async () => {
     k.fs('mem').writeFile('/m.txt', 'm');
-    assert.deepEqual(fs.readdirSync(root, { recursive: true }), [
-      'lib',
-      'mem',
-      'mem/m.txt',
-      'pub',
-      'pub/index.html',
-      'pub/sub',
-      'pub/sub/a.html',
-    ]);
+    assert.deepEqual(
+      fs.readdirSync(root, { recursive: true }),
+      natives([
+        'lib',
+        'mem',
+        'mem/m.txt',
+        'pub',
+        'pub/index.html',
+        'pub/sub',
+        'pub/sub/a.html',
+      ]),
+    );
     assert.deepEqual(await fs.promises.readdir(root), ['lib', 'mem', 'pub']);
   });
 
@@ -301,16 +335,19 @@ describe("fs.fallback: 'disk' — a partial disk cache", () => {
       'page.html',
       'pic.png',
     ]);
-    assert.deepEqual(fs.readdirSync(at('site'), { recursive: true }), [
-      'app.js',
-      'index.html',
-      'logo.png',
-      'media',
-      'media/clip.mp4',
-      'sub',
-      'sub/page.html',
-      'sub/pic.png',
-    ]);
+    assert.deepEqual(
+      fs.readdirSync(at('site'), { recursive: true }),
+      natives([
+        'app.js',
+        'index.html',
+        'logo.png',
+        'media',
+        'media/clip.mp4',
+        'sub',
+        'sub/page.html',
+        'sub/pic.png',
+      ]),
+    );
   });
 
   it('cached extensions stay VFS-only, even when present on disk', () => {
@@ -407,6 +444,179 @@ describe("fs.fallback: 'disk' — a partial disk cache", () => {
   });
 });
 
+// A listing names its disk entries from the parent paths a native walk
+// gives them: a nested tree — dotted, spaced and non-ASCII names, cached
+// and uncached files at several depths — listed from several levels and in
+// every form gives the names path.relative gives that walk.
+describe("fs.fallback: 'disk' — nested listings, named as path.relative does", () => {
+  let root;
+  let k;
+  const at = (...p) => path.join(root, ...p);
+
+  before(async () => {
+    root = writeTree(tmpDir('vfs-names'), {
+      'site/a.html': 'a',
+      'site/a.bin': 'b',
+      'site/..private/x.bin': 'x',
+      'site/..private/deep/er/y.bin': 'y',
+      'site/..private/deep/er/z.html': 'z',
+      'site/.dot/n.bin': 'n',
+      'site/x y/ü.bin': 'u',
+      'site/x y/ü/İ.bin': 'i',
+      'site/a..b/c/d/e.bin': 'e',
+      'site/a..b/c/d/f.html': 'f',
+    });
+    k = await kernel(
+      root,
+      { site: { fs: { ext: ['html'], fallback: 'disk' } } },
+      { strict: true },
+    );
+    fsPatch.install(k);
+  });
+
+  after(() => {
+    fsPatch.uninstall();
+    k.close();
+    rm(root);
+  });
+
+  // Everything below a directory of the place — cached files published,
+  // the rest on disk — as [name, isDirectory]: a native walk, its names by
+  // path.relative, sorted as listings sort.
+  const reference = (...dir) => {
+    const base = at('site', ...dir);
+    const names = new Map();
+    for (const entry of listDisk(base, {
+      recursive: true,
+      withFileTypes: true,
+    })) {
+      const file = path.join(entry.parentPath, entry.name);
+      const name = path.relative(base, file).split(path.sep).join('/');
+      names.set(name, entry.isDirectory());
+    }
+    return [...names.keys()].sort().map((name) => [name, names.get(name)]);
+  };
+
+  // A Dirent as [name, parentPath, isDirectory], from a listing name.
+  const dirent = (base, [name, isDirectory]) => [
+    path.basename(name),
+    path.join(base, path.dirname(name)),
+    isDirectory,
+  ];
+  const shown = (entries) =>
+    entries.map((d) => [String(d.name), d.parentPath, d.isDirectory()]);
+
+  const DIRS = [[], ['..private'], ['x y'], ['a..b', 'c']];
+
+  // The facade names them with '/', the form of keys; the patched node:fs
+  // with path.sep, as native node:fs does.
+  it('names: PlaceFs and node:fs, strings and Buffers', () => {
+    for (const dir of DIRS) {
+      const names = reference(...dir).map(([name]) => name);
+      const key = '/' + dir.join('/');
+      const options = { recursive: true };
+      assert.deepEqual(k.fs('site').readdir(key, options), names, key);
+      assert.deepEqual(
+        fs.readdirSync(at('site', ...dir), options),
+        natives(names),
+      );
+      const buffers = fs.readdirSync(at('site', ...dir), {
+        ...options,
+        encoding: 'buffer',
+      });
+      assert.ok(buffers.every((name) => Buffer.isBuffer(name)));
+      assert.deepEqual(buffers.map(String), natives(names));
+    }
+  });
+
+  it('Dirents: name, parent path and kind, listed and opened', () => {
+    for (const dir of DIRS) {
+      const base = at('site', ...dir);
+      const expected = reference(...dir).map((entry) => dirent(base, entry));
+      const options = { recursive: true, withFileTypes: true };
+      assert.deepEqual(shown(fs.readdirSync(base, options)), expected);
+      const buffers = { ...options, encoding: 'buffer' };
+      assert.deepEqual(shown(fs.readdirSync(base, buffers)), expected);
+      const handle = fs.opendirSync(base, { recursive: true });
+      const opened = [];
+      for (let d = handle.readSync(); d; d = handle.readSync()) opened.push(d);
+      handle.closeSync();
+      assert.deepEqual(shown(opened), expected);
+    }
+  });
+
+  // As given, with a trailing separator and, where it routes too, in the
+  // other case: names below each place, Dirent parents under the root as
+  // the caller spelled it.
+  it('the strict appRoot lists its place the same way, however spelled', () => {
+    const expected = [
+      ['site', true],
+      ...reference().map(([name, isDirectory]) => [
+        `site/${name}`,
+        isDirectory,
+      ]),
+    ];
+    const names = natives(expected.map(([name]) => name));
+    const spellings = [root, root + path.sep];
+    if (process.platform === 'win32') spellings.push(root.toUpperCase());
+    for (const given of spellings) {
+      assert.deepEqual(fs.readdirSync(given, { recursive: true }), names);
+      const typed = fs.readdirSync(given, {
+        recursive: true,
+        withFileTypes: true,
+      });
+      const parentOf = (name) => {
+        const dir = path.dirname(name);
+        return dir === '.' ? given : path.join(given, dir);
+      };
+      assert.deepEqual(
+        shown(typed),
+        expected.map(([name, isDirectory]) => [
+          path.basename(name),
+          parentOf(name),
+          isDirectory,
+        ]),
+        given,
+      );
+    }
+  });
+
+  // path.relative and the Dirent parents a listing builds, counted: one
+  // path.relative for where the listing starts, none per entry, one parent
+  // per directory — for the place, and for the strict appRoot spelled with
+  // a trailing separator.
+  it('no path.relative per entry, one parent path per directory', () => {
+    const { relative } = path;
+    let relatives = 0;
+    path.relative = (...args) => {
+      relatives++;
+      return relative(...args);
+    };
+    const place = k.registry.get('site');
+    let parents = 0;
+    place.pathOf = function (key) {
+      parents++;
+      return Object.getPrototypeOf(this).pathOf.call(this, key);
+    };
+    try {
+      const listed = k
+        .fs('site')
+        .readdir('/', { recursive: true, withFileTypes: true });
+      const directories = listed.filter((d) => d.isDirectory()).length;
+      assert.ok(listed.length > directories + 5, `${listed.length} entries`);
+      assert.ok(relatives <= 1, `${relatives} path.relative`);
+      assert.ok(parents <= directories + 1, `${parents} parent paths`);
+      relatives = 0;
+      const all = fs.readdirSync(root + path.sep, { recursive: true });
+      assert.ok(all.length > 10, `${all.length} names`);
+      assert.ok(relatives <= 1, `${relatives} path.relative`);
+    } finally {
+      path.relative = relative;
+      delete place.pathOf;
+    }
+  });
+});
+
 describe("fs.fallback: 'disk' — the non-strict default", () => {
   it('reads stay permissive; listings still come from the place', async () => {
     const root = writeTree(tmpDir('vfs-loose'), {
@@ -421,15 +631,50 @@ describe("fs.fallback: 'disk' — the non-strict default", () => {
       writeDisk(at('media', 'raw.html'), 'raw');
       assert.equal(fs.readFileSync(at('media', 'raw.html'), 'utf8'), 'raw');
       assert.deepEqual(fs.readdirSync(at('media')), ['clip.mp4']);
-      assert.deepEqual(fs.readdirSync(at(), { recursive: true }), [
-        'index.html',
-        'media',
-        'media/clip.mp4',
-      ]);
+      assert.deepEqual(
+        fs.readdirSync(at(), { recursive: true }),
+        natives(['index.html', 'media', 'media/clip.mp4']),
+      );
     } finally {
       fsPatch.uninstall();
       k.close();
       rm(root);
+    }
+  });
+
+  // An unrestricted place caches every file: 'disk' leaves it no disk
+  // territory of files, and set explicitly it means what the default means.
+  it('an unrestricted place: the explicit value behaves as the default', async () => {
+    for (const site of [{ fs: true }, { fs: { fallback: 'disk' } }]) {
+      const root = writeTree(tmpDir('vfs-loose-all'), {
+        'site/index.html': '<h1>',
+        'site/media/clip.mp4': 'MP4',
+      });
+      const k = await kernel(root, { site });
+      fsPatch.install(k);
+      try {
+        const at = (...p) => path.join(root, 'site', ...p);
+        assert.equal(k.registry.get('site').config.fs.fallback, 'disk');
+        // Every extension is cached: written after the scan, a file is
+        // readable (permissive) but listed only once published.
+        writeDisk(at('media', 'late.html'), 'late');
+        mkdirDisk(at('later'));
+        writeDisk(at('later', 'x.bin'), 'x');
+        assert.equal(fs.readFileSync(at('media', 'late.html'), 'utf8'), 'late');
+        assert.equal(fs.readFileSync(at('later', 'x.bin'), 'utf8'), 'x');
+        assert.deepEqual(fs.readdirSync(at('media')), ['clip.mp4']);
+        assert.deepEqual(fs.readdirSync(at('later')), []);
+        assert.deepEqual(
+          fs.readdirSync(at(), { recursive: true }),
+          natives(['index.html', 'later', 'media', 'media/clip.mp4']),
+        );
+        assert.deepEqual(k.fs('site').readdir('/later'), []);
+        assert.equal(k.fs('site').readFile('/later/x.bin'), null, 'cached ext');
+      } finally {
+        fsPatch.uninstall();
+        k.close();
+        rm(root);
+      }
     }
   });
 });

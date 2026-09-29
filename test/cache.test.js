@@ -306,7 +306,7 @@ describe('FilesystemCache: snapshot / projection', () => {
     const b = FilesystemCache.project(snap.places.q, map).get('/b');
     assert.equal(b.data.length, 0);
     const disk = FilesystemCache.projectEntry(
-      { kind: 'disk', path: '/x', stat: { size: 1 } },
+      { kind: 'disk', path: '/x', stat: { size: 1 }, version: 3 },
       map,
     );
     assert.deepEqual(disk, {
@@ -314,6 +314,7 @@ describe('FilesystemCache: snapshot / projection', () => {
       stat: { size: 1 },
       meta: undefined,
       scriptOptions: undefined,
+      version: 3,
       path: '/x',
     });
   });

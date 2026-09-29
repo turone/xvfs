@@ -98,6 +98,7 @@ Main → worker (`link()` port):
 {
   name: 'vfs-update',
   updateId: 7,
+  version: 9, // the kernel's version after this update; a relocation keeps it
   places: {
     static: {
       entries: [
@@ -129,6 +130,43 @@ consumer of that version is done, one `vfs-release` follows. Pinning a
 current version is local bookkeeping: no IPC per chunk, per stream or for
 a version that is never retired while in use. A worker that exits drops
 all its ACKs and holds.
+
+Worker → main, for a mutation of a `sab + virtual` place
+(`lib/mutation-rpc.js`):
+
+```js
+{ name: 'vfs-mutate', id: 3, place: 'scratch', op: 'write', key: '/note.txt',
+  data: Uint8Array, options: { exclusive: false } }
+// writeFiles: { …, op: 'writeFiles', keys, sizes, options, data } — every
+// file's bytes one after another in `data`, `sizes[i]` of them for `keys[i]`
+```
+
+Main → worker, once that mutation is decided:
+
+```js
+{ name: 'vfs-mutated', id: 3, version: 12 }             // published
+{ name: 'vfs-mutated', id: 3, error: { code: 'EROFS', … } } // refused
+```
+
+The response arrives once the new version is already published — the same
+`vfs-update` reaches every linked worker, this one included — never
+before it, and never after every worker has ACKed: ACKs only govern when
+replaced bytes are freed. `writeFiles` is one such request: `version` is
+that of the single commit that published every file of the set, or the
+response carries `error` and nothing is published.
+
+Main → worker, under strict with a place of `links: 'deny'` — a link the
+main kernel's watcher found, for the worker's index:
+
+```js
+{ name: 'vfs-links', add: ['/app/media/j'], generation: 4 }
+```
+
+A worker's snapshot carries the index as main knows it and its
+`generation` (how many links it has come to know); a worker applies a
+`vfs-links` newer than what it holds, and nothing flows back — the patch
+makes, removes and moves no link on a place's disk under strict, and the
+index only grows ([README → Links on a place's disk](../README.md#links-on-a-places-disk-links)).
 
 There is no `file-update` / `file-delete`. One `vfs-update` per epoch.
 Source + companions of one file are published together; a companion that
@@ -164,11 +202,11 @@ Two layers, `defaults.hooks.{fs,module}`:
 | `fs`     | table-driven `node:fs` patch (sync/callback/promises)  | Executes `FsRouter` decisions: implemented, recognized but unsupported, passthrough (README). |
 | `module` | `module.registerHooks({ resolve, load })` + `_compile` | One chain for `require()` and `import`. Domain = `context.conditions.includes('require')`.    |
 
-Manual install (when not using `--import shared-memory-fs/register`):
+Manual install (when not using `--import xvfs/register`):
 
 ```js
-const fsPatch = require('shared-memory-fs/adapters/fs-patch');
-const moduleHook = require('shared-memory-fs/adapters/module-hook');
+const fsPatch = require('xvfs/adapters/fs-patch');
+const moduleHook = require('xvfs/adapters/module-hook');
 fsPatch.install(kernel);
 moduleHook.install(kernel);
 ```
@@ -449,7 +487,7 @@ const handler = script.runInThisContext();
 
 ```js
 const fs = require('node:fs');
-const fsPatch = require('shared-memory-fs/adapters/fs-patch');
+const fsPatch = require('xvfs/adapters/fs-patch');
 
 beforeEach(async () => {
   kernel = new VfsKernel(testConfig, { appRoot: '/test' });
@@ -474,10 +512,10 @@ Never leave hooks installed on the test runner: uninstall in `after`.
 ## CLI overrides
 
 ```
-node --import shared-memory-fs/register app.js -- \
+node --import xvfs/register app.js -- \
   --vfs.defaults.memory.limit=512mib \
   --vfs.defaults.strict=true \
-  --vfs.hooks.fs=false \
+  --vfs.defaults.hooks.fs=false \
   --vfs.enable=tools,workspace \
   --vfs.disable=static
 ```
@@ -534,7 +572,7 @@ other means is not contained.
 - [ ] Build `VfsConfig` matching your directory layout (place name =
       folder = mount).
 - [ ] Main: `new VfsKernel(config, { appRoot })` (or
-      `--import shared-memory-fs/register`).
+      `--import xvfs/register`).
 - [ ] Main: `await kernel.initialize()` _before_ spawning workers.
 - [ ] Main: `const { vfs, transferList } = kernel.link()`.
 - [ ] Worker: `new Worker(file, { workerData: { vfs }, transferList })`.

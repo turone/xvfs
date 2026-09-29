@@ -1,0 +1,756 @@
+'use strict';
+
+const { describe, it, before, after } = require('node:test');
+const assert = require('node:assert/strict');
+const { execFileSync } = require('node:child_process');
+const fs = require('node:fs');
+const path = require('node:path');
+const { Worker } = require('node:worker_threads');
+const disk = require('../lib/disk.js');
+const fsPatch = require('../lib/adapters/fs-patch.js');
+const {
+  tmpDir,
+  writeTree,
+  rm,
+  kernel,
+  drain,
+  quiet,
+  diskCalls,
+  within,
+} = require('./helpers.js');
+
+// The disk as it is, behind the patch: captured before any install.
+const {
+  readFileSync: readDisk,
+  writeFileSync: writeDisk,
+  existsSync: onDisk,
+  mkdirSync: mkdirDisk,
+  readdirSync: listDisk,
+} = fs;
+
+// Node's own implementations call the public node:fs back: readFileSync and
+// writeFileSync of a Buffer open the file through fs.openSync, rmSync lstats
+// its path through fs.lstatSync — on Node 22 its rimraf walks the whole tree
+// that way. Routed, those inner calls found a published file ENOTSUP, a
+// hidden one EACCES, a listing without the files the place hides. The
+// library's own disk I/O runs them in the native section of lib/disk.js,
+// where every wrapper of the patch is its original.
+
+const PREPARERS = { upper: (raw) => raw.toString().toUpperCase() };
+
+// Settles as `fn(callback)` calls back.
+const viaCallback = (fn) =>
+  new Promise((resolve, reject) => {
+    fn((err) => (err ? reject(err) : resolve()));
+  });
+
+// The code a sync read of `filePath` fails with, or 'read'.
+const readCode = (filePath) => {
+  try {
+    fs.readFileSync(filePath);
+    return 'read';
+  } catch (err) {
+    return err.code;
+  }
+};
+
+// A kernel.routeRead that records the paths it routes.
+const spyRouteRead = (k) => {
+  const routed = [];
+  const routeRead = k.routeRead;
+  k.routeRead = function (filePath) {
+    routed.push(filePath);
+    return routeRead.call(this, filePath);
+  };
+  return routed;
+};
+
+describe('lib/disk.js', () => {
+  it('native() keeps the section open until it returns: nested, or by a throw', () => {
+    assert.equal(disk.inNative(), false);
+    const seen = disk.native(() => [
+      disk.inNative(),
+      disk.native(() => disk.inNative()),
+      disk.inNative(),
+    ]);
+    assert.deepEqual(seen, [true, true, true]);
+    assert.equal(disk.inNative(), false);
+    assert.throws(
+      () =>
+        disk.native(() => {
+          throw new Error('boom');
+        }),
+      /boom/,
+    );
+    assert.equal(disk.inNative(), false, 'closed by the throw');
+  });
+
+  it('sectioned() opens it for a call, outside() closes it for one; both keep the receiver', () => {
+    const target = {};
+    const probe = function (...args) {
+      // eslint-disable-next-line no-invalid-this
+      return [this === target, args, disk.inNative()];
+    };
+    target.inside = disk.sectioned(probe);
+    target.outside = disk.outside(probe);
+    target.fail = disk.outside(() => {
+      throw new Error('boom');
+    });
+    assert.deepEqual(target.inside(1, 2), [true, [1, 2], true]);
+    assert.equal(disk.inNative(), false);
+    const seen = disk.native(() => {
+      const before = disk.inNative();
+      const call = target.outside(3);
+      assert.throws(() => target.fail(), /boom/);
+      return [before, call, disk.inNative()];
+    });
+    assert.deepEqual(seen, [true, [true, [3], false], true]);
+    assert.equal(disk.inNative(), false);
+  });
+
+  // A copy of the module over stand-ins for the node:fs functions it
+  // captures: called with MARK, each reports whether it ran in the native
+  // section. (readdirSync calls node:fs back only on a filesystem that does
+  // not report entry types.)
+  it('what calls node:fs back runs in the native section', () => {
+    const file = require.resolve('../lib/disk.js');
+    const loaded = require.cache[file];
+    const names = ['readFileSync', 'writeFileSync', 'rmSync', 'readdirSync'];
+    const originals = names.map((name) => fs[name]);
+    const MARK = '\0section';
+    const inSection = {};
+    let copy = null;
+    try {
+      delete require.cache[file];
+      names.forEach((name, i) => {
+        fs[name] = function (...args) {
+          if (args[0] === MARK) {
+            inSection[name] = copy.inNative();
+            return MARK;
+          }
+          return originals[i].apply(this, args);
+        };
+      });
+      copy = require(file);
+    } finally {
+      names.forEach((name, i) => {
+        fs[name] = originals[i];
+      });
+      require.cache[file] = loaded;
+    }
+    for (const name of names) copy[name](MARK);
+    assert.deepEqual(inSection, {
+      readFileSync: true,
+      writeFileSync: true,
+      rmSync: true,
+      readdirSync: true,
+    });
+    assert.equal(copy.inNative(), false);
+  });
+
+  it('no module loads node:fs but disk.js and the patch that replaces it', () => {
+    const lib = path.join(__dirname, '..', 'lib');
+    const loads =
+      /(?:require\(|import\(|\bfrom)\s*['"](?:node:)?fs(?:\/promises)?['"]/;
+    const found = fs
+      .readdirSync(lib, { recursive: true })
+      .filter((file) => /\.[cm]?js$/.test(file))
+      .filter((file) => loads.test(readDisk(path.join(lib, file), 'utf8')))
+      .map((file) => file.split(path.sep).join('/'))
+      .sort();
+    assert.deepEqual(found, ['adapters/fs-patch.js', 'disk.js']);
+  });
+});
+
+describe('PlaceFs: disk entries and disk-origin mutations past the patch', () => {
+  let root;
+  let k;
+  const at = (...p) => path.join(root, ...p);
+
+  before(async () => {
+    root = writeTree(tmpDir('vfs-reentry'), {
+      'site/a.txt': 'a',
+      'site/b.txt': 'b',
+      'site/big.txt': 'B'.repeat(70 * 1024), // over maxFileSize: a disk entry
+      'site/t.bin': 'territory', // not cached: the disk territory
+      'prep/p.txt': 'raw',
+    });
+    k = await kernel(
+      root,
+      {
+        site: { fs: { ext: ['txt'], writable: true } },
+        prep: { fs: { ext: ['txt'], prepare: 'upper' } },
+        mem: { provider: 'map', origin: 'virtual', fs: { writable: true } },
+      },
+      { watchTimeout: 60000 },
+      { preparers: PREPARERS },
+    );
+    fsPatch.install(k);
+  });
+
+  after(() => {
+    fsPatch.uninstall();
+    k.close();
+    rm(root);
+  });
+
+  it('writeFile / appendFile of a published file, string or Buffer', () => {
+    const site = k.fs('site');
+    site.writeFile('/a.txt', 'one');
+    assert.equal(readDisk(at('site', 'a.txt'), 'utf8'), 'one');
+    site.writeFile('/a.txt', Buffer.from('two'));
+    site.appendFile('/a.txt', '+3');
+    site.appendFile('/a.txt', Buffer.from('+4'));
+    assert.equal(readDisk(at('site', 'a.txt'), 'utf8'), 'two+3+4');
+  });
+
+  it('reads and streams of disk entries never reach the router', async () => {
+    const routed = spyRouteRead(k);
+    try {
+      const site = k.fs('site');
+      assert.equal(site.readFile('/big.txt').length, 70 * 1024);
+      assert.equal(site.readFile('/t.bin', 'utf8'), 'territory');
+      const big = await drain(site.createReadStream('/big.txt'));
+      assert.equal(big.length, 70 * 1024);
+      const territory = await drain(site.createReadStream('/t.bin'));
+      assert.equal(territory.toString(), 'territory');
+      assert.deepEqual(routed, []);
+    } finally {
+      delete k.routeRead;
+    }
+  });
+
+  it('copyFileSync of a published disk-origin file into map + virtual: its raw bytes', () => {
+    assert.equal(fs.readFileSync(at('prep', 'p.txt'), 'utf8'), 'RAW');
+    fs.copyFileSync(at('prep', 'p.txt'), at('mem', 'p.txt'));
+    assert.equal(k.fs('mem').readFile('/p.txt', 'utf8'), 'raw');
+    assert.equal(onDisk(at('mem', 'p.txt')), false, 'no shadow file');
+  });
+
+  it('copyFileSync of a virtual entry over a published disk-origin file', () => {
+    k.fs('mem').writeFile('/v.txt', 'virtual');
+    fs.copyFileSync(at('mem', 'v.txt'), at('site', 'b.txt'));
+    assert.equal(readDisk(at('site', 'b.txt'), 'utf8'), 'virtual');
+  });
+});
+
+describe('PlaceFs under strict: the place writes and removes what it hides', () => {
+  let root;
+  let k;
+  const at = (...p) => path.join(root, 'site', ...p);
+
+  before(async () => {
+    root = writeTree(tmpDir('vfs-reentry-strict'), {
+      'site/a.txt': 'a',
+      'site/dir/c.txt': 'c',
+    });
+    k = await kernel(
+      root,
+      { site: { fs: { ext: ['txt'], writable: true } } },
+      { strict: true, watchTimeout: 60000 },
+    );
+    // Written after the scan: on disk only, hidden from routed reads.
+    writeDisk(at('late.txt'), 'late');
+    writeDisk(at('hidden.txt'), 'hidden');
+    mkdirDisk(at('only'));
+    writeDisk(at('only', 'x.txt'), 'x');
+    writeDisk(at('only', 'y.bin'), 'y');
+    writeDisk(at('dir', 'late.txt'), 'late');
+    writeDisk(at('dir', 'u.bin'), 'uncached');
+    fsPatch.install(k);
+  });
+
+  after(() => {
+    fsPatch.uninstall();
+    k.close();
+    rm(root);
+  });
+
+  it('writes a new file, which routing still hides until published', () => {
+    k.fs('site').writeFile('/new.txt', 'new');
+    assert.equal(readDisk(at('new.txt'), 'utf8'), 'new');
+    assert.throws(() => fs.readFileSync(at('new.txt')), { code: 'EACCES' });
+  });
+
+  it('removes an unpublished file and a disk-only directory', () => {
+    const site = k.fs('site');
+    site.rm('/late.txt');
+    assert.equal(onDisk(at('late.txt')), false);
+    site.rm('/only', { recursive: true });
+    assert.equal(onDisk(at('only')), false);
+    assert.equal(readDisk(at('a.txt'), 'utf8'), 'a', 'nothing else removed');
+  });
+
+  it('removes a directory of published, unpublished and uncached files', () => {
+    assert.deepEqual(fs.readdirSync(at('dir')), ['c.txt'], 'routed listing');
+    k.fs('site').rm('/dir', { recursive: true });
+    assert.equal(onDisk(at('dir')), false);
+  });
+
+  it('a call that throws inside the section leaves routing in force', () => {
+    assert.throws(() => k.fs('site').rm('/missing.txt'), {
+      code: 'ENOENT',
+      path: at('missing.txt'),
+    });
+    assert.throws(() => fs.readFileSync(at('hidden.txt')), {
+      code: 'EACCES',
+    });
+  });
+});
+
+// A filesystem that does not report the type of an entry (no d_type: some
+// FUSE, XFS without ftype) leaves it to readdir, which lstats the entry
+// through the public node:fs — routed once the patch is installed. Such a
+// filesystem is simulated: the fs binding reports every type unknown, and
+// node:fs does what it does on one. Under strict, the lstat of a name the
+// place does not serve yet is EACCES and the whole readdir fails: a rescan
+// published nothing of a new directory, and said nothing. The scanner reads
+// the names again and types them through lib/disk.js.
+describe('the scanner on a filesystem that reports no entry types', () => {
+  const binding = process.binding?.('fs');
+  const simulated = typeof binding?.readdir === 'function';
+  const UNKNOWN = 0; // UV_DIRENT_UNKNOWN
+
+  // A strict kernel whose epochs come by hand (its fs.watch handles are
+  // closed), the patch installed, a new directory on disk, and the binding
+  // reporting no types; done() undoes it all.
+  const setup = async () => {
+    const root = writeTree(tmpDir('vfs-reentry-dtype'), { 'site/a.txt': 'a' });
+    const logs = [];
+    const log = (m) => logs.push(m);
+    const k = await kernel(
+      root,
+      { site: { fs: { ext: ['txt'] } } },
+      { strict: true, watch: true, watchTimeout: 60000 },
+      { console: { ...quiet, warn: log, error: log } },
+    );
+    k.watcher.close();
+    const at = (...p) => path.join(root, 'site', ...p);
+    mkdirDisk(at('fresh', 'deep'), { recursive: true });
+    writeDisk(at('fresh', 'b.txt'), 'b');
+    writeDisk(at('fresh', 'deep', 'c.txt'), 'c');
+    fsPatch.install(k);
+    const { readdir } = binding;
+    binding.readdir = function (...args) {
+      const result = readdir.apply(this, args);
+      const withFileTypes = args[2];
+      if (!withFileTypes) return result;
+      const unknown = ([names, types]) => [names, types.map(() => UNKNOWN)];
+      if (typeof result?.then === 'function') return result.then(unknown);
+      return Array.isArray(result) ? unknown(result) : result;
+    };
+    const rescan = () =>
+      k.watcher.emit('epoch', new Map([[at('fresh'), 'scan']]));
+    const done = () => {
+      binding.readdir = readdir;
+      fsPatch.uninstall();
+      k.close();
+      rm(root);
+    };
+    return { k, at, logs, rescan, done };
+  };
+
+  it('a rescan under strict finds and publishes a new directory', async (t) => {
+    if (!simulated) {
+      t.skip('no fs binding to simulate the filesystem with');
+      return;
+    }
+    const { k, at, logs, rescan, done } = await setup();
+    try {
+      // The simulation holds: an entry the place hides fails the listing.
+      await assert.rejects(
+        fs.promises.readdir(at('fresh'), { withFileTypes: true }),
+        { code: 'EACCES' },
+      );
+      rescan();
+      await k.watchQueue.idle;
+      const site = k.fs('site');
+      assert.equal(site.readFile('/fresh/b.txt', 'utf8'), 'b');
+      assert.equal(site.readFile('/fresh/deep/c.txt', 'utf8'), 'c');
+      assert.deepEqual(logs, []);
+    } finally {
+      done();
+    }
+  });
+
+  // The listing of the rescan, refused past the patch, is in flight when
+  // the kernel closes; or the names read again are.
+  for (const [when, inFlight] of [
+    ['its listing', 1],
+    ['the names read again', 2],
+  ]) {
+    it(`a rescan closed during ${when} starts no disk call after it`, async (t) => {
+      if (!simulated) {
+        t.skip('no fs binding to simulate the filesystem with');
+        return;
+      }
+      const { k, logs, rescan, done } = await setup();
+      const calls = diskCalls();
+      try {
+        rescan();
+        await calls.started(inFlight);
+        const idle = k.watchQueue.idle;
+        k.close();
+        const atClose = calls.count;
+        await idle;
+        assert.equal(atClose, inFlight);
+        assert.equal(calls.count, atClose, 'no disk call after close()');
+        assert.deepEqual(logs, []);
+      } finally {
+        calls.stop();
+        done();
+      }
+    });
+  }
+});
+
+describe('copies under strict: the destination disk past the patch', () => {
+  let root;
+  let k;
+  const at = (...p) => path.join(root, ...p);
+
+  before(async () => {
+    root = writeTree(tmpDir('vfs-reentry-copy'), { 'site/a.txt': 'a' });
+    k = await kernel(
+      root,
+      {
+        site: { fs: { ext: ['txt'], writable: true } },
+        mem: { provider: 'map', origin: 'virtual', fs: { writable: true } },
+      },
+      { strict: true, watchTimeout: 60000 },
+    );
+    k.fs('mem').writeFile('/x.txt', 'x');
+    fsPatch.install(k);
+  });
+
+  after(() => {
+    fsPatch.uninstall();
+    k.close();
+    rm(root);
+  });
+
+  it('cpSync of a virtual entry creates the directories it lacks, then the file', () => {
+    const to = at('site', 'deep', 'er', 'x.txt');
+    fs.cpSync(at('mem', 'x.txt'), to);
+    assert.equal(readDisk(to, 'utf8'), 'x');
+  });
+
+  it('the asynchronous copies write the disk the same way', async () => {
+    await fs.promises.copyFile(at('mem', 'x.txt'), at('site', 'p.txt'));
+    assert.equal(readDisk(at('site', 'p.txt'), 'utf8'), 'x');
+    const nested = at('site', 'nested', 'q.txt');
+    await fs.promises.cp(at('mem', 'x.txt'), nested);
+    assert.equal(readDisk(nested, 'utf8'), 'x');
+  });
+});
+
+describe('fs-patch: a passthrough is node:fs to the end', () => {
+  let root;
+  let out;
+  let k;
+  const at = (...p) => path.join(root, 'site', ...p);
+
+  before(async () => {
+    root = writeTree(tmpDir('vfs-reentry-patch'), {
+      'site/a.txt': 'a',
+      'site/b.txt': 'b',
+      'site/c.txt': 'cc',
+      'site/d.txt': 'dd',
+      'site/e.txt': 'e',
+    });
+    out = writeTree(tmpDir('vfs-reentry-out'), { 'o.txt': 'outside' });
+    k = await kernel(
+      root,
+      { site: { fs: { ext: ['txt'], writable: true } } },
+      { watchTimeout: 60000 },
+    );
+    fsPatch.install(k);
+  });
+
+  after(() => {
+    fsPatch.uninstall();
+    k.close();
+    rm(root);
+    rm(out);
+  });
+
+  it('writeFileSync / appendFileSync of a published file, with a Buffer', () => {
+    fs.writeFileSync(at('a.txt'), Buffer.from('one'));
+    fs.appendFileSync(at('a.txt'), Buffer.from('+2'));
+    assert.equal(readDisk(at('a.txt'), 'utf8'), 'one+2');
+  });
+
+  it('writeFile / appendFile with a Buffer and a callback', async () => {
+    await viaCallback((cb) => fs.writeFile(at('b.txt'), Buffer.from('3'), cb));
+    await viaCallback((cb) => fs.appendFile(at('b.txt'), Buffer.from('4'), cb));
+    assert.equal(readDisk(at('b.txt'), 'utf8'), '34');
+  });
+
+  it('truncateSync / truncate of a published file', async () => {
+    fs.truncateSync(at('c.txt'), 1);
+    await viaCallback((cb) => fs.truncate(at('d.txt'), 1, cb));
+    assert.equal(readDisk(at('c.txt'), 'utf8'), 'c');
+    assert.equal(readDisk(at('d.txt'), 'utf8'), 'd');
+  });
+
+  it('the promise forms of writeFile / appendFile / truncate of a published file', async () => {
+    await fs.promises.writeFile(at('e.txt'), Buffer.from('five'));
+    await fs.promises.appendFile(at('e.txt'), Buffer.from('+6'));
+    assert.equal(readDisk(at('e.txt'), 'utf8'), 'five+6');
+    await fs.promises.truncate(at('e.txt'), 4);
+    assert.equal(readDisk(at('e.txt'), 'utf8'), 'five');
+  });
+
+  it('routes a passthrough once', () => {
+    const routed = spyRouteRead(k);
+    try {
+      // A Buffer read: node:fs opens the file through fs.openSync.
+      const file = path.join(out, 'o.txt');
+      assert.equal(fs.readFileSync(file).toString(), 'outside');
+      assert.deepEqual(routed, [file]);
+    } finally {
+      delete k.routeRead;
+    }
+  });
+});
+
+describe('fs-patch under strict: the native section and the caller', () => {
+  let root;
+  let out;
+  let k;
+  let hidden;
+
+  before(async () => {
+    root = writeTree(tmpDir('vfs-reentry-caller'), {
+      'site/a.txt': 'a',
+      'stray/s.txt': 'unmanaged',
+    });
+    out = writeTree(tmpDir('vfs-reentry-caller-out'), { 'o.txt': 'outside' });
+    hidden = path.join(root, 'stray', 's.txt');
+    k = await kernel(
+      root,
+      { site: { fs: { ext: ['txt'] } } },
+      { strict: true },
+    );
+    fsPatch.install(k);
+  });
+
+  after(() => {
+    fsPatch.uninstall();
+    k.close();
+    rm(root);
+    rm(out);
+  });
+
+  it('inside the section a wrapper is its original; past it, routed again', () => {
+    assert.equal(readCode(hidden), 'EACCES');
+    assert.equal(fs.existsSync(hidden), false);
+    assert.equal(
+      disk.native(() => fs.readFileSync(hidden, 'utf8')),
+      'unmanaged',
+    );
+    assert.equal(
+      disk.native(() => fs.existsSync(hidden)),
+      true,
+    );
+    assert.equal(readCode(hidden), 'EACCES');
+    assert.equal(fs.existsSync(hidden), false);
+  });
+
+  it('a callback runs after the passthrough returned: routed', async () => {
+    const code = await new Promise((resolve, reject) => {
+      fs.writeFile(path.join(out, 'w.txt'), Buffer.from('w'), (err) =>
+        err ? reject(err) : resolve(readCode(hidden)),
+      );
+    });
+    assert.equal(code, 'EACCES');
+  });
+
+  it('a callback node:fs calls before returning (an aborted signal): routed', () => {
+    let code = null;
+    const signal = AbortSignal.abort();
+    fs.readFile(path.join(out, 'o.txt'), { signal }, (err) => {
+      assert.equal(err.name, 'AbortError');
+      code = readCode(hidden);
+    });
+    assert.equal(code, 'EACCES', 'called back before readFile returned');
+  });
+
+  it('a passthrough that throws leaves routing in force', () => {
+    const missing = path.join(out, 'none', 'x.txt');
+    assert.throws(() => fs.writeFileSync(missing, Buffer.from('x')), {
+      code: 'ENOENT',
+    });
+    assert.equal(readCode(hidden), 'EACCES');
+  });
+
+  it("cp's filter, the caller's code, runs outside the section", async () => {
+    const codes = [];
+    const filter = () => {
+      codes.push(readCode(hidden));
+      return false;
+    };
+    const from = path.join(out, 'o.txt');
+    const to = path.join(out, 'copy.txt');
+    fs.cpSync(from, to, { filter });
+    await viaCallback((cb) => fs.cp(from, to, { filter }, cb));
+    await fs.promises.cp(from, to, { filter });
+    assert.deepEqual(codes, ['EACCES', 'EACCES', 'EACCES']);
+    assert.equal(onDisk(to), false, 'filtered out');
+  });
+});
+
+// install() loads Node's rimraf over node:fs itself before it replaces
+// anything, synchronously: a worker's attach() installs the patch at once.
+describe("Node's rimraf keeps the node:fs it first loads with", () => {
+  const script = path.join(__dirname, 'fixtures', 'rm-kept.cjs');
+  const run = (mode) =>
+    JSON.parse(
+      execFileSync(process.execPath, [script, mode], {
+        encoding: 'utf8',
+        timeout: 30000,
+      }),
+    );
+
+  // Code that ran before the library may have wrapped node:fs
+  // (fixtures/rm-wrapped.cjs). On Node 22 rmSync loads rimraf at once;
+  // later lines load it through rm and the stand-in lstat.
+  const wrapped = (mode) =>
+    JSON.parse(
+      execFileSync(
+        process.execPath,
+        [path.join(__dirname, 'fixtures', 'rm-wrapped.cjs'), mode],
+        { encoding: 'utf8', timeout: 30000 },
+      ),
+    );
+  const node22 = process.versions.node.split('.')[0] === '22';
+  const whole = { loadedBefore: false, failed: {}, left: [] };
+
+  // A deferred rm runs past the native section, so its own checks are
+  // routed — a path strict hides is EACCES to it: only what rimraf does is
+  // asked here, through fs.promises.rm, which the wrapper leaves alone.
+  it('an fs.rm wrapped to defer: rmSync loads rimraf on Node 22; else install() says so, once', () => {
+    const report = wrapped('defer');
+    assert.equal(report.loadedBefore, false);
+    assert.equal(report.loadedAtInstall, node22, 'loaded by rmSync');
+    assert.equal(report.warnings, node22 ? 0 : 1, 'said once, went on');
+    if (node22) {
+      assert.equal(report.failed.promises, undefined);
+      assert.equal(report.failed['promises-only'], undefined);
+      assert.ok(!report.left.some((dir) => dir.startsWith('promises')));
+    }
+  });
+
+  it('an fs.lstat wrapped: rimraf takes it, as it finds node:fs', () => {
+    assert.deepEqual(wrapped('lstat'), {
+      ...whole,
+      mode: 'lstat',
+      loadedAtInstall: true,
+      warnings: 0,
+      lstatRestored: true,
+    });
+  });
+
+  it('an fs.rm that takes fs.lstat as it is called: the stand-in it takes answers as lstat', () => {
+    const expected = {
+      ...whole,
+      mode: 'capture',
+      loadedAtInstall: true,
+      warnings: 0,
+      captured: !node22, // Node 22 loads rimraf without calling rm
+    };
+    if (!node22) expected.answers = 'file';
+    assert.deepEqual(wrapped('capture'), expected);
+  });
+
+  for (const mode of ['initialized', 'projected']) {
+    it(`loaded by install(), a kernel ${mode}: every form removes whole trees`, () => {
+      assert.deepEqual(run(mode), {
+        mode,
+        loadedBefore: false,
+        loadedAtInstall: false,
+        loadedAfterInstall: true,
+        failed: {},
+        left: [],
+      });
+    });
+  }
+
+  // A worker thread loads its own rimraf. Each tree holds a file published
+  // before the worker attached, one written after the scan and one the
+  // place does not cache; the last is on disk only.
+  it('in a worker, after attach(): the asynchronous forms remove whole trees', async () => {
+    const root = writeTree(tmpDir('vfs-reentry-worker'), {
+      'site/rm/a.txt': 'a',
+      'site/promises/a.txt': 'a',
+    });
+    const at = (...p) => path.join(root, 'site', ...p);
+    const k = await kernel(
+      root,
+      { site: { fs: { ext: ['txt'], writable: true } } },
+      { strict: true, watchTimeout: 600000 },
+    );
+    k.watcher.close();
+    for (const name of ['rm', 'promises']) {
+      writeDisk(at(name, 'b.txt'), 'b');
+      writeDisk(at(name, 'c.bin'), 'c');
+      mkdirDisk(at(`${name}-only`));
+      writeDisk(at(`${name}-only`, 'd.txt'), 'd');
+    }
+    const WORKER = `
+      const { parentPort, workerData } = require('node:worker_threads');
+      const fs = require('node:fs');
+      const RIMRAF = 'NativeModule internal/fs/rimraf';
+      const loaded = () => process.moduleLoadList.includes(RIMRAF);
+      const loadedBefore = loaded();
+      require(${JSON.stringify(path.resolve(__dirname, '../index.js'))}).attach();
+      const loadedAtAttach = loaded();
+      const REMOVALS = {
+        rm: (p) => new Promise((resolve, reject) => {
+          fs.rm(p, { recursive: true }, (err) => (err ? reject(err) : resolve()));
+        }),
+        promises: (p) => fs.promises.rm(p, { recursive: true }),
+      };
+      (async () => {
+        const failed = {};
+        for (const [name, remove] of Object.entries(REMOVALS)) {
+          for (const dir of [name, name + '-only']) {
+            try {
+              await remove(require('node:path').join(workerData.site, dir));
+            } catch (err) {
+              failed[dir] = err.code;
+            }
+          }
+        }
+        parentPort.postMessage({ loadedBefore, loadedAtAttach, failed });
+      })();
+    `;
+    let thread = null;
+    try {
+      const { vfs, transferList } = k.link();
+      thread = new Worker(WORKER, {
+        eval: true,
+        workerData: { vfs, site: at() },
+        transferList,
+      });
+      const result = await within(
+        new Promise((resolve, reject) => {
+          thread.once('message', resolve);
+          thread.once('error', reject);
+          thread.once('exit', (code) => reject(new Error(`exit ${code}`)));
+        }),
+        'the removals of the worker',
+      );
+      assert.deepEqual(result, {
+        loadedBefore: false,
+        loadedAtAttach: true,
+        failed: {},
+      });
+      assert.deepEqual(listDisk(at()), []);
+    } finally {
+      await thread?.terminate();
+      k.close();
+      rm(root);
+    }
+  });
+});

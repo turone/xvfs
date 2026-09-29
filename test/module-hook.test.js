@@ -189,43 +189,48 @@ describe('module-hook: CommonJS', () => {
 describe('module-hook: bytecode accepted across isolates', () => {
   it('a worker attached to the snapshot compiles with cached data V8 does not reject', async () => {
     const { Worker } = require('node:worker_threads');
-    const { until } = require('./helpers.js');
+    const { until, within } = require('./helpers.js');
     const root = writeTree(tmpDir('modhook-worker'), {
       'lib/m.js': 'module.exports = [1, 2, 3].map((x) => x * 2);',
     });
     const k = await kernel(root, { lib: { require: true } });
-    const { vfs, transferList } = k.link();
-    const script = `
-      const vm = require('node:vm');
-      const { parentPort } = require('node:worker_threads');
-      const seen = [];
-      const Real = vm.Script;
-      vm.Script = class extends Real {
-        constructor(code, options) {
-          super(code, options);
-          if (options?.cachedData) seen.push(this.cachedDataRejected);
-        }
-      };
-      require(${JSON.stringify(path.resolve(__dirname, '..'))}).attach();
-      const result = require(${JSON.stringify(path.join(root, 'lib', 'm.js'))});
-      parentPort.postMessage({ result, seen });
-    `;
-    const worker = new Worker(script, {
-      eval: true,
-      workerData: { vfs },
-      transferList,
-    });
-    const exited = new Promise((resolve) => worker.on('exit', resolve));
-    let message = null;
-    const errors = [];
-    worker.on('message', (m) => (message = m));
-    worker.on('error', (e) => errors.push(e));
-    await until(() => message || errors.length);
-    assert.deepEqual(errors, []);
-    assert.deepEqual(message, { result: [2, 4, 6], seen: [false] });
-    await exited;
-    k.close();
-    rm(root);
+    let worker = null;
+    try {
+      const { vfs, transferList } = k.link();
+      const script = `
+        const vm = require('node:vm');
+        const { parentPort } = require('node:worker_threads');
+        const seen = [];
+        const Real = vm.Script;
+        vm.Script = class extends Real {
+          constructor(code, options) {
+            super(code, options);
+            if (options?.cachedData) seen.push(this.cachedDataRejected);
+          }
+        };
+        require(${JSON.stringify(path.resolve(__dirname, '..'))}).attach();
+        const result = require(${JSON.stringify(path.join(root, 'lib', 'm.js'))});
+        parentPort.postMessage({ result, seen });
+      `;
+      worker = new Worker(script, {
+        eval: true,
+        workerData: { vfs },
+        transferList,
+      });
+      const exited = new Promise((resolve) => worker.on('exit', resolve));
+      let message = null;
+      const errors = [];
+      worker.on('message', (m) => (message = m));
+      worker.on('error', (e) => errors.push(e));
+      await until(() => message || errors.length);
+      assert.deepEqual(errors, []);
+      assert.deepEqual(message, { result: [2, 4, 6], seen: [false] });
+      await within(exited, 'the exit of the worker');
+    } finally {
+      await worker?.terminate();
+      k.close();
+      rm(root);
+    }
   });
 });
 
@@ -235,44 +240,48 @@ describe('module-hook: strict', () => {
       'lib/a.js': 'module.exports = "a";',
     });
     const k = await kernel(root, { lib: { require: true } }, { strict: true });
-    moduleHook.install(k);
-    // Created after init: on disk, but not published (no watcher).
-    fs.writeFileSync(
-      path.join(root, 'lib', 'late.js'),
-      'module.exports = "late";',
-    );
-    assert.equal(require(path.join(root, 'lib', 'a.js')), 'a');
-    assert.throws(() => require(path.join(root, 'lib', 'late.js')), {
-      code: 'MODULE_NOT_FOUND',
-    });
-    assert.throws(() => require(path.join(root, 'lib', 'nope')), {
-      code: 'MODULE_NOT_FOUND',
-    });
-    assert.throws(() => require(path.join(root, 'stray', 'x.js')), {
-      code: 'MODULE_NOT_FOUND',
-    });
-    // `..private` is a name under appRoot, not a parent path: unmanaged.
-    writeTree(root, {
-      '..private/leak.js': 'module.exports = "leak";',
-      '..private/leak.mjs': 'export default "leak";',
-    });
-    assert.throws(() => require(path.join(root, '..private', 'leak.js')), {
-      code: 'MODULE_NOT_FOUND',
-    });
-    await assert.rejects(
-      import(pathToFileURL(path.join(root, '..private', 'leak.mjs')).href),
-      { code: 'ERR_MODULE_NOT_FOUND' },
-    );
-    moduleHook.uninstall();
-    // Without strict the same late file loads from disk through Node.
-    const k2 = await kernel(root, { lib: { require: true } });
-    moduleHook.install(k2);
-    delete require.cache[path.join(root, 'lib', 'late.js')];
-    assert.equal(require(path.join(root, 'lib', 'late.js')), 'late');
-    moduleHook.uninstall();
-    k.close();
-    k2.close();
-    rm(root);
+    let k2 = null;
+    try {
+      moduleHook.install(k);
+      // Created after init: on disk, but not published (no watcher).
+      fs.writeFileSync(
+        path.join(root, 'lib', 'late.js'),
+        'module.exports = "late";',
+      );
+      assert.equal(require(path.join(root, 'lib', 'a.js')), 'a');
+      assert.throws(() => require(path.join(root, 'lib', 'late.js')), {
+        code: 'MODULE_NOT_FOUND',
+      });
+      assert.throws(() => require(path.join(root, 'lib', 'nope')), {
+        code: 'MODULE_NOT_FOUND',
+      });
+      assert.throws(() => require(path.join(root, 'stray', 'x.js')), {
+        code: 'MODULE_NOT_FOUND',
+      });
+      // `..private` is a name under appRoot, not a parent path: unmanaged.
+      writeTree(root, {
+        '..private/leak.js': 'module.exports = "leak";',
+        '..private/leak.mjs': 'export default "leak";',
+      });
+      assert.throws(() => require(path.join(root, '..private', 'leak.js')), {
+        code: 'MODULE_NOT_FOUND',
+      });
+      await assert.rejects(
+        import(pathToFileURL(path.join(root, '..private', 'leak.mjs')).href),
+        { code: 'ERR_MODULE_NOT_FOUND' },
+      );
+      moduleHook.uninstall();
+      // Without strict the same late file loads from disk through Node.
+      k2 = await kernel(root, { lib: { require: true } });
+      moduleHook.install(k2);
+      delete require.cache[path.join(root, 'lib', 'late.js')];
+      assert.equal(require(path.join(root, 'lib', 'late.js')), 'late');
+    } finally {
+      moduleHook.uninstall();
+      k.close();
+      k2?.close();
+      rm(root);
+    }
   });
 });
 

@@ -164,13 +164,14 @@ describe('listing names follow the requested encoding', () => {
 
   it('recursive listings encode every name, parent paths stay strings', async () => {
     const strings = fs.readdirSync(at('site'), { recursive: true });
+    // Nested names carry path.sep, as native node:fs gives them.
     assert.deepEqual(strings, [
       'index.html',
       'logo.png',
       'media',
-      'media/звук.mp3',
+      path.join('media', 'звук.mp3'),
       'sub',
-      'sub/page.html',
+      path.join('sub', 'page.html'),
       'é.html',
       'ж.png',
     ]);

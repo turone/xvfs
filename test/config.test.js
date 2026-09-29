@@ -27,6 +27,85 @@ describe('VfsConfig: globals', () => {
     assert.equal(global.memory.segmentSize, 1024);
   });
 
+  it('accepts every decimal and binary unit metautil.sizeToBytes knows', () => {
+    // eb/zb/yb (decimal) and eib+ (binary) are omitted: their byte count
+    // exceeds Number.isSafeInteger and is refused on that separate, already
+    // covered ground ('rejects invalid numbers'), whatever the unit.
+    for (const [size, bytes] of [
+      ['1024', 1024],
+      ['1kb', 1000],
+      ['2 KB', 2000],
+      ['1  mb', 1000000],
+      ['1gb', 1000000000],
+      ['1tb', 1000000000000],
+      ['1pb', 1000000000000000],
+      ['1kib', 1024],
+      ['2 KiB', 2048],
+      ['1mib', 1024 ** 2],
+      ['1gib', 1024 ** 3],
+      ['1tib', 1024 ** 4],
+      ['1pib', 1024 ** 5],
+    ]) {
+      // All three fields get the same string: whatever it resolves to,
+      // limit >= segmentSize >= maxFileSize holds trivially (equal).
+      const { global } = make(
+        {},
+        { memory: { limit: size, segmentSize: size, maxFileSize: size } },
+      );
+      assert.equal(global.memory.limit, bytes, size);
+    }
+  });
+
+  it('rejects size strings with an unrecognized unit', () => {
+    // '1 gib ' (trailing space) is included: metautil.sizeToBytes reads the
+    // unit off the string's last 2-3 characters, so trailing text after a
+    // real unit shifts that window past it and silently parses as `1`.
+    for (const size of ['1 xb', '1mbx', '1 mi', 'nope', '1 gib ']) {
+      fails(
+        { defaults: { memory: { limit: size } } },
+        /defaults\.memory\.limit: invalid size unit/,
+      );
+    }
+    // A recognized unit with a bad sign or magnitude is still the
+    // pre-existing "positive integer" refusal, not "invalid size unit".
+    fails(
+      { defaults: { memory: { limit: '-1 kb' } } },
+      /defaults\.memory\.limit must be a positive integer/,
+    );
+  });
+
+  // An explicit `undefined` means "this key is not set": mergeDeep() must
+  // not let it clobber the default it would otherwise merge over.
+  it('treats an explicit undefined as absent, at every depth', () => {
+    const defaults = new VfsConfig().global;
+    for (const raw of [
+      { defaults: { memory: undefined } },
+      { defaults: { memory: { limit: undefined } } },
+      { defaults: { compaction: undefined } },
+      { defaults: { hooks: undefined } },
+      {
+        defaults: {
+          memory: { limit: undefined, segmentSize: undefined },
+          compaction: undefined,
+          hooks: { fs: undefined, module: undefined },
+        },
+      },
+    ]) {
+      assert.deepEqual(
+        new VfsConfig(raw).global,
+        defaults,
+        JSON.stringify(raw),
+      );
+    }
+    // A sibling key given alongside stays effective.
+    const { global } = make(
+      {},
+      { memory: { limit: undefined, segmentSize: '32 mib' } },
+    );
+    assert.equal(global.memory.limit, 1024 ** 3, 'default limit kept');
+    assert.equal(global.memory.segmentSize, 32 * 1024 ** 2);
+  });
+
   it('rejects invalid numbers', () => {
     fails({ defaults: { memory: { limit: 0 } } }, /limit/);
     fails({ defaults: { memory: { limit: -1 } } }, /limit/);
@@ -68,6 +147,30 @@ describe('VfsConfig: globals', () => {
       { places: { a: { fs: { ext: ['js'], writable: true, other: 1 } } } },
       /unknown option "other"/,
     );
+  });
+
+  // Every nested section of `defaults` rejects an unknown key exactly as
+  // the top level does, so a typo (`limt` for `limit`) fails loudly instead
+  // of being silently dropped by mergeDeep.
+  it('rejects unknown keys in every nested defaults section', () => {
+    fails(
+      { defaults: { memory: { limt: '2 gib' } } },
+      /defaults\.memory: unknown option "limt"/,
+    );
+    fails(
+      { defaults: { compaction: { treshold: 0.5 } } },
+      /defaults\.compaction: unknown option "treshold"/,
+    );
+    fails(
+      { defaults: { hooks: { fss: false } } },
+      /defaults\.hooks: unknown option "fss"/,
+    );
+    fails({ defaults: { memory: 'x' } }, /defaults\.memory must be an object/);
+    fails(
+      { defaults: { compaction: 1 } },
+      /defaults\.compaction must be an object/,
+    );
+    fails({ defaults: { hooks: null } }, /defaults\.hooks must be an object/);
   });
 });
 
@@ -164,6 +267,21 @@ describe('VfsConfig: domains', () => {
       /ext must be a non-empty array/,
     );
     fails({ places: { a: { fs: { ext: ['.js'] } } } }, /without dots/);
+  });
+
+  it('rejects unknown keys in require, import and fs.script', () => {
+    fails(
+      { places: { a: { require: { ext: ['js'], compiled: true } } } },
+      /unknown option "compiled"/,
+    );
+    fails(
+      { places: { a: { import: { ext: ['js'], compile: true } } } },
+      /unknown option "compile"/,
+    );
+    fails(
+      { places: { a: { fs: { script: { ext: ['js'], compiled: true } } } } },
+      /unknown option "compiled"/,
+    );
   });
 
   it('requires at least one domain', () => {
@@ -342,6 +460,14 @@ describe('VfsConfig: compress', () => {
       { places: { a: { fs: { compress: { encodings: [] } } } } },
       /non-empty/,
     );
+    fails(
+      {
+        places: {
+          a: { fs: { compress: { encodings: ['gzip'], quality: 5 } } },
+        },
+      },
+      /unknown option "quality"/,
+    );
   });
 
   it('expands ext: compressible', () => {
@@ -382,6 +508,116 @@ describe('VfsConfig: compress', () => {
         require: { compile: false },
       },
     });
+  });
+});
+
+// `links` — how strict routing proves a native call on a place's disk:
+// 'deny' (the index of known links, the default) or 'verify' (the real
+// path of each call); per place over `defaults.links`, for a place with a
+// directory on disk, under strict only.
+describe('VfsConfig: links', () => {
+  const DISKFUL = {
+    s: { fs: { ext: ['txt'], fallback: 'disk' } },
+    m: { provider: 'map', fs: true },
+    d: { provider: 'disk', fs: true },
+    n: { provider: 'node-default', fs: true },
+  };
+  const DISKLESS = {
+    v: { origin: 'virtual', fs: { writable: true } },
+    mv: { provider: 'map', origin: 'virtual', fs: { writable: true } },
+    e: { provider: 'sea', fs: true },
+  };
+  const linksOf = (c) =>
+    Object.fromEntries(c.allPlaces.map((p) => [p.name, p.links]));
+
+  it("strict: 'deny' by default on every place with a directory on disk", () => {
+    const c = make({ ...DISKFUL, ...DISKLESS }, { strict: true });
+    assert.equal(c.global.links, 'deny');
+    assert.deepEqual(linksOf(c), {
+      s: 'deny',
+      m: 'deny',
+      d: 'deny',
+      n: 'deny',
+      v: null,
+      mv: null,
+      e: null,
+    });
+  });
+
+  it("defaults.links and a place's own, which wins", () => {
+    const places = { ...DISKFUL, d: { ...DISKFUL.d, links: 'deny' } };
+    const c = make(places, { strict: true, links: 'verify' });
+    assert.equal(c.global.links, 'verify');
+    assert.deepEqual(linksOf(c), {
+      s: 'verify',
+      m: 'verify',
+      d: 'deny',
+      n: 'verify',
+    });
+    const one = make(
+      { ...DISKFUL, n: { ...DISKFUL.n, links: 'verify' } },
+      {
+        strict: true,
+      },
+    );
+    assert.equal(one.place('n').links, 'verify');
+    assert.equal(one.place('d').links, 'deny');
+  });
+
+  it('without strict: null, and a value is refused', () => {
+    const c = make(DISKFUL);
+    assert.equal(c.global.links, null);
+    assert.ok(c.allPlaces.every((p) => p.links === null));
+    fails(
+      { defaults: { links: 'deny' }, places: DISKFUL },
+      /defaults\.links applies under strict routing only/,
+    );
+    fails(
+      { places: { d: { ...DISKFUL.d, links: 'verify' } } },
+      /places\.d\.links applies under strict routing only/,
+    );
+  });
+
+  it("only 'deny' or 'verify'; no place without a directory on disk", () => {
+    for (const value of ['allow', 'indexed', true, 1, '']) {
+      fails(
+        { defaults: { strict: true, links: value }, places: DISKFUL },
+        /defaults\.links must be "deny" or "verify"/,
+      );
+      fails(
+        {
+          defaults: { strict: true },
+          places: { d: { ...DISKFUL.d, links: value } },
+        },
+        /places\.d\.links must be "deny" or "verify"/,
+      );
+    }
+    for (const [name, place] of Object.entries(DISKLESS)) {
+      fails(
+        {
+          defaults: { strict: true },
+          places: { [name]: { ...place, links: 'deny' } },
+        },
+        new RegExp(
+          `places\\.${name}\\.links applies to places with a directory on disk`,
+        ),
+      );
+    }
+  });
+
+  it('the CLI sets it', () => {
+    const cli = VfsConfig.fromArgv(
+      [
+        'node',
+        'app.js',
+        '--',
+        '--vfs.defaults.strict=true',
+        '--vfs.places.d.links=verify',
+      ],
+      { places: DISKFUL },
+    );
+    assert.equal(cli.place('d').links, 'verify');
+    assert.equal(cli.place('s').links, 'deny');
   });
 });
 
@@ -434,6 +670,52 @@ describe('VfsConfig.fromArgv', () => {
     assert.equal(c.global.memory.limit, 2 * 1024 ** 2);
     assert.equal(c.global.strict, true);
     assert.equal(c.global.watchTimeout, 50);
+  });
+
+  // The CLI overrides examples README ("API" → VfsConfig) and
+  // doc/integration.md ("CLI overrides") show verbatim: every `--vfs.*`
+  // key must be one parseArgv() actually accepts.
+  it('parses the CLI examples shown in README and doc/integration.md', () => {
+    const docApp = {
+      places: { tools: { fs: true }, workspace: { fs: true, require: true } },
+    };
+    const fromIntegrationDoc = VfsConfig.fromArgv(
+      argv(
+        '--vfs.defaults.memory.limit=512mib',
+        '--vfs.defaults.strict=true',
+        '--vfs.defaults.hooks.fs=false',
+        '--vfs.enable=tools,workspace',
+        '--vfs.disable=static',
+      ),
+      { ...docApp, places: { ...docApp.places, static: { fs: true } } },
+    );
+    assert.equal(fromIntegrationDoc.global.memory.limit, 512 * 1024 ** 2);
+    assert.equal(fromIntegrationDoc.global.strict, true);
+    assert.equal(fromIntegrationDoc.global.hooks.fs, false);
+    assert.deepEqual(
+      fromIntegrationDoc.places.map((p) => p.name),
+      ['tools', 'workspace'],
+    );
+
+    const fromReadme = VfsConfig.fromArgv(
+      argv(
+        '--vfs.defaults.memory.limit=512mib',
+        '--vfs.defaults.strict=true',
+        '--vfs.enable=static,lib',
+        '--vfs.disable=scratch',
+      ),
+      {
+        places: {
+          static: { fs: true },
+          lib: { fs: true },
+          scratch: { fs: true },
+        },
+      },
+    );
+    assert.deepEqual(
+      fromReadme.places.map((p) => p.name),
+      ['static', 'lib'],
+    );
   });
 
   it('overrides place options and toggles places', () => {
