@@ -1570,7 +1570,11 @@ A `rename` routes both paths as mutations and its source as a read:
   policy of its place and extension: its preparer, or the disk territory
   for an extension the place does not cache. Disk-origin places share the
   disk, so a file moves between them natively.
-- A hidden source is `EACCES`: no new name makes it readable.
+- A hidden source is `EACCES`: no new name makes it readable — through
+  the `PlaceFs` facade of a disk-origin place too. A file written there
+  and not published yet is one where the place publishes only what it
+  indexed (`fs.fallback: 'deny'`, strict's default), until its watcher
+  publishes it.
 - A directory moves natively within one disk-origin place — the watcher
   republishes its tree — and outside managed territory. A directory rename
   across a place's boundary, of a place's root or of a tree that holds

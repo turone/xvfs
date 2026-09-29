@@ -732,9 +732,11 @@ for (const links of MODES) {
       ]) {
         assert.throws(() => wd.unlink(name), refused('ENOTSUP', 'unlink', p));
         assert.throws(() => wd.rm(name), refused('ENOTSUP', 'rm', p));
+        // A link is no entry the place publishes: a hidden source, refused
+        // as its read is, as through the patch (FsRouter.rename).
         assert.throws(
           () => wd.rename(name, '/x'),
-          refused('ENOTSUP', 'rename', p, x),
+          refused('EACCES', 'rename', p, x),
         );
         assert.throws(
           () => wd.rename('/f.bin', name),

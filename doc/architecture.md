@@ -1311,7 +1311,9 @@ read-only place's raw file, and a write through it may never reach the
 place's watcher. A copy gives the same bytes without sharing the file.
 
 **A native rename moves the raw file. Both paths pass the mutation
-routing and the source the read routing: a hidden source is `EACCES`. A
+routing and the source the read routing: a hidden source is `EACCES` —
+through the `PlaceFs` facade of a disk-origin place too, which takes the
+router's answer from the kernel it is handed (`kernel.routeRename`). A
 published disk-origin file may leave `appRoot` or change its extension; the
 watchers then drop the old canonical entry and publish the new key by the
 policy of its place and extension. A directory moves natively only within
@@ -1342,6 +1344,11 @@ or a link that leaves the place takes them out of it, where a link into
 virtual entry has no raw input, and its bundle may embed the old key
 (`scriptOptions.filename`, `meta`, bytecode). A copy and a delete across
 places would not be atomic, and a virtual place is a filesystem of its own.
+The facade renamed on disk without asking, so a file its place hides took
+a published name (`hidden.bin` → `shown.txt`) where the patch refused it.
+A file written and not yet published is hidden too where the place
+publishes only what it indexed (`fs.fallback: 'deny'`, strict's default):
+until the watcher publishes it, a rename of it is `EACCES` through either.
 
 **The patch removes no place's own directory that `PlaceFs` keeps — an
 indexed place's, and under strict any place's: `rm` and `rmdir` of it are
