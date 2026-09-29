@@ -13,8 +13,22 @@ const templates = kernel.fs('templates');
 const { id } = workerData;
 const DATA = { user: { name: 'Ada', count: 3 } };
 
-parentPort.on('message', ({ cmd, round }) => {
+// Resolves once this thread has applied the publication `version`: the
+// command that asks for it may come before the update that carries it.
+const reached = (version) =>
+  new Promise((resolve) => {
+    if (kernel.version >= version) return void resolve();
+    const onPublish = () => {
+      if (kernel.version < version) return;
+      kernel.off('publish', onPublish);
+      resolve();
+    };
+    kernel.on('publish', onPublish);
+  });
+
+parentPort.on('message', async ({ cmd, round, version }) => {
   if (cmd !== 'render') return;
+  await reached(version);
   const { source, cachedData, scriptOptions, meta } =
     templates.script('/greeting.tmpl');
   const script = new vm.Script(source, { ...scriptOptions, cachedData });
