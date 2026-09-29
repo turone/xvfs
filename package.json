@@ -26,12 +26,12 @@
   ],
   "repository": {
     "type": "git",
-    "url": "https://github.com/turone/shared-memory-fs"
+    "url": "https://github.com/turone/xvfs"
   },
   "bugs": {
-    "url": "https://github.com/turone/shared-memory-fs/issues"
+    "url": "https://github.com/turone/xvfs/issues"
   },
-  "homepage": "https://github.com/turone/shared-memory-fs",
+  "homepage": "https://github.com/turone/xvfs",
   "main": "index.js",
   "types": "index.d.ts",
   "exports": {
