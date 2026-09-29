@@ -548,6 +548,43 @@ for (const links of MODES) {
         close();
       }
     });
+
+    // A tree that cannot be read to tell whether it holds a link does not
+    // move in. A directory without permissions stands for it: POSIX, and
+    // not as root, who reads it anyway.
+    it(
+      'a tree from outside that cannot be read does not move in',
+      {
+        skip:
+          process.platform === 'win32' || process.getuid?.() === 0
+            ? 'POSIX, not as root'
+            : false,
+      },
+      async () => {
+        const { k, at, outside, close } = await opened(links, { setup });
+        const box = writeTree(path.join(outside, 'locked'), {
+          'in/i.bin': 'i',
+        });
+        const inner = path.join(box, 'in');
+        fs.chmodSync(inner, 0);
+        fsPatch.install(k);
+        try {
+          const to = at('d', 'locked');
+          assert.throws(
+            () => fs.renameSync(box, to),
+            (err) => {
+              assert.equal(err.code, 'ENOTSUP');
+              assert.match(err.message, /cannot be checked for links/);
+              return true;
+            },
+          );
+          assert.equal(disk.existsSync(to), false);
+        } finally {
+          fs.chmodSync(inner, 0o755);
+          close();
+        }
+      },
+    );
   });
 }
 
@@ -558,10 +595,15 @@ for (const links of MODES) {
 for (const links of MODES) {
   it(`strict, links: ${links}: the facade removes and moves no link on its disk`, async () => {
     const base = tmpDir('links-facade');
-    const root = writeTree(path.join(base, 'app'), { 'wd/f.bin': 'f' });
+    const root = writeTree(path.join(base, 'app'), {
+      'wd/f.bin': 'f',
+      'wd/tree/t.bin': 't',
+    });
     const outside = writeTree(path.join(base, 'outside'), { 'o.bin': 'o' });
     const jk = path.join(root, 'wd', 'jk');
     linkDir(outside, jk);
+    const jt = path.join(root, 'wd', 'tree', 'jt');
+    linkDir(outside, jt);
     const places = { wd: { fs: { writable: true } } };
     const defaults = { strict: true, links, watchTimeout: 60000 };
     const k = await kernel(root, places, defaults);
@@ -587,6 +629,27 @@ for (const links of MODES) {
         );
         assert.ok(isLink(p));
       }
+      // A directory holding a link the index knows: with 'deny' neither
+      // renamed nor removed; with 'verify' it moves and goes, every call
+      // through the link proven.
+      const tree = path.join(root, 'wd', 'tree');
+      const tree2 = path.join(root, 'wd', 'tree2');
+      if (links === 'deny') {
+        assert.throws(
+          () => wd.rename('/tree', '/tree2'),
+          refused('ENOTSUP', 'rename', tree, tree2),
+        );
+        assert.throws(
+          () => wd.rm('/tree', { recursive: true }),
+          refused('ENOTSUP', 'rm', tree),
+        );
+        assert.ok(isLink(jt));
+      } else {
+        wd.rename('/tree', '/tree2');
+        assert.ok(isLink(path.join(tree2, 'jt')));
+        wd.rm('/tree2', { recursive: true });
+        assert.equal(disk.existsSync(tree2), false);
+      }
       wd.rename('/f.bin', '/g.bin');
       wd.unlink('/g.bin');
       assert.equal(disk.existsSync(f), false);
@@ -594,6 +657,7 @@ for (const links of MODES) {
       k.close();
       unlinkDir(ju);
       unlinkDir(jk);
+      if (isLink(jt)) unlinkDir(jt);
       rm(base);
     }
   });

@@ -498,7 +498,7 @@ in the scan a disk-origin place makes anyway, or in one walk of
 
 ### The patch changes no link on a place's disk
 
-Since `3d2db67` the patch makes, removes and moves no link on a place's
+Since `b46ef2a` the patch makes, removes and moves no link on a place's
 disk under strict, and the index of `'deny'` only grows: a refusal asks
 no `lstat`, while a removal or a rename there asks one of its path — a
 rename two, its source and its destination. A/B against `e33ed38`, four
