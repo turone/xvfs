@@ -5,7 +5,15 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
 const fsPatch = require('../lib/adapters/fs-patch.js');
-const { tmpDir, writeTree, rm, kernel, worker } = require('./helpers.js');
+const {
+  tmpDir,
+  writeTree,
+  rm,
+  kernel,
+  worker,
+  leakedBytes,
+  until,
+} = require('./helpers.js');
 
 // Disk access behind the VFS's back: captured before any patch is installed.
 const {
@@ -72,6 +80,25 @@ const RENAMES = {
 };
 // A shared virtual place mutates asynchronously: only these forms reach it.
 const { renameSync, ...ASYNC } = RENAMES;
+
+// A directory rename that passes through to node:fs. Windows answers EPERM
+// while another process — typically a virus scanner looking at what just
+// moved — holds a handle inside the directory; node:fs does not retry, so
+// the test does, on that code and platform only.
+const moveDir = async (from, to) => {
+  let busy = null;
+  const moved = await until(() => {
+    try {
+      fs.renameSync(from, to);
+      return true;
+    } catch (err) {
+      if (err.code !== 'EPERM' || process.platform !== 'win32') throw err;
+      busy = err;
+      return false;
+    }
+  });
+  if (!moved) throw busy;
+};
 
 // A refusal names the operation, its source and its destination.
 const refusal = (err, code, from, to) => {
@@ -321,19 +348,22 @@ describe('rename routes its source and its destination', () => {
     }
     // A directory strict routing hides stays hidden.
     await refusedEverywhere(at('closed', 'rawdir'), fresh('rawdir'), 'EACCES');
-    // Within its place, or outside the indexed ones, a directory is node:fs.
-    fs.renameSync(at('wd', 'pages'), at('wd', 'docs'));
+    // Within its place, or outside every place, a directory is node:fs.
+    await moveDir(at('wd', 'pages'), at('wd', 'docs'));
     assert.equal(readDisk(at('wd', 'docs', 'p.txt'), 'utf8'), 'page');
-    fs.renameSync(at('wd', 'docs'), at('wd', 'pages'));
-    fs.renameSync(unrelated, `${unrelated}2`);
-    fs.renameSync(`${unrelated}2`, unrelated);
+    await moveDir(at('wd', 'docs'), at('wd', 'pages'));
+    await moveDir(unrelated, `${unrelated}2`);
+    await moveDir(`${unrelated}2`, unrelated);
     assert.equal(readDisk(path.join(unrelated, 'o.txt'), 'utf8'), 'o');
+    // Under strict a directory leaves no place, whatever its provider — nor
+    // does a place's own: it could take a link of the place's disk out of
+    // it (links.test.js). Within its place it moves.
     for (const name of ['files', 'nd']) {
-      const moved = fresh(name);
-      fs.renameSync(at(name, 'd'), moved);
-      fs.renameSync(moved, at(name, 'd'));
-      fs.renameSync(at(name), moved);
-      fs.renameSync(moved, at(name));
+      await refusedEverywhere(at(name, 'd'), fresh(name), 'ENOTSUP');
+      await refusedEverywhere(at(name), fresh(name), 'ENOTSUP');
+      assert.ok(onDisk(at(name, 'd')), name);
+      await moveDir(at(name, 'd'), at(name, 'e'));
+      await moveDir(at(name, 'e'), at(name, 'd'));
       assert.ok(onDisk(at(name, 'd')), name);
     }
   });
@@ -404,5 +434,102 @@ describe('rename routes its source and its destination', () => {
     );
     assert.equal(refused.length, 1);
     assert.equal(refused[0][0].code, 'EACCES');
+  });
+});
+
+// A file renamed onto itself, as node:fs renames it: once the rename's
+// checks pass, nothing changes — no publication, no update. Nor does a
+// directory renamed onto itself.
+describe('a rename onto itself', () => {
+  it('changes nothing in sab, map or from a worker; its checks still refuse', async () => {
+    const root = writeTree(tmpDir('vfs-rename-self'), { 'ro/r.txt': 'r' });
+    const places = {
+      writable: true,
+      ext: ['txt', 'js'],
+      prepare: { wrap: ['js'] },
+    };
+    const k = await kernel(
+      root,
+      {
+        v: { origin: 'virtual', fs: places },
+        m: { provider: 'map', origin: 'virtual', fs: places },
+        ro: { fs: { ext: ['txt'] } },
+      },
+      {},
+      { preparers: { wrap: (raw) => `[${raw}]` } },
+    );
+    for (const name of ['v', 'm']) {
+      await k.fs(name).writeFile('/a.txt', 'alpha');
+      await k.fs(name).writeFile('/d/b.txt', 'bravo');
+      await k.fs(name).writeFile('/p.js', 'p');
+    }
+    const w = worker(k);
+    const realNow = Date.now;
+    try {
+      const at = (name, key) => k.fs(name).pathOf(key);
+      // The published version of every file of both places: its entry,
+      // bytes and mtime.
+      const versions = () =>
+        ['v', 'm'].flatMap((name) =>
+          [...k.registry.get(name).files].map(([key, entry]) => [
+            key,
+            entry,
+            Buffer.from(entry.data),
+            entry.stat.mtimeMs,
+          ]),
+        );
+      const before = versions();
+      const updates = k.nextUpdateId;
+      const retires = k.nextRetireId;
+      const threads = [
+        ['sab', 'v', k.fs('v')],
+        ['map', 'm', k.fs('m')],
+        ['worker', 'v', w.kernel.fs('v')],
+      ];
+      // However late the renames, nothing takes their time.
+      Date.now = () => realNow() + 60_000;
+      for (const [label, , place] of threads) {
+        for (const [from, to] of [
+          ['/a.txt', '/a.txt'],
+          ['/d', '/d'],
+          ['/d/', '/d/'],
+        ]) {
+          const done = await place.rename(from, to);
+          assert.equal(done, undefined, `${label}: ${from}`);
+        }
+      }
+      Date.now = realNow;
+      for (const [label, name, place] of threads) {
+        for (const [from, to, code] of [
+          ['/none.txt', '/none.txt', 'ENOENT'],
+          ['/p.js', '/p.js', 'ENOTSUP'],
+          ['/a.txt/', '/a.txt', 'ENOTDIR'],
+        ]) {
+          const err = await outcome(() => place.rename(from, to));
+          const key = from.replace(/\/$/, '');
+          refusal(err, code, at(name, key), at(name, to));
+          assert.ok(err.message.includes(code), label);
+        }
+      }
+      for (const place of [k.fs('ro'), w.kernel.fs('ro')]) {
+        const err = await outcome(() => place.rename('/r.txt', '/r.txt'));
+        refusal(err, 'EROFS', at('ro', '/r.txt'), undefined);
+      }
+      assert.deepEqual(versions(), before, 'the same versions');
+      for (const [i, [key, entry]] of versions().entries()) {
+        assert.equal(entry, before[i][1], `${key}: not republished`);
+      }
+      assert.equal(w.kernel.fs('v').readFile('/a.txt', 'utf8'), 'alpha');
+      assert.equal(w.kernel.fs('v').readFile('/d/b.txt', 'utf8'), 'bravo');
+      assert.equal(k.nextUpdateId, updates, 'no update');
+      assert.equal(k.nextRetireId, retires, 'nothing retired');
+      assert.equal(leakedBytes(k), 0, 'nothing allocated');
+      assert.equal(k.mutations.size, 0);
+    } finally {
+      Date.now = realNow;
+      w.kernel.close();
+      k.close();
+      rm(root);
+    }
   });
 });

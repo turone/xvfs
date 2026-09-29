@@ -17,6 +17,9 @@ const MULTI_TENANT_MS = 10000;
 const SEA_STATIC_MS = 10000;
 const WORKER_STATIC_MS = 15000;
 const PREPARED_SCRIPTS_MS = 10000;
+const ETAG_MS = 15000;
+const SSR_MS = 10000;
+const ASYNC_WORKER_MS = 10000;
 
 const httpRequest = (url) =>
   new Promise((resolve, reject) => {
@@ -458,6 +461,236 @@ describe('examples smoke', () => {
           ),
           stdout,
         );
+      } finally {
+        await stopChild(child);
+      }
+    },
+  );
+
+  it(
+    'etag example shares one ETag across workers and answers If-None-Match',
+    { timeout: ETAG_MS },
+    async () => {
+      const child = spawn(process.execPath, ['examples/etag/server.js'], {
+        cwd: REPO,
+        env: { ...process.env, PORT: '0', WORKERS: '2' },
+        stdio: ['ignore', 'pipe', 'pipe'],
+        windowsHide: true,
+      });
+      try {
+        const [p1, p2] = await waitForWorkers(child, 2);
+        const at = (port) => `http://127.0.0.1:${port}/hello.txt`;
+
+        const one = await httpGet(at(p1));
+        const two = await httpGet(at(p2));
+        assert.equal(one.statusCode, 200);
+        assert.equal(two.statusCode, 200);
+        assert.match(String(one.headers.etag), /^"[A-Za-z0-9_-]+"$/);
+        assert.equal(
+          one.headers.etag,
+          two.headers.etag,
+          'same ETag from both workers',
+        );
+        assert.deepEqual(one.body, two.body);
+
+        const etag1 = one.headers.etag;
+        const cached = await httpGet(at(p1), { 'if-none-match': etag1 });
+        assert.equal(cached.statusCode, 304);
+        assert.equal(cached.body.length, 0);
+        assert.equal(cached.headers.etag, etag1);
+
+        // RFC 9110: a comma-separated list matches if any entry matches...
+        const listed = await httpGet(at(p1), {
+          'if-none-match': `"not-the-one", ${etag1}`,
+        });
+        assert.equal(listed.statusCode, 304);
+        // ...and so does a weak (`W/`) form of our own strong ETag.
+        const weak = await httpGet(at(p1), {
+          'if-none-match': `W/${etag1}`,
+        });
+        assert.equal(weak.statusCode, 304);
+
+        const updated = await waitForUrl(
+          at(p2),
+          (res) => res.statusCode === 200 && res.headers.etag !== etag1,
+        );
+        assert.notEqual(updated.headers.etag, etag1);
+        assert.match(updated.body, /updated/);
+
+        // Both workers converge on the new ETag; the stale one now misses.
+        const other = await httpGet(at(p1));
+        assert.equal(other.headers.etag, updated.headers.etag);
+        const stale = await httpGet(at(p1), { 'if-none-match': etag1 });
+        assert.equal(stale.statusCode, 200);
+      } finally {
+        await stopChild(child);
+      }
+    },
+  );
+
+  it(
+    'ssr example renders prepared templates with cached data and live-updates workers',
+    { timeout: SSR_MS },
+    async () => {
+      const child = spawn(process.execPath, ['examples/ssr/run.js'], {
+        cwd: REPO,
+        env: { ...process.env },
+        stdio: ['ignore', 'pipe', 'pipe'],
+        windowsHide: true,
+      });
+      const output = attachOutput(child);
+      try {
+        const exited = await waitForExit(child, SSR_MS - 1000);
+        const stdout = output.stdout();
+        assert.equal(exited, true, `ssr example timed out\n${stdout}`);
+        assert.equal(child.exitCode, 0, output.stderr() || stdout);
+        assert.equal(output.stderr(), '');
+        const lines = stdout.split(/\r?\n/);
+
+        const round1 = lines.filter((line) => line.includes('round 1:'));
+        const round2 = lines.filter((line) => line.includes('round 2:'));
+        const round3 = lines.filter((line) => line.includes('round 3:'));
+        assert.equal(round1.length, 2, stdout);
+        assert.equal(round2.length, 2, stdout);
+        assert.equal(round3.length, 2, stdout);
+        for (const line of [...round1, ...round2, ...round3]) {
+          assert.match(line, /\(cached data accepted\)$/, stdout);
+        }
+        assert.ok(
+          round1.every((line) =>
+            line.includes('Hello, Ada! You have 3 new messages.'),
+          ),
+          stdout,
+        );
+        assert.ok(
+          round2.every((line) =>
+            line.includes('Welcome back, Ada! Your unread count is 3.'),
+          ),
+          stdout,
+        );
+        // The old (round 1) render does not remain in round 2.
+        assert.ok(!round2.some((line) => line.includes('Hello, Ada!')), stdout);
+
+        // A bad placeholder rejects the whole publication...
+        const rejectedLine = lines.find((line) =>
+          line.startsWith('bad template rejected:'),
+        );
+        assert.ok(rejectedLine, stdout);
+        assert.match(
+          rejectedLine,
+          /"\{\{ 1\.2 \}\}" is not a dotted identifier path/,
+        );
+        // ...and round 2's template is still what every worker renders.
+        assert.ok(
+          round3.every((line) =>
+            line.includes('Welcome back, Ada! Your unread count is 3.'),
+          ),
+          stdout,
+        );
+
+        const bundleLine = lines.find((line) =>
+          line.startsWith('main thread bundle'),
+        );
+        assert.ok(bundleLine, stdout);
+        assert.match(bundleLine, /meta\.template=\/greeting\.tmpl\b/);
+        assert.match(bundleLine, /scriptOptions\.filename=\S*greeting\.tmpl\b/);
+        assert.match(bundleLine, /cachedData=\d+b/);
+      } finally {
+        await stopChild(child);
+      }
+    },
+  );
+
+  it(
+    'async-worker publishes writeFiles from a worker, one version for the whole set',
+    { timeout: ASYNC_WORKER_MS },
+    async () => {
+      const child = spawn(process.execPath, ['examples/async-worker/run.js'], {
+        cwd: REPO,
+        env: { ...process.env },
+        stdio: ['ignore', 'pipe', 'pipe'],
+        windowsHide: true,
+      });
+      const output = attachOutput(child);
+      try {
+        const exited = await waitForExit(child, ASYNC_WORKER_MS - 1000);
+        const stdout = output.stdout();
+        assert.equal(exited, true, `async-worker example timed out\n${stdout}`);
+        assert.equal(child.exitCode, 0, output.stderr() || stdout);
+        assert.equal(output.stderr(), '');
+        const lines = stdout.split(/\r?\n/);
+
+        const genLine = (round) =>
+          lines.find((line) => line.startsWith(`generator round ${round}:`));
+        const readerLines = (round) =>
+          lines.filter(
+            (line) =>
+              line.startsWith('reader ') && line.includes(`round ${round}:`),
+          );
+
+        const gen1 = genLine(1);
+        const gen2 = genLine(2);
+        const gen3 = genLine(3);
+        assert.ok(gen1, stdout);
+        assert.ok(gen2, stdout);
+        assert.ok(gen3, stdout);
+        assert.match(gen1, /published version=1 sha256=([0-9a-f]{16})…/);
+        assert.match(gen2, /published version=2 sha256=([0-9a-f]{16})…/);
+        // Round 3's render.js cannot compile: the whole batch is refused,
+        // report.html and report.json included, though both are valid.
+        assert.match(gen3, /writeFiles rejected: ENOTSUP:/);
+        assert.match(gen3, /fs\.script\.compile/);
+
+        const sha1 = gen1.match(/sha256=([0-9a-f]{16})…/)[1];
+        const sha2 = gen2.match(/sha256=([0-9a-f]{16})…/)[1];
+        assert.notEqual(sha1, sha2, 'round 2 content differs from round 1');
+
+        const round1 = readerLines(1);
+        const round2 = readerLines(2);
+        assert.equal(round1.length, 2, stdout);
+        assert.equal(round2.length, 2, stdout);
+        for (const line of round1) {
+          assert.match(
+            line,
+            /version=1 versions-match=true html-matches=true/,
+            stdout,
+          );
+          assert.match(line, new RegExp(`sha256=${sha1}`));
+          assert.match(line, /\(cached data accepted\)$/);
+        }
+        for (const line of round2) {
+          assert.match(
+            line,
+            /version=2 versions-match=true html-matches=true/,
+            stdout,
+          );
+          assert.match(line, new RegExp(`sha256=${sha2}`));
+          assert.match(line, /\(cached data accepted\)$/);
+        }
+
+        // No reader ever announces round 3: nothing published, so no
+        // 'publish' event fires. Its next read, on demand, is still round
+        // 2's whole set, unchanged.
+        assert.equal(readerLines(3).length, 0, stdout);
+        const afterLines = lines.filter((line) =>
+          line.includes('after rejection:'),
+        );
+        assert.equal(afterLines.length, 2, stdout);
+        for (const line of afterLines) {
+          assert.match(
+            line,
+            /version=2 versions-match=true html-matches=true/,
+            stdout,
+          );
+          assert.match(line, new RegExp(`sha256=${sha2}`));
+          assert.match(line, /\(unchanged\)$/);
+        }
+
+        const mainLine = lines.find((line) =>
+          line.startsWith('main thread reports.version:'),
+        );
+        assert.ok(mainLine, stdout);
+        assert.match(mainLine, /html=2 json=2 render\.js=2/);
       } finally {
         await stopChild(child);
       }

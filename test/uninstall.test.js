@@ -98,7 +98,11 @@ describe('fs-patch: references taken while installed outlive uninstall()', () =>
     assert.ok(!(dir instanceof fs.Dir));
     assert.equal(dir.readSync().name, 'm.txt');
     dir.closeSync();
-    assert.deepEqual(slashed(captured.globSync('*', { cwd: root })), ['pub']);
+    // glob walks natively here (the runner loaded it before the patch): a
+    // walk into the places is refused.
+    assert.throws(() => captured.globSync('*', { cwd: root }), {
+      code: 'ENOTSUP',
+    });
   });
 
   it('after uninstall(), every reference is node:fs again', async () => {

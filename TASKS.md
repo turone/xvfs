@@ -35,7 +35,9 @@ non-strict routing, and both fallbacks.
 - Recursive `cp` of or into managed territory, with `force`,
   `errorOnExist` and `filter` per descendant.
 - `watch` of managed territory: publication-level events for disk and
-  virtual updates, never a hidden raw name; a defined outcome for a
+  virtual updates — the kernel announces its publications already
+  (`kernel.on('publish')`, README, Publication events), which a watch
+  could follow — never a hidden raw name; a defined outcome for a
   preparation that fails; a recursive watch bounded by the filtered
   listing; `AbortSignal`, `close()` and backpressure as in `node:fs`.
 - Recursive `readdir` / `opendir` / `watch` from above `appRoot`, or from
@@ -56,118 +58,104 @@ Hard links into or out of a place stay refused by decision
 (`doc/architecture.md`): one physical file cannot carry two canonical
 contents.
 
-## P2 — Symbolic links
+## P3 — Publication events of map places
 
-**Problem.** Routing is lexical, and native reads follow links: a link
-inside the disk territory of a place (`fs.fallback: 'disk'`,
-`provider: 'disk'`) can point outside `appRoot`, and a link created outside
-`appRoot` to a managed entry — or to a directory above `appRoot` — reads its
-raw disk content past the routing. Not reproduced here yet (creating links
-on Windows needs a privilege).
+**Problem.** `kernel.on('publish')` announces the publications of shared
+places only (`sab`, `sea`): a `map` place — each thread's own — publishes
+at once on its Map, past the kernel's epochs, and announces nothing, so an
+application that keeps route handlers in a `map + virtual` place (the
+hot-reload example) cannot react to its own writes through events, nor to
+what the watcher publishes into a `map + disk` place.
 
-**Cause.** The router never touches the disk — it sits on the hot path of
-every fs call — and `symlink` targets are resolved only when read.
+**Cause.** The event is a property of a commit (`#flush`, `#apply`), and a
+map place commits nothing through the kernel: `MapStore` sets its entries
+itself, and the watch pipeline removes them directly
+(`place.store.remove`).
 
-**Done when.** A decided policy (refuse links whose target the kernel
-serves or that enclose `appRoot`, refuse links in disk territory, or check
-the real path of passthrough reads) is implemented with tests on Linux and
-Windows.
+**Done when.** A map place announces each local commit — a mutation, a
+set of `writeFiles`, a watcher epoch — as one `'publish'` event of its
+thread with `version: null` (its content has no version shared across
+threads), and a watcher epoch that changes shared and map places is one
+event. One way: the kernel hands each `MapStore` an announcer its
+mutations call once each, and a watcher epoch records its map changes
+beside its kernel epoch, which `#flush` joins into the epoch's event.
 
-## P3 — Separators of recursive listings on Windows
+## P3 — Strict and the links that already lead into `appRoot`
 
-**Problem.** A managed recursive `readdir` returns `/`-separated names on
-every platform; native `node:fs` returns `path.sep` (`sub\b.txt` on
-Windows).
+**Problem.** Under strict a link that already leads into `appRoot` from
+outside it reads past the routing: Windows' own junctions
+(`C:\Documents and Settings`, `%USERPROFILE%\Local Settings`,
+`AppData\Local\Application Data`) for any `appRoot` below the user
+profile, `/proc/self/root/…` and `/proc/self/cwd/…` on Linux, a link or
+a hard link another process made, a volume mounted in a folder, the local
+path behind an `appRoot` on a share of this machine. Documented as not
+covered (`doc/architecture.md`, Routing and strict mode): strict is a
+routing policy, not an OS sandbox.
 
-**Cause.** Place keys are `/`-separated and listings reuse them.
+**Cause.** Such a path lies outside `appRoot`, where strict asks nothing;
+only the disk knows where it leads.
 
-**Done when.** Listings either use `path.sep` like native `node:fs` or
-document `/` as the contract, with a test pinning the choice on Windows.
+**Done when.** Decided and, if taken, implemented with a benchmark: an
+opt-in that proves every native path outside `appRoot` as a place's disk
+is proven today (its real path off `appRoot`'s real line), at one
+`realpath` per call — or the boundary stays as documented.
 
-## P3 — Benchmarks
+## P3 — `links: 'verify'` lets a link into managed territory be looked at
 
-**Problem.** Memory savings and startup / per-request costs are stated as
-copy counts, not measured (`doc/alternatives.md`).
+**Problem.** Under strict with `links: 'verify'` the ops that look at a
+link and not its target — `lstat`, `readlink` — on a link inside a disk
+place that leads into managed territory (`d/jro` → `ro`, another place,
+`appRoot`, above it) are `EACCES`, though `node:fs` would read nothing the
+link hides: the link cannot be inspected through the patch. `links:
+'deny'` (the default) knows a link by its name and lets them through.
+(Removing or moving a link on a place's disk is `ENOTSUP` in both modes,
+by decision — README, Links on a place's disk.)
 
-**Done when.** A reproducible benchmark compares worker pools of several
-sizes against plain `node:fs` and against a Buffer cache in every worker:
-memory, startup, throughput, p95 / p99 request latency, and the cost of an
-update and of compression. The docs cite its results.
+**Cause.** The proof (`Aliases.territory`) resolves the whole path, which
+lands in managed territory, so it cannot tell a call that follows the link
+from one that does not.
 
-## P3 — One copy fewer for `Uint8Array` preparer results
+**Done when.** A call that does not follow the last component is proven by
+its parent's real path plus the leaf name (`Aliases.territory(root, p,
+own)`, threaded through `VfsKernel.routeRead` / `routeMutation` and the
+`PlaceFs` facade), so such a link is seen; the leaf's `.`,
+`..` and trailing-separator forms, which win32 and posix resolve
+differently, fall back to the full proof, and `stat` / `chmod` / `chown` /
+`utimes` (which follow) keep it — with tests on both platforms and the
+mutation that a following op wrongly reuses the own proof. Or the boundary
+stays fail-closed as documented (README, doc/architecture.md).
 
-**Problem.** A `Uint8Array` a preparer returns is copied twice: into an
-owned canonical Buffer, then into its provisional SAB allocation.
+## P3 — Under strict a disk-origin write is hidden until it is published
 
-**Cause.** The first copy takes ownership — the caller may still change the
-array, and a view may cover part of an `ArrayBuffer` with a lifetime of
-its own; the second is the one publication path of strings, Buffers and
-arrays, which rollback, index-at-flush, `fs.script` compilation,
-companions and atomic publication rely on.
+**Problem.** Under strict — `fs.fallback: 'deny'`, strict's default — a
+file the process writes into a disk-origin place is neither readable nor
+renamable until the kernel's watcher publishes it: `writeFile` and then
+`rename` of the same file is `EACCES` or not by timing, through the patch
+and the `PlaceFs` facade alike (README, Copies and renames).
 
-**Done when.** A benchmark measures the publication of large `Uint8Array`
-results; only if it justifies it, they are written straight into the
-provisional allocation, with rollback and ownership guarantees kept and no
-regression for Buffer and string results.
+**Cause.** The read routing serves published entries only, and a rename
+routes its source as a read (a hidden source, `FsRouter.rename`); the
+write lands on disk and the watcher republishes it later.
 
-## P3 — Public diagnostics
+**Done when.** A thread's own write is visible to its next call in order —
+published before the call returns, or a pending set the router consults —
+or the timing stays documented, with `kernel.on('publish')` the way to
+wait.
 
-**Problem.** Only the internal `retirements()` shows what the kernel holds.
-Pool usage and fragmentation, bytes waiting to be freed, ACK age (a stuck
-worker), disk-fallback counts and preparation failures are not observable.
+## P3 — The strict rules in a module of their own
 
-**Cause.** A public `stats()` was deliberately left out of the lifetime
-work.
+**Problem.** `lib/kernel.js` holds the strict rules beside the
+orchestration: the wiring of `Aliases`, the index of links and its
+replication, `#proven` / `#territory` / `#nodeLoads`, the rules of links
+on a place's disk (`makesLink`, `touchesLink`, `movesLink`, `#inPlace`),
+`keepsRoot` and `diagnostics().strict`.
 
-**Done when.** A documented, read-only API reports these metrics, a test
-shows a stuck worker through it, and the API never frees or changes
-anything.
-
-## P3 — Preparation regression tests
-
-**Problem.** Two guarantees hold by construction but have no test: a new
-file in a new directory gets its prepared source and its bytecode in one
-`vfs-update`, and compaction keeps a prepared source and its companions
-together.
-
-**Done when.** Both are pinned in `test/prepare.test.js`, driven by manual
-watcher epochs and a forced compaction.
-
-## P3 — Diagnostics of `prepare` conflicts inside one domain
-
-**Problem.** When one domain's object form assigns an extension to several
-preparers, the config error names only the first two; across domains it
-names every declaration.
-
-**Done when.** The error lists every declaration of the extension, with a
-test for three or more.
-
-## P3 — `fs.fallback: 'disk'` on a place without `fs.ext`
-
-**Problem.** Without strict, a disk-origin place with no `fs.ext` resolves
-`fs.fallback` to `'disk'` (its permissive reads), yet the same value set
-explicitly is a config error ("needs a finite ext list"). A resolved config
-should be valid input.
-
-**Done when.** Either the explicit value is accepted with that meaning, or
-the default resolves to another value — decided, documented and tested.
-
-## P3 — glob and virtual entries
-
-**Problem.** glob captures the `node:fs` functions it walks with when it is
-loaded: loaded after the patch it walks the places (virtual entries show,
-filtered by route); loaded before, it walks the disk natively (they never
-show). Which one an application gets depends on load order.
-
-**Done when.** One behavior is chosen and documented — e.g. glob always
-lists through the places — with a test for both load orders.
-
-## P3 — TypeScript declarations
-
-**Problem.** The public API has no type declarations.
-
-**Done when.** Declarations cover the public API (`VfsConfig`, `VfsKernel`,
-`PlaceFs`, `attach`) and a type check runs in CI.
+**Done when.** They live in one module the kernel owns (`lib/strict.js`),
+with no behavior change and the tests unchanged — only if that removes
+more than the new seam adds. The strict reference of the README may move
+to `doc/strict.md` alike, the README keeping a summary; and the tests of
+links (`links.test.js`, `links-deny.test.js`, `link-index.test.js`) be
+grouped by behavior, without duplicates.
 
 ## After the next Node.js 26.x release — `doc/alternatives.md`
 

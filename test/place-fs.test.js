@@ -163,6 +163,20 @@ describe('PlaceFs: reads', () => {
     assert.notEqual(pub.stat('/app.js'), pub.stat('/app.js'), 'never cached');
   });
 
+  // Only the documented `bigint` option reaches the internal stat builder:
+  // an unrelated or internal-looking key (`directory`, the flag statsOf()
+  // itself takes) must not leak through and change what is reported.
+  it('stat ignores unknown/internal options like directory', () => {
+    const file = pub.stat('/app.js', { directory: true });
+    assert.ok(file.isFile(), 'a file stays a file');
+    assert.equal(file.size, 200);
+    const dir = pub.stat('/img', { directory: false });
+    assert.ok(dir.isDirectory(), 'a directory stays a directory');
+    const big = pub.stat('/app.js', { directory: true, bigint: true });
+    assert.ok(big.isFile());
+    assert.equal(big.size, 200n);
+  });
+
   it('readdir: direct children, recursive, withFileTypes, errors', () => {
     assert.deepEqual(pub.readdir('/'), [
       'app.js',
@@ -202,6 +216,45 @@ describe('PlaceFs: reads', () => {
       syscall: 'scandir',
     });
     assert.throws(() => pub.readdir('/app.js'), { code: 'ENOTDIR' });
+  });
+
+  // Recursive names are '/'-separated on every platform, the form of keys;
+  // `sep: '\\'` gives the form native node:fs gives on Windows — what the
+  // patched node:fs lists with there — in the same order, the keys' (a sort
+  // of '\'-names would put `a0` before `a\b`), whatever the encoding.
+  it('readdir: recursive names are keys; sep gives the native form', () => {
+    const keys = [
+      'app.js',
+      'empty.txt',
+      'img',
+      'img/deep',
+      'img/deep/x.css',
+      'img/logo.svg',
+      'index.html',
+      'skip.bin',
+    ];
+    const windows = keys.map((key) => key.replaceAll('/', '\\'));
+    const list = (options) => pub.readdir('/', { recursive: true, ...options });
+    assert.deepEqual(list({}), keys);
+    assert.deepEqual(list({ sep: '/' }), keys);
+    assert.deepEqual(list({ sep: '\\' }), windows);
+    assert.deepEqual(
+      list({ sep: '\\', encoding: 'buffer' }),
+      windows.map((name) => Buffer.from(name)),
+    );
+    assert.deepEqual(
+      list({ sep: '\\', encoding: 'hex' }),
+      windows.map((name) => Buffer.from(name).toString('hex')),
+    );
+    // Dirents carry no separator in their names.
+    assert.deepEqual(
+      list({ sep: '\\', withFileTypes: true }).map((d) => d.name),
+      keys.map((key) => path.posix.basename(key)),
+    );
+    assert.deepEqual(pub.readdir('/img', { sep: '\\' }), ['deep', 'logo.svg']);
+    for (const sep of ['|', '', '//', 0]) {
+      assert.throws(() => list({ sep }), TypeError);
+    }
   });
 
   it('createReadStream: ranges, chunking, zero-copy chunks', async () => {
@@ -266,17 +319,20 @@ describe('PlaceFs: reads', () => {
   it('createReadStream: copies when zeroCopy is off and supports AbortSignal', async () => {
     writeTree(root, { 'plain/p.txt': 'plain' });
     const k2 = await kernel(root, { plain: { fs: true } });
-    const chunks = [];
-    for await (const c of k2.fs('plain').createReadStream('/p.txt'))
-      chunks.push(c);
-    assert.ok(!(chunks[0].buffer instanceof SharedArrayBuffer));
-    const ac = new AbortController();
-    const stream = k2
-      .fs('plain')
-      .createReadStream('/p.txt', { signal: ac.signal });
-    ac.abort();
-    await assert.rejects(drain(stream), { name: 'AbortError' });
-    k2.close();
+    try {
+      const chunks = [];
+      for await (const c of k2.fs('plain').createReadStream('/p.txt'))
+        chunks.push(c);
+      assert.ok(!(chunks[0].buffer instanceof SharedArrayBuffer));
+      const ac = new AbortController();
+      const stream = k2
+        .fs('plain')
+        .createReadStream('/p.txt', { signal: ac.signal });
+      ac.abort();
+      await assert.rejects(drain(stream), { name: 'AbortError' });
+    } finally {
+      k2.close();
+    }
   });
 
   it('mutations fail with EROFS on read-only places', () => {
@@ -455,13 +511,16 @@ describe('PlaceFs: memory mutations', () => {
         fs: { writable: true, zeroCopy: true },
       },
     });
-    const m2 = k2.fs('mem');
-    m2.writeFile('/v.txt', 'view');
-    const lease = m2.readFileView('/v.txt');
-    lease.view[0] = 0x56;
-    assert.equal(m2.readFile('/v.txt', 'utf8'), 'View');
-    lease.release();
-    k2.close();
+    try {
+      const m2 = k2.fs('mem');
+      m2.writeFile('/v.txt', 'view');
+      const lease = m2.readFileView('/v.txt');
+      lease.view[0] = 0x56;
+      assert.equal(m2.readFile('/v.txt', 'utf8'), 'View');
+      lease.release();
+    } finally {
+      k2.close();
+    }
   });
 });
 
@@ -531,27 +590,77 @@ describe('PlaceFs: writable sab place writes to disk', () => {
       { data: { fs: { writable: true } } },
       { watchTimeout: 50 },
     );
-    const data = k.fs('data');
-    assert.equal(data.writable, true);
-    assert.ok(k.watcher, 'writable sab place starts the watcher');
-    data.writeFile('/b.txt', 'b');
-    assert.equal(
-      fs.readFileSync(path.join(root, 'data', 'b.txt'), 'utf8'),
-      'b',
-    );
-    data.appendFile('/b.txt', 'b');
-    data.mkdir('/d');
-    assert.ok(fs.statSync(path.join(root, 'data', 'd')).isDirectory());
-    data.mkdir('/nested/deep', { recursive: true });
-    assert.ok(
-      fs.statSync(path.join(root, 'data', 'nested', 'deep')).isDirectory(),
-    );
-    data.rename('/b.txt', '/d/c.txt');
-    data.unlink('/a.txt');
-    data.rm('/d', { recursive: true });
-    data.rm('/nested', { recursive: true });
-    assert.deepEqual(fs.readdirSync(path.join(root, 'data')), []);
-    k.close();
-    rm(root);
+    try {
+      const data = k.fs('data');
+      assert.equal(data.writable, true);
+      assert.ok(k.watcher, 'writable sab place starts the watcher');
+      data.writeFile('/b.txt', 'b');
+      assert.equal(
+        fs.readFileSync(path.join(root, 'data', 'b.txt'), 'utf8'),
+        'b',
+      );
+      data.appendFile('/b.txt', 'b');
+      data.mkdir('/d');
+      assert.ok(fs.statSync(path.join(root, 'data', 'd')).isDirectory());
+      data.mkdir('/nested/deep', { recursive: true });
+      assert.ok(
+        fs.statSync(path.join(root, 'data', 'nested', 'deep')).isDirectory(),
+      );
+      data.rename('/b.txt', '/d/c.txt');
+      data.unlink('/a.txt');
+      data.rm('/d', { recursive: true });
+      data.rm('/nested', { recursive: true });
+      assert.deepEqual(fs.readdirSync(path.join(root, 'data')), []);
+    } finally {
+      k.close();
+      rm(root);
+    }
   });
+
+  // A rename takes the router's answer for its source, as through the
+  // patched node:fs (FsRouter.rename): one the place hides — an extension
+  // it does not publish, a file not published yet where `fs.fallback` is
+  // 'deny' (strict's default) — is EACCES, and so is a published file
+  // named as a directory ENOTDIR; a published file moves.
+  for (const strict of [true, false]) {
+    it(`a rename refuses a hidden source as the patch does${strict ? ', under strict' : ''}`, async () => {
+      const root = writeTree(tmpDir('placefs-hidden'), {
+        'data/pub.txt': 'p',
+        'data/hidden.bin': 'h',
+      });
+      const places = {
+        data: { fs: { ext: ['txt'], writable: true, fallback: 'deny' } },
+      };
+      const k = await kernel(root, places, { strict, watchTimeout: 60000 });
+      const at = (name) => path.join(root, 'data', name);
+      const refused = (code, from, to) => ({
+        code,
+        syscall: 'rename',
+        path: at(from),
+        dest: at(to),
+      });
+      try {
+        const data = k.fs('data');
+        assert.throws(
+          () => data.rename('/hidden.bin', '/shown.txt'),
+          refused('EACCES', 'hidden.bin', 'shown.txt'),
+        );
+        data.writeFile('/late.txt', 'l');
+        assert.throws(
+          () => data.rename('/late.txt', '/later.txt'),
+          refused('EACCES', 'late.txt', 'later.txt'),
+        );
+        assert.throws(() => data.rename('/pub.txt/', '/x.txt'), {
+          code: 'ENOTDIR',
+          syscall: 'rename',
+        });
+        data.rename('/pub.txt', '/moved.txt');
+        const names = fs.readdirSync(path.join(root, 'data')).sort();
+        assert.deepEqual(names, ['hidden.bin', 'late.txt', 'moved.txt']);
+      } finally {
+        k.close();
+        rm(root);
+      }
+    });
+  }
 });

@@ -3,6 +3,7 @@
 const { describe, it } = require('node:test');
 const assert = require('node:assert/strict');
 const path = require('node:path');
+const { constants } = require('node:os');
 const {
   tmpDir,
   rm,
@@ -10,6 +11,8 @@ const {
   tap,
   worker,
   nextMessage,
+  until,
+  leakedBytes,
 } = require('./helpers.js');
 
 // A directory rename inside one virtual place moves a subtree of raw
@@ -43,9 +46,9 @@ const outcome = async (fn) => {
 
 // Runs `fn` with a kernel over one place `v` (plus `other` of the same
 // config), then closes it.
-const withPlace = async (config, fn, options = {}) => {
+const withPlace = async (config, fn, options = {}, defaults = {}) => {
   const root = tmpDir('vfs-subtree');
-  const k = await kernel(root, { v: config, other: config }, {}, options);
+  const k = await kernel(root, { v: config, other: config }, defaults, options);
   try {
     await fn(k, k.fs('v'), (key) => path.join(root, 'v', key));
   } finally {
@@ -217,6 +220,66 @@ describe('virtual subtree rename', () => {
     });
   });
 
+  // A subtree moves in one publication or not at all. Each source is
+  // copied while the old versions are still published, so a pool without
+  // room for a copy of each refuses the move as a full disk refuses it —
+  // ENOSPC, named by the rename, whichever thread asked, the key that did
+  // not fit as its detail: the copies it made are freed, nothing moves and
+  // nothing is published.
+  it('sab: a pool too full for the whole subtree moves none of it', async () => {
+    const config = { origin: 'virtual', fs: { writable: true } };
+    const memory = {
+      limit: '8 kib',
+      segmentSize: '4 kib',
+      maxFileSize: '4 kib',
+    };
+    const tree = {
+      '/d/a': 'a'.repeat(2000),
+      '/d/b': 'b'.repeat(2000),
+      '/d/c': 'c'.repeat(2000),
+    };
+    await withPlace(
+      config,
+      async (k, v, at) => {
+        await write(v, tree);
+        const keys = keysUnder(k, 'v', '/');
+        const updates = k.nextUpdateId;
+        const w = worker(k);
+        try {
+          for (const [label, place] of [
+            ['main', v],
+            ['worker', w.kernel.fs('v')],
+          ]) {
+            // Room for the copy of /d/a only.
+            const err = await outcome(() => place.rename('/d', '/e'));
+            assert.equal(err.code, 'ENOSPC', label);
+            assert.equal(err.errno, -constants.errno.ENOSPC, label);
+            assert.equal(err.syscall, 'rename', label);
+            assert.equal(err.path, at('/d'), label);
+            assert.equal(err.dest, at('/e'), label);
+            assert.equal(
+              err.message,
+              'ENOSPC: no space left on device ("/d/b" does not fit in SAB), ' +
+                `rename '${at('/d')}' -> '${at('/e')}'`,
+              label,
+            );
+          }
+          assert.deepEqual(keysUnder(k, 'v', '/'), keys, 'nothing moved');
+          for (const [key, text] of Object.entries(tree)) {
+            assert.equal(v.readFile(key, 'utf8'), text, key);
+          }
+          assert.equal(w.kernel.fs('v').exists('/e'), false, 'worker');
+          assert.equal(k.nextUpdateId, updates, 'nothing published');
+          assert.equal(leakedBytes(k), 0, 'the copy made is freed');
+        } finally {
+          w.kernel.close();
+        }
+      },
+      {},
+      { memory },
+    );
+  });
+
   it('sab: an old version still read retires until it is released', async () => {
     const config = {
       origin: 'virtual',
@@ -261,20 +324,26 @@ describe('virtual subtree rename', () => {
     });
     await withPlace(config, async (k, v) => {
       await write(v, TREE);
-      // A move queued behind a write in flight when the kernel closes.
-      let open;
-      const gate = new Promise((resolve) => {
-        open = resolve;
-      });
-      const { compress } = k.compressor;
-      k.compressor.compress = async (...args) => {
-        await gate;
-        return compress.apply(k.compressor, args);
+      // A move queued behind a write in flight when the kernel closes: the
+      // write waits in its compression until then. The compressor is taken
+      // before close(), which drops the kernel's.
+      const gate = Promise.withResolvers();
+      let compressing = false;
+      const { compressor } = k;
+      const { compress } = compressor;
+      compressor.compress = async (...args) => {
+        compressing = true;
+        await gate.promise;
+        return compress.apply(compressor, args);
       };
       const slow = v.writeFile('/d/slow.css', 's{}');
       const move = v.rename('/d', '/e');
-      k.close();
-      open();
+      try {
+        assert.ok(await until(() => compressing), 'the write is in flight');
+        k.close();
+      } finally {
+        gate.resolve();
+      }
       assert.match((await outcome(() => slow)).message, /closed/);
       assert.match((await outcome(() => move)).message, /ready kernel/);
       assert.equal(k.mutations.size, 0);

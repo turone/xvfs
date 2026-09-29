@@ -135,13 +135,22 @@ describe('compression: representations in SAB', () => {
   it('snapshot carries representations to workers', () => {
     const { VfsKernel } = require('../lib/kernel.js');
     const w = VfsKernel.fromSnapshot(k.snapshot(), k.config, { appRoot: root });
-    const ws = w.fs('site');
-    assert.deepEqual(ws.storedEncodings('/index.html'), ['raw', 'gzip', 'br']);
-    assert.equal(
-      zlib.gunzipSync(ws.readFileCompressed('/index.html', 'gzip')).toString(),
-      text,
-    );
-    w.close();
+    try {
+      const ws = w.fs('site');
+      assert.deepEqual(ws.storedEncodings('/index.html'), [
+        'raw',
+        'gzip',
+        'br',
+      ]);
+      assert.equal(
+        zlib
+          .gunzipSync(ws.readFileCompressed('/index.html', 'gzip'))
+          .toString(),
+        text,
+      );
+    } finally {
+      w.close();
+    }
   });
 });
 
@@ -158,22 +167,25 @@ describe('compression: retainRaw: false', () => {
         },
       },
     });
-    const site = k.fs('site');
-    assert.deepEqual(site.storedEncodings('/index.html'), ['gzip']);
-    assert.deepEqual(site.storedEncodings('/logo.png'), ['raw']);
-    assert.equal(
-      site.readFile('/index.html', 'utf8'),
-      '<h1>'.repeat(50),
-      'read from disk',
-    );
-    assert.equal(site.stat('/index.html').size, 200);
-    assert.equal(k.cache.entry('site', '/index.html').kind, 'disk');
-    assert.equal(
-      k.routeRead(path.join(root, 'site', 'index.html')).kind,
-      'passthrough',
-    );
-    k.close();
-    rm(root);
+    try {
+      const site = k.fs('site');
+      assert.deepEqual(site.storedEncodings('/index.html'), ['gzip']);
+      assert.deepEqual(site.storedEncodings('/logo.png'), ['raw']);
+      assert.equal(
+        site.readFile('/index.html', 'utf8'),
+        '<h1>'.repeat(50),
+        'read from disk',
+      );
+      assert.equal(site.stat('/index.html').size, 200);
+      assert.equal(k.cache.entry('site', '/index.html').kind, 'disk');
+      assert.equal(
+        k.routeRead(path.join(root, 'site', 'index.html')).kind,
+        'passthrough',
+      );
+    } finally {
+      k.close();
+      rm(root);
+    }
   });
 });
 
@@ -192,13 +204,16 @@ describe('compression: failures are per representation', () => {
       },
       { console: { warn: (m) => warnings.push(m), error() {}, log() {} } },
     );
-    const site = k.fs('site');
-    assert.deepEqual(site.storedEncodings('/noise.txt'), ['raw']);
-    assert.ok(
-      warnings.some((w) => /skipped gzip/.test(w) && /segment/.test(w)),
-    );
-    k.close();
-    rm(root);
+    try {
+      const site = k.fs('site');
+      assert.deepEqual(site.storedEncodings('/noise.txt'), ['raw']);
+      assert.ok(
+        warnings.some((w) => /skipped gzip/.test(w) && /segment/.test(w)),
+      );
+    } finally {
+      k.close();
+      rm(root);
+    }
   });
 
   it('hot reload replaces representations; a shrunk source keeps only fresh ones', async () => {
@@ -210,26 +225,30 @@ describe('compression: failures are per representation', () => {
       { site: { fs: { compress: { encodings: ['gzip'] } } } },
       { watch: true, watchTimeout: 60 },
     );
-    const t = tap(k);
-    const site = k.fs('site');
-    const before = site.readFileCompressed('/a.txt', 'gzip');
-    fs.writeFileSync(path.join(root, 'site', 'a.txt'), 'bbbb'.repeat(20));
-    await until(
-      () => site.readFile('/a.txt', 'utf8') === 'bbbb'.repeat(20),
-      4000,
-    );
-    const after = site.readFileCompressed('/a.txt', 'gzip');
-    assert.notDeepEqual(after, before);
-    assert.equal(zlib.gunzipSync(after).toString(), 'bbbb'.repeat(20));
-    await until(() => t.updates().length > 0, 2000);
-    const keys = t
-      .updates()
-      .at(-1)
-      .places.site.entries.map(([key]) => key);
-    assert.ok(
-      keys.includes('/a.txt') && keys.includes(compressedKey('/a.txt', 'gzip')),
-    );
-    k.close();
-    rm(root);
+    try {
+      const t = tap(k);
+      const site = k.fs('site');
+      const before = site.readFileCompressed('/a.txt', 'gzip');
+      fs.writeFileSync(path.join(root, 'site', 'a.txt'), 'bbbb'.repeat(20));
+      await until(
+        () => site.readFile('/a.txt', 'utf8') === 'bbbb'.repeat(20),
+        4000,
+      );
+      const after = site.readFileCompressed('/a.txt', 'gzip');
+      assert.notDeepEqual(after, before);
+      assert.equal(zlib.gunzipSync(after).toString(), 'bbbb'.repeat(20));
+      await until(() => t.updates().length > 0, 2000);
+      const keys = t
+        .updates()
+        .at(-1)
+        .places.site.entries.map(([key]) => key);
+      assert.ok(
+        keys.includes('/a.txt') &&
+          keys.includes(compressedKey('/a.txt', 'gzip')),
+      );
+    } finally {
+      k.close();
+      rm(root);
+    }
   });
 });

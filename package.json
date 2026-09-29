@@ -1,14 +1,26 @@
 {
-  "name": "shared-memory-fs",
+  "name": "xvfs",
   "version": "1.0.0",
   "author": "Dmitriy Shyaryaiev <turone@ukr.net>",
-  "description": "SharedArrayBuffer-backed filesystem cache for Node.js worker_threads",
+  "description": "Extended virtual filesystem for Node.js: places over real paths in shared memory, per-thread memory, SEA assets or on disk; disk or virtual content, prepared once and published atomically with versions; strict routing",
   "license": "MIT",
   "keywords": [
-    "cache",
-    "sharedarraybuffer",
-    "worker_threads",
+    "vfs",
+    "virtual-filesystem",
     "filesystem",
+    "fs",
+    "in-memory",
+    "worker_threads",
+    "sharedarraybuffer",
+    "shared-memory",
+    "zero-copy",
+    "live-updates",
+    "hot-reload",
+    "bytecode",
+    "sea",
+    "single-executable",
+    "module-hooks",
+    "cache",
     "node.js",
     "metarhia"
   ],
@@ -21,19 +33,36 @@
   },
   "homepage": "https://github.com/turone/shared-memory-fs",
   "main": "index.js",
+  "types": "index.d.ts",
   "exports": {
-    ".": "./index.js",
-    "./register": "./lib/bootstrap/register.mjs",
-    "./adapters/fs-patch": "./lib/adapters/fs-patch.js",
-    "./adapters/module-hook": "./lib/adapters/module-hook.js"
+    ".": {
+      "types": "./index.d.ts",
+      "default": "./index.js"
+    },
+    "./register": {
+      "types": "./lib/bootstrap/register.d.mts",
+      "default": "./lib/bootstrap/register.mjs"
+    },
+    "./adapters/fs-patch": {
+      "types": "./lib/adapters/fs-patch.d.ts",
+      "default": "./lib/adapters/fs-patch.js"
+    },
+    "./adapters/module-hook": {
+      "types": "./lib/adapters/module-hook.d.ts",
+      "default": "./lib/adapters/module-hook.js"
+    }
   },
   "files": [
     "lib/",
-    "index.js"
+    "index.js",
+    "index.d.ts"
   ],
   "scripts": {
-    "test": "node --test \"test/*.test.js\"",
+    "test": "node --test --test-timeout=60000 \"test/*.test.js\"",
     "test:examples": "node --test \"test-examples/examples-smoke.test.js\"",
+    "test:types": "tsc -p test-types --noEmit",
+    "bench": "node bench/run.js",
+    "bench:ab": "node bench/ab.js",
     "lint": "eslint . && prettier -c .",
     "fix": "eslint . --fix && prettier --write ."
   },
@@ -49,6 +78,7 @@
     "eslint-config-metarhia": "^8.2.2",
     "eslint-config-prettier": "^9.1.0",
     "eslint-plugin-prettier": "^5.0.0",
-    "prettier": "^3.3.3"
+    "prettier": "^3.3.3",
+    "typescript": "^7.0.2"
   }
 }

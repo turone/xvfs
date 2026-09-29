@@ -99,6 +99,96 @@ describe('PlaceFiles: the directory index of a projection', () => {
     assert.equal(files.size, 1, 'only the companion is left');
   });
 
+  // A case-insensitive disk holds one spelling of a name: so does the
+  // projection built from it, and it finds that spelling from any other.
+  it('caseless: a key the place does not hold finds its other spelling', () => {
+    const files = new PlaceFiles(true);
+    for (const key of ['/a.txt', '/Dir/Read.ME', '/b/C.TXT', '/\u00e4.txt']) {
+      files.set(key, {});
+    }
+    files.set(`/a.txt${SEP}fs:gzip`, {});
+    const spellings = [
+      ['/A.TXT', '/a.txt'],
+      ['/a.TxT', '/a.txt'],
+      ['/dir/read.me', '/Dir/Read.ME'],
+      ['/DIR/READ.ME', '/Dir/Read.ME'],
+      ['/B/c.txt', '/b/C.TXT'],
+      ['/\u00c4.TXT', '/\u00e4.txt'],
+      ['/a.txt/x', null],
+      ['/b.txt', null],
+      [`/A.TXT${SEP}fs:gzip`, null],
+    ];
+    for (const [key, spelled] of spellings) {
+      assert.equal(files.spelling(key), spelled, key);
+    }
+    files.delete('/Dir/Read.ME');
+    files.delete('/a.txt');
+    assert.equal(files.spelling('/dir/read.me'), null);
+    assert.equal(files.spelling('/A.TXT'), null);
+    assert.equal(files.spelling('/B/C.txt'), '/b/C.TXT');
+    files.clear();
+    assert.equal(files.spelling('/b/c.txt'), null);
+  });
+
+  // Lower-casing equates a few names NTFS keeps apart: İ and i̇, whose
+  // lengths differ, the Kelvin sign and k. Such a name answers with the
+  // published source, never with raw bytes (Place.spelling).
+  it('caseless: spellings as lower-casing gives them, whatever the length', () => {
+    const files = new PlaceFiles(true);
+    files.set('/İ.txt', {});
+    files.set('/k.txt', {});
+    assert.equal(files.spelling('/i̇.txt'), '/İ.txt');
+    assert.equal(files.spelling('/İ.TXT'), '/İ.txt');
+    assert.equal(files.spelling('/I.txt'), null);
+    assert.equal(files.spelling('/K.txt'), '/k.txt');
+  });
+
+  it('caseless: spellings follow any sequence of sets and deletes', () => {
+    const next = random(7);
+    const pick = (list) => list[Math.floor(next() * list.length)];
+    const names = [
+      ['a', 'A'],
+      ['x.txt', 'X.TXT', 'x.TXT'],
+      ['Dir', 'dir', 'DIR'],
+    ];
+    const spell = (name) => pick(names.find((n) => n.includes(name)));
+    const files = new PlaceFiles(true);
+    const held = new Map(); // lower-cased key → the spelling held
+    const keyOf = () =>
+      '/' +
+      Array.from({ length: 1 + Math.floor(next() * 2) }, () =>
+        pick(pick(names)),
+      ).join('/');
+    for (let step = 0; step < 2000; step++) {
+      const key = keyOf();
+      const lower = key.toLowerCase();
+      if (next() < 0.6) {
+        // As a disk does: another spelling of a name replaces the one held.
+        if (held.has(lower)) files.delete(held.get(lower));
+        files.set(key, {});
+        held.set(lower, key);
+      } else {
+        files.delete(held.get(lower) ?? key);
+        held.delete(lower);
+      }
+      const probe = key
+        .split('/')
+        .map((name) => name && spell(name))
+        .join('/');
+      const expected = held.get(probe.toLowerCase()) ?? null;
+      const found = files.has(probe) ? null : files.spelling(probe);
+      assert.equal(found, expected === probe ? null : expected, probe);
+    }
+  });
+
+  it('a projection that is not caseless knows no other spelling', () => {
+    const files = new PlaceFiles();
+    files.set('/a.txt', {});
+    files.set('/B.txt', {});
+    assert.equal(files.spelling('/A.TXT'), null);
+    assert.equal(files.spelling('/b.txt'), null);
+  });
+
   it('directory keys have one form', () => {
     for (const [key, dir] of [
       ['', ''],

@@ -1,17 +1,28 @@
 'use strict';
 
+const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
+const { createHook } = require('node:async_hooks');
 const { VfsConfig } = require('../lib/config.js');
 const { VfsKernel } = require('../lib/kernel.js');
+const disk = require('../lib/disk.js');
 
 // Shared test helpers: temp trees, quiet kernels, small configs.
 
 const quiet = { log() {}, warn() {}, error() {}, debug() {} };
 
+// A fresh temporary directory, named by its real path. The system's may be
+// spelled otherwise — through 8.3 names on a Windows CI runner
+// (C:\Users\RUNNER~1\…), through a link on macOS (/var) — and every path
+// below such a spelling is an alias of its real one: strict routing refuses
+// it, realpath.native answers the other spelling, and some Node releases
+// abort a watch of it (lib/watcher.js).
 const tmpDir = (prefix = 'vfs') =>
-  fs.mkdtempSync(path.join(os.tmpdir(), `${prefix}-`));
+  disk.realpathSync.native(
+    fs.mkdtempSync(path.join(os.tmpdir(), `${prefix}-`)),
+  );
 
 // writeTree(root, { 'public/index.html': '<h1>', 'lib/a.js': '...' })
 const writeTree = (root, files) => {
@@ -53,10 +64,11 @@ const drain = async (stream) => {
   return Buffer.concat(chunks);
 };
 
-// Wait until `predicate()` is true or `ms` elapsed.
+// Wait until `predicate()` is true or `ms` elapsed — on a monotonic clock,
+// whatever a test does to Date.now().
 const until = async (predicate, ms = 3000, step = 25) => {
-  const deadline = Date.now() + ms;
-  while (Date.now() < deadline) {
+  const deadline = performance.now() + ms;
+  while (performance.now() < deadline) {
     if (predicate()) return true;
     await sleep(step);
   }
@@ -96,20 +108,186 @@ const worker = (k, options = {}) => {
   return { id, kernel: w, port: vfs.port, main: k.links.get(id) };
 };
 
-// Resolves with the next `event` of `emitter`, after every listener
-// registered before this call (the kernel's own come first). The kernel
-// unrefs its link ports, and Node 22 ends an event loop that has nothing
-// else to run before a port event arrives: a timer holds it meanwhile.
-const nextEvent = (emitter, event) =>
-  new Promise((resolve) => {
-    const hold = setInterval(() => {}, 2 ** 30);
-    emitter.once(event, (value) => {
-      clearInterval(hold);
-      resolve(value);
-    });
-  });
+// Waits are bounded: what the code under test never reaches — a gate, an
+// event, a queue gone idle — fails the test within WAIT ms instead of
+// hanging it, which node --test would do without a word.
+const WAIT = 10_000;
 
-const nextMessage = (port) => nextEvent(port, 'message');
+// Settles as `promise` does, or rejects once `ms` have passed, naming
+// `what` it waited for. Its timer holds the event loop meanwhile.
+const within = (promise, what, ms = WAIT) => {
+  let late = null;
+  const deadline = new Promise((resolve, reject) => {
+    late = setTimeout(() => {
+      reject(new Error(`${what}: still pending after ${ms} ms`));
+    }, ms);
+  });
+  return Promise.race([promise, deadline]).finally(() => clearTimeout(late));
+};
+
+// Resolves with the next `event` of `emitter`, after every listener
+// registered before this call (the kernel's own come first); rejects when
+// none comes within `ms`. The kernel unrefs its link ports, and Node 22
+// ends an event loop that has nothing else to run before a port event
+// arrives: the deadline's timer holds it meanwhile.
+const nextEvent = (emitter, event, ms = WAIT) => {
+  let listener = null;
+  const next = new Promise((resolve) => {
+    listener = resolve;
+    emitter.once(event, resolve);
+  });
+  return within(next, `the next '${event}'`, ms).finally(() => {
+    emitter.off(event, listener);
+  });
+};
+
+const nextMessage = (port, ms) => nextEvent(port, 'message', ms);
+
+// The bytes of a main kernel's pool in allocations that neither a published
+// entry nor a retired version accounts for: what a failed publication left
+// behind. 0 whenever no publication is in flight, whatever the ACKs still
+// pending; the count of segments hides such a leak inside a segment.
+const leakedBytes = (k) => {
+  let used = 0;
+  for (const id of k.cache.pool.segments.keys()) {
+    used += k.cache.registry.used(id);
+  }
+  for (const { entries } of k.cache.indexes.values()) {
+    for (const entry of entries.values()) {
+      if (entry.kind === 'shared') used -= entry.length;
+    }
+  }
+  for (const record of k.retired.values()) used -= record.entry.length;
+  return used;
+};
+
+// One turn of the event loop: every promise settled so far has run its
+// continuations — the bookkeeping a mutation queue does once a task
+// settles included.
+const turn = () => new Promise((resolve) => setImmediate(resolve));
+
+// What a failure or a refusal leaves of a main kernel: bytes in allocations
+// nothing accounts for (leakedBytes), the work queued — watcher epochs and
+// rechecks, mutations holding a key or a place (diagnostics().queues) —
+// the keys of virtual places still in flight (SabStore.creating), and the
+// requests of `workers` (worker kernels on its links) not answered yet.
+const restOf = (k, workers = []) => {
+  let inFlight = 0;
+  for (const place of k.registry.all()) {
+    inFlight += place.store?.creating?.size ?? 0;
+  }
+  let requests = 0;
+  for (const w of workers) requests += w.mutationClient?.pending ?? 0;
+  const { queues } = k.diagnostics();
+  return { leakedBytes: leakedBytes(k), queues, inFlight, requests };
+};
+
+// Asserts a ready main kernel at rest once what it runs has settled:
+// nothing of restOf() left — but for the rechecks a failed watcher
+// publication schedules, once each.
+const assertAtRest = async (k, { workers = [], rechecks = 0 } = {}) => {
+  await turn();
+  assert.deepEqual(restOf(k, workers), {
+    leakedBytes: 0,
+    queues: {
+      watch: { epochs: 0, rechecks },
+      mutations: { keys: 0, barriers: 0 },
+    },
+    inFlight: 0,
+    requests: 0,
+  });
+};
+
+// The types of the resources that keep the event loop alive, counted —
+// what `activeSince` compares with.
+const activeResources = () => {
+  const counts = {};
+  for (const type of process.getActiveResourcesInfo()) {
+    counts[type] = (counts[type] ?? 0) + 1;
+  }
+  return counts;
+};
+
+// The resources alive now beyond `baseline` (activeResources()), by type.
+const activeSince = (baseline) => {
+  const beyond = {};
+  for (const [type, count] of Object.entries(activeResources())) {
+    const more = count - (baseline[type] ?? 0);
+    if (more > 0) beyond[type] = more;
+  }
+  return beyond;
+};
+
+// Closes `k`, then the worker kernels on its links, and asserts that
+// nothing they opened stays open: `k`'s close() closes each link port,
+// both ends see it within a deadline (whose timer holds the event loop
+// meanwhile: the ports are unref'd); no recheck and no watcher left, no
+// worker request left unsettled; and — a closed handle may be released on
+// a later turn — no resource that keeps the event loop alive beyond
+// `baseline`, taken before the kernel was made.
+const closeAtRest = async (k, { workers = [], baseline }) => {
+  const ports = [...k.links.values()];
+  for (const w of workers) if (w.port) ports.push(w.port);
+  const closed = Promise.all(
+    ports.map((port) => new Promise((resolve) => port.once('close', resolve))),
+  );
+  let late = null;
+  const deadline = new Promise((resolve) => {
+    late = setTimeout(resolve, 3000, 'deadline');
+  });
+  k.close();
+  const settled = await Promise.race([closed, deadline]);
+  clearTimeout(late);
+  assert.notEqual(settled, 'deadline', 'every link port closed');
+  for (const w of workers) {
+    w.close();
+    assert.equal(w.mutationClient?.pending ?? 0, 0, 'no request left');
+  }
+  assert.equal(k.links.size, 0);
+  assert.equal(k.rechecks.size, 0, 'no recheck left');
+  assert.equal(k.watcher, null, 'no watcher left');
+  await until(() => Object.keys(activeSince(baseline)).length === 0, 3000);
+  assert.deepEqual(activeSince(baseline), {}, 'no resource left alive');
+};
+
+// The asynchronous disk calls this process starts from now on — node:fs
+// requests of every form, a file handle's close included: async_hooks sees
+// each one, whatever function made it, captured at load (lib/disk.js) or
+// public. `started(n)` settles once n have started, in the turn the n-th
+// starts — before any of them can complete — or fails after `ms`; stop()
+// ends the count.
+const DISK_CALL = /^(?:FSREQ|FILEHANDLECLOSEREQ)/;
+
+const diskCalls = (ms = 4000) => {
+  let count = 0;
+  const waits = [];
+  const hook = createHook({
+    init(asyncId, type) {
+      if (!DISK_CALL.test(type)) return;
+      count++;
+      for (const wait of waits) if (count >= wait.n) wait.done();
+    },
+  }).enable();
+  return {
+    get count() {
+      return count;
+    },
+    started(n) {
+      if (count >= n) return Promise.resolve();
+      return new Promise((resolve, reject) => {
+        const late = setTimeout(() => {
+          reject(new Error(`${count} of ${n} disk calls started`));
+        }, ms);
+        const done = () => {
+          clearTimeout(late);
+          resolve();
+        };
+        waits.push({ n, done });
+      });
+    },
+    stop: () => hook.disable(),
+  };
+};
 
 module.exports = {
   quiet,
@@ -124,5 +302,15 @@ module.exports = {
   worker,
   nextEvent,
   nextMessage,
+  within,
+  WAIT,
+  diskCalls,
+  leakedBytes,
+  turn,
+  restOf,
+  assertAtRest,
+  activeResources,
+  activeSince,
+  closeAtRest,
   SMALL_MEMORY,
 };

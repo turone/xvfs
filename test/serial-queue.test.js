@@ -3,6 +3,7 @@
 const { describe, it } = require('node:test');
 const assert = require('node:assert/strict');
 const { SerialQueue } = require('../lib/serial-queue.js');
+const { within } = require('./helpers.js');
 
 // SerialQueue orders the watcher's epochs: one task at a time, in arrival
 // order; a failing task rejects only its own run() and never holds up the
@@ -32,7 +33,8 @@ describe('SerialQueue', () => {
     await turn();
     assert.deepEqual(log, ['a:start'], 'b waits for a');
     open();
-    assert.deepEqual(await Promise.all([first, second]), ['a', 'b']);
+    const both = within(Promise.all([first, second]), 'a and b, the gate open');
+    assert.deepEqual(await both, ['a', 'b']);
     assert.deepEqual(log, ['a:start', 'a:end', 'b']);
     assert.equal(queue.size, 0);
   });
@@ -46,10 +48,10 @@ describe('SerialQueue', () => {
       throw new Error('rejected');
     });
     const next = queue.run(() => 'next');
-    await assert.rejects(thrown, /thrown/);
-    await assert.rejects(rejected, /rejected/);
-    assert.equal(await next, 'next');
-    await queue.idle;
+    await assert.rejects(within(thrown, 'the throwing task'), /thrown/);
+    await assert.rejects(within(rejected, 'the rejecting task'), /rejected/);
+    assert.equal(await within(next, 'the task behind them'), 'next');
+    await within(queue.idle, 'the queue idle');
     assert.equal(queue.size, 0);
   });
 
@@ -61,9 +63,9 @@ describe('SerialQueue', () => {
       await turn();
       finished = true;
     });
-    await queue.idle;
+    await within(queue.idle, 'the queue idle');
     assert.equal(finished, true);
     assert.equal(queue.size, 0);
-    await queue.idle; // an idle queue settles at once
+    await within(queue.idle, 'an idle queue, at once');
   });
 });

@@ -4,6 +4,7 @@ const { describe, it, before, after } = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
+const os = require('node:os');
 const { VfsConfig } = require('../lib/config.js');
 const fsPatch = require('../lib/adapters/fs-patch.js');
 const {
@@ -13,6 +14,7 @@ const {
   kernel,
   worker,
   nextMessage,
+  leakedBytes,
 } = require('./helpers.js');
 
 // Disk access behind the VFS's back: captured before any patch is installed.
@@ -396,6 +398,56 @@ describe('single-file copies hand the raw input to the destination', () => {
       const err = await outcome(run);
       assert.equal(err.code, 'ENOTSUP', detail);
       assert.match(err.message, new RegExp(detail));
+    }
+  });
+
+  // Both refusals that read nothing apply — an option the copy cannot
+  // honor, a *Sync copy into a place that cannot block: the option's comes
+  // first, whatever the destination.
+  it('an option the copy cannot honor is refused before a place that cannot block', async () => {
+    const from = external('x');
+    const to = at('vs', 'both.txt');
+    for (const [run, detail] of [
+      [() => fs.copyFileSync(from, to, COPYFILE_FICLONE_FORCE), 'FICLONE'],
+      [() => fs.cpSync(from, to, { filter: () => true }), 'filter'],
+    ]) {
+      const err = await outcome(run);
+      assert.equal(err.code, 'ENOTSUP', detail);
+      assert.match(err.message, new RegExp(`\\(\\w*${detail}\\w*\\)`));
+      assert.equal(k.fs('vs').exists('/both.txt'), false);
+    }
+  });
+
+  // Without `dereference`, cp copies a symbolic link as a link, which a
+  // store cannot hold: refused before anything is read. On Windows without
+  // the privilege to link a file, a junction — a link to a directory —
+  // stands in for one.
+  it('cp of a symbolic link into a store is refused without dereference', async () => {
+    const target = external('linked');
+    let link = fresh('link.txt');
+    let file = true;
+    try {
+      fs.symlinkSync(target, link, 'file');
+    } catch {
+      link = fresh('link-dir');
+      fs.symlinkSync(out, link, 'junction');
+      file = false;
+    }
+    for (const [form, cp, place] of [
+      ['cpSync', (from, to) => fs.cpSync(from, to), 'vmp'],
+      ['cp', COPIES.cp, 'vs'],
+      ['promises.cp', COPIES['promises.cp'], 'vmp'],
+    ]) {
+      const to = at(place, 'link.txt');
+      const err = await outcome(() => cp(link, to));
+      refusal(err, 'ENOTSUP', 'cp', link, to);
+      assert.match(err.message, /symbolic link/, form);
+      assert.equal(k.fs(place).exists('/link.txt'), false, form);
+    }
+    // Followed, a link to a file is the file.
+    if (file) {
+      fs.cpSync(link, at('vmp', 'link.txt'), { dereference: true });
+      assert.equal(k.fs('vmp').readFile('/link.txt', 'utf8'), 'linked');
     }
   });
 
@@ -791,5 +843,65 @@ describe('copies without strict routing', () => {
     const raw = path.join(out, 'late.html');
     fs.cpSync(at('site', 'late.html'), raw);
     assert.equal(readDisk(raw, 'utf8'), 'unpublished');
+  });
+});
+
+// A copy into a virtual place is a write of its destination: one the pool
+// has no room for fails as the copy — ENOSPC, its call, source and
+// destination, as node:fs names a full disk — the store's refusal as its
+// cause, and publishes nothing. A *Sync copy never gets that far: the
+// place cannot block (ENOTSUP).
+describe('a copy into a full pool', () => {
+  let root;
+  let out;
+  let k;
+
+  before(async () => {
+    root = tmpDir('vfs-copy-full');
+    out = tmpDir('vfs-copy-full-out');
+    k = await kernel(
+      root,
+      { v: { origin: 'virtual', fs: { writable: true } } },
+      {
+        memory: { limit: '8 kib', segmentSize: '4 kib', maxFileSize: '4 kib' },
+      },
+    );
+    await k.fs('v').writeFile('/a', 'a'.repeat(4000));
+    await k.fs('v').writeFile('/b', 'b'.repeat(4000));
+    fsPatch.install(k);
+  });
+
+  after(() => {
+    fsPatch.uninstall();
+    k.close();
+    rm(root);
+    rm(out);
+  });
+
+  it('fails as the copy, the store refusal as its cause; nothing is published', async () => {
+    const from = path.join(out, 'c.txt');
+    writeDisk(from, 'c'.repeat(2000));
+    const to = path.join(root, 'v', 'c');
+    const updates = k.nextUpdateId;
+    for (const [form, copy] of Object.entries(COPIES)) {
+      if (form.endsWith('Sync')) continue;
+      const syscall = syscallOf(form);
+      const err = await outcome(() => copy(from, to));
+      refusal(err, 'ENOSPC', syscall, from, to);
+      assert.equal(err.errno, -os.constants.errno.ENOSPC, form);
+      assert.equal(
+        err.message,
+        `ENOSPC: no space left on device, ${syscall} '${from}' -> '${to}'`,
+      );
+      const { cause } = err;
+      assert.equal(cause.code, 'ENOSPC', form);
+      assert.equal(cause.syscall, 'open', form);
+      assert.equal(cause.path, to, form);
+      assert.equal(cause.dest, undefined, form);
+    }
+    assert.equal(k.fs('v').exists('/c'), false, 'not published');
+    assert.equal(onDisk(to), false, 'nothing on disk');
+    assert.equal(k.nextUpdateId, updates, 'nothing published');
+    assert.equal(leakedBytes(k), 0, 'nothing left behind');
   });
 });

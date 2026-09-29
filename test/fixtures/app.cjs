@@ -5,7 +5,7 @@
 
 const fs = require('node:fs');
 const path = require('node:path');
-const { kernel } = require('shared-memory-fs');
+const { kernel } = require('xvfs');
 
 if (!kernel || kernel.state !== 'ready') {
   console.error('FAIL: kernel not ready before entry');
