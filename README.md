@@ -691,8 +691,9 @@ with no directory; there is no mode that lets links through.
   `realpath`. A path through a known link costs one `lstat`: a link there
   is refused; a directory or a file there drops it from the index; nothing
   there lets the path through and keeps it known — the patch may be making
-  it still. So a link removed and not replaced stays known, a cost of
-  memory only (`diagnostics().strict.known`).
+  it still. So a link removed and not replaced stays known: memory that
+  grows with each such link where links come and go under new names
+  (`diagnostics().strict.known` counts them; TASKS.md).
 - Every thread refuses the same links. A worker (`link()`, `attach()`)
   receives the index with its snapshot; a link one thread makes or moves
   through the patch reaches the others as a `vfs-links` message, the main

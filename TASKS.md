@@ -100,6 +100,29 @@ opt-in that proves every native path outside `appRoot` as a place's disk
 is proven today (its real path off `appRoot`'s real line), at one
 `realpath` per call — or the boundary stays as documented.
 
+## P3 — `links: 'deny'` keeps the links it saw removed
+
+**Problem.** The index of `links: 'deny'` drops a known link only when a
+directory or a file takes its name (`LinkIndex#still`): a link removed,
+or renamed away, stays known. Where links come and go under new names —
+temporary links, `current-<ts>`, lock links — the index grows in every
+thread, and so does each worker's snapshot (`diagnostics().strict.known`).
+A call that runs while the patched call making a link is still in flight
+may also find nothing there yet and pass (README, Links on a place's disk).
+
+**Cause.** The patch adds a link before its native call: a check that
+finds nothing there may be looking at a link the call is still making,
+and forgetting it then lost it for good (review of e82fd6f, D1). Nothing
+tells the index when a native call is done.
+
+**Done when.** Decided, and if taken: the patch confirms or drops what it
+added once its native call settles — a hook after `symlink`, `rename`,
+`unlink`, `rmdir` and `rm` in their sync, callback and promise forms:
+a failed make drops the link, a successful removal or rename-away drops
+the old name — with the drops sent to the other threads in a way no
+later make of the same name can lose (a drop overtaking another thread's
+make is a fail-open), and tests of the in-flight cases.
+
 ## P3 — `links: 'verify'` lets a link into managed territory be seen and removed
 
 **Problem.** Under strict with `links: 'verify'` the ops that act on a

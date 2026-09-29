@@ -90,6 +90,12 @@ describe('LinkIndex, POSIX paths', () => {
     assert.deepEqual(added, ['/app/d/into/jx']);
     assert.equal(x.crosses('/app/d/into/jx/f'), true);
     assert.equal(x.crosses('/tmp/into/jx/f'), false);
+    // Onto a place's own directory: what lies below, never itself.
+    const found = ['/tmp/build', '/tmp/build/j'];
+    const onto = x.moved('/tmp/build', '/app/site', found, false);
+    assert.deepEqual(onto, ['/app/site/j']);
+    assert.equal(x.crosses('/app/site/f'), false);
+    assert.equal(x.crosses('/app/site/j/f'), true);
   });
 
   it('delete forgets; the early exit follows', () => {
@@ -183,13 +189,22 @@ describe('LinkIndex, POSIX paths', () => {
 });
 
 describe('LinkIndex, Windows paths', () => {
+  // node:fs resolves a Windows path before the OS opens it: `..` folded, a
+  // trailing separator dropped — an operation on `jro\` is on the link.
   it('without case, either separator, a drive or a UNC root', () => {
+    for (const floor of [null, 'C:\\App']) {
+      const x = new LinkIndex(path.win32, { floor });
+      x.add('C:\\App\\d\\JRO');
+      assert.equal(x.crosses('C:\\app\\D\\jro\\h'), true);
+      assert.equal(x.crosses('c:/APP/d/jro/x'), true);
+      assert.equal(x.crosses('C:\\app\\d\\jro', true), false);
+      assert.equal(x.crosses('C:\\app\\d\\jro\\', true), false);
+      assert.equal(x.crosses('C:\\app\\d\\jro\\', false), true);
+      assert.equal(x.crosses('C:\\app\\d\\jro\\..\\x'), false, 'folded');
+      assert.equal(x.crosses('C:\\app\\d\\x\\..\\jro\\h'), true);
+    }
     const x = new LinkIndex(path.win32);
     x.add('C:\\App\\d\\JRO');
-    assert.equal(x.crosses('C:\\app\\D\\jro\\h'), true);
-    assert.equal(x.crosses('c:/APP/d/jro/x'), true);
-    assert.equal(x.crosses('C:\\app\\d\\jro', true), false);
-    assert.equal(x.crosses('C:\\app\\d\\jro\\', true), true);
     assert.equal(x.crosses('C:\\app\\d\\x'), false);
     assert.equal(x.crosses('D:\\app\\d\\jro\\h'), false);
     x.add('\\\\srv\\share\\app\\d\\j');
