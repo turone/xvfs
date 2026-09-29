@@ -143,8 +143,7 @@ expectType<{
   readonly instance: string;
   readonly links?: {
     readonly known: readonly string[];
-    readonly made: Int32Array;
-    readonly seen: number;
+    readonly generation: number;
   };
 }>()(kernel.snapshot());
 const { vfs, transferList } = kernel.link();
@@ -162,8 +161,7 @@ expectType<{
       readonly instance: string;
       readonly links?: {
         readonly known: readonly string[];
-        readonly made: Int32Array;
-        readonly seen: number;
+        readonly generation: number;
       };
     };
     config: DeepReadonly<VfsRawConfig>;

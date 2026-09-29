@@ -76,16 +76,15 @@ export interface CacheSnapshot {
 /**
  * What `kernel.snapshot()` gives a worker: published entries only, the
  * kernel's version and its instance; under strict with a place of `links:
- * 'deny'`, the links the kernel knows and the count of those made that it
- * holds, against the count every thread shares.
+ * 'deny'`, the links the kernel knows and its index's generation — how many
+ * it has come to know — against which a `vfs-links` is newer or not.
  */
 export interface VfsSnapshot extends CacheSnapshot {
   readonly version: number;
   readonly instance: string;
   readonly links?: {
     readonly known: readonly string[];
-    readonly made: Int32Array;
-    readonly seen: number;
+    readonly generation: number;
   };
 }
 

@@ -16,13 +16,16 @@ const {
   worker,
   nextMessage,
 } = require('./helpers.js');
-const { refused } = require('./fs-calls.js');
+const { refused, called } = require('./fs-calls.js');
 
 // Strict routing with `links: 'deny'` — the index of known links — beside
 // 'verify', the proof of each call's real path: what each knows, when, and
-// what it costs. The links are junctions on Windows, which take no
-// privilege, and symbolic links elsewhere. The refusals themselves, in
-// every family of calls: links.test.js.
+// what it costs; and, in both, that the patch makes, removes and moves no
+// link on a place's disk. The links are junctions on Windows, which take no
+// privilege, and symbolic links elsewhere. The refusals of a path through
+// a link, in every family of calls: links.test.js.
+
+const MODES = ['deny', 'verify'];
 
 // The disk as it is, behind the patch: captured before any install.
 const { symlinkSync: linkDisk, unlinkSync: unlinkDisk, rmdirSync } = fs;
@@ -34,14 +37,18 @@ const unlinkDir = (at) => {
     rmdirSync(at);
   }
 };
+const isLink = (p) =>
+  disk.lstatSync(p, { throwIfNoEntry: false })?.isSymbolicLink() ?? false;
 
 const PREPARERS = { up: (raw) => raw.toString().toUpperCase() };
 
+// `site` has no directory until a test makes one.
 const PLACES = {
   ro: { fs: { ext: ['txt'], fallback: 'deny', prepare: { up: ['txt'] } } },
   terr: { fs: { ext: ['txt'], fallback: 'disk', prepare: { up: ['txt'] } } },
   d: { provider: 'disk', fs: { writable: true } },
   dro: { provider: 'disk', fs: true },
+  site: { provider: 'disk', fs: { writable: true } },
 };
 
 const TREE = {
@@ -61,7 +68,10 @@ const TREE = {
 const opened = async (links, { defaults = {}, setup } = {}) => {
   const base = tmpDir('links-deny');
   const root = writeTree(path.join(base, 'app'), TREE);
-  const outside = writeTree(path.join(base, 'outside'), { 'o.bin': 'o' });
+  const outside = writeTree(path.join(base, 'outside'), {
+    'o.bin': 'o',
+    'sub/x.bin': 'x',
+  });
   const at = (...p) => path.join(root, ...p);
   const made = [];
   const link = (target, p) => {
@@ -76,45 +86,29 @@ const opened = async (links, { defaults = {}, setup } = {}) => {
     fsPatch.uninstall();
     k.close();
     for (const p of made) {
-      try {
-        unlinkDir(p);
-      } catch {
-        // gone already
-      }
+      if (isLink(p)) unlinkDir(p);
     }
     rm(base);
   };
-  return { k, root, outside, at, link, close };
+  return { k, root, outside, at, link, close, all, options };
 };
 
 describe('strict, links: deny: the index of known links', () => {
-  // `known` counts what the index holds: a link moved away stays known
-  // under its old name — a path through it finds nothing there and passes
-  // — until a directory or a file takes that name.
   it("diagnostics show each place's links and how many are known", async () => {
-    const { k, at, outside, close } = await opened('deny');
+    const { k, close } = await opened('deny', {
+      setup: ({ at, outside, link }) => link(outside, at('d', 'j')),
+    });
     try {
       assert.deepEqual(k.diagnostics().strict, {
-        links: { ro: 'deny', terr: 'deny', d: 'deny', dro: 'deny' },
-        known: 0,
+        links: {
+          ro: 'deny',
+          terr: 'deny',
+          d: 'deny',
+          dro: 'deny',
+          site: 'deny',
+        },
+        known: 1,
       });
-      fsPatch.install(k);
-      const j = at('d', 'j');
-      fs.symlinkSync(outside, j, 'junction');
-      assert.equal(k.diagnostics().strict.known, 1);
-      fs.renameSync(j, at('d', 'k'));
-      assert.equal(k.diagnostics().strict.known, 2);
-      assert.throws(
-        () => fs.readFileSync(path.join(j, 'o.bin')),
-        { code: 'ENOENT' },
-        'j is gone: nothing there',
-      );
-      assert.equal(k.diagnostics().strict.known, 2);
-      fs.mkdirSync(j);
-      fs.writeFileSync(path.join(j, 'n.bin'), 'n');
-      assert.equal(k.diagnostics().strict.known, 1, 'a directory took j');
-      assert.equal(fs.readFileSync(path.join(j, 'n.bin'), 'utf8'), 'n');
-      fs.unlinkSync(at('d', 'k'));
     } finally {
       close();
     }
@@ -129,7 +123,13 @@ describe('strict, links: deny: the index of known links', () => {
     );
     try {
       assert.deepEqual(mixed.diagnostics().strict, {
-        links: { ro: 'verify', terr: 'verify', d: 'verify', dro: 'verify' },
+        links: {
+          ro: 'verify',
+          terr: 'verify',
+          d: 'verify',
+          dro: 'verify',
+          site: 'verify',
+        },
         known: 0,
       });
     } finally {
@@ -160,7 +160,9 @@ describe('strict, links: deny: the index of known links', () => {
       root,
       PLACES,
       { strict: true },
-      { preparers: PREPARERS },
+      {
+        preparers: PREPARERS,
+      },
     );
     fsPatch.install(k);
     try {
@@ -183,13 +185,15 @@ describe('strict, links: deny: the index of known links', () => {
   // A link another process makes is known once the watcher reports it:
   // until then a native call through it reaches node:fs. That window is
   // outside what 'deny' guarantees (README, Strict routing); 'verify' has
-  // none (below). A path an event names gone keeps what was known there —
-  // the patch may be making it again — and a directory there drops it.
-  it('the watcher adds a link made outside the patch, and drops one a directory replaced', async () => {
-    const { k, at, outside, link, close } = await opened('deny', {
+  // none (below). The index only grows: a link removed, or replaced by a
+  // directory, stays refused until the kernel restarts. A place's own
+  // directory is never a known link.
+  it('the watcher adds a link made outside the patch; nothing leaves the index until a restart', async () => {
+    const { k, at, outside, link, close, all, options } = await opened('deny', {
       defaults: { watch: true },
     });
     fsPatch.install(k);
+    let again = null;
     try {
       const epoch = async (events) => {
         k.watcher.emit('epoch', new Map(events));
@@ -207,7 +211,7 @@ describe('strict, links: deny: the index of known links', () => {
         refused('EACCES', 'open', through),
       );
       assert.equal(k.fs('terr').readFile('/j/o.bin'), null);
-      // A directory moved in brings its links along.
+      // A directory moved in by another process brings its links along.
       const brought = writeTree(path.join(outside, 'box'), { 'x.bin': 'x' });
       link(at('ro'), path.join(brought, 'jb'));
       disk.renameSync(brought, at('terr', 'box'));
@@ -218,29 +222,37 @@ describe('strict, links: deny: the index of known links', () => {
         () => fs.readFileSync(hidden),
         refused('EACCES', 'open', hidden),
       );
+      // Removed and replaced by a directory: still refused.
       unlinkDir(j);
-      await epoch([[j, 'delete']]);
-      assert.equal(k.diagnostics().strict.known, 2, 'j gone: kept');
       disk.mkdirSync(j);
-      await epoch([[j, 'scan']]);
-      assert.equal(k.diagnostics().strict.known, 1, 'a directory took j');
-      unlinkDir(at('terr', 'box', 'jb'));
-      disk.mkdirSync(at('terr', 'box', 'jb'));
-      await epoch([[at('terr', 'box'), 'scan']]);
-      assert.equal(k.diagnostics().strict.known, 1, 'a rescan adds, drops not');
-      await epoch([[at('terr', 'box', 'jb'), 'scan']]);
-      assert.equal(k.diagnostics().strict.known, 0);
-      // The place's own directory is never a known link.
+      disk.writeFileSync(path.join(j, 'o.bin'), 'n');
+      await epoch([
+        [j, 'delete'],
+        [j, 'scan'],
+      ]);
+      assert.equal(k.diagnostics().strict.known, 2);
+      assert.throws(
+        () => fs.readFileSync(through),
+        refused('EACCES', 'open', through),
+      );
       await epoch([[at('terr'), 'scan']]);
-      assert.equal(k.diagnostics().strict.known, 0);
+      assert.equal(k.diagnostics().strict.known, 2, 'no root');
+      // A kernel started now knows what is on disk.
+      fsPatch.uninstall();
+      again = await kernel(path.dirname(at('terr')), PLACES, all, options);
+      fsPatch.install(again);
+      assert.equal(again.diagnostics().strict.known, 1);
+      assert.equal(fs.readFileSync(through, 'utf8'), 'n');
     } finally {
+      again?.close();
+      if (isLink(at('terr', 'box', 'jb'))) unlinkDir(at('terr', 'box', 'jb'));
       close();
     }
   });
 
   it('an ordinary path never asks realpath.native', async () => {
     const real = disk.realpathSync.native;
-    for (const links of ['deny', 'verify']) {
+    for (const links of MODES) {
       let calls = 0;
       disk.realpathSync.native = (...args) => {
         calls++;
@@ -257,7 +269,8 @@ describe('strict, links: deny: the index of known links', () => {
         assert.ok(fs.existsSync(at('dro', 'r.bin')));
         assert.deepEqual(fs.readdirSync(at('d')).sort(), ['f.bin', 'sub']);
         fs.writeFileSync(at('d', 'n.bin'), 'n');
-        fs.unlinkSync(at('d', 'n.bin'));
+        fs.renameSync(at('d', 'n.bin'), at('d', 'm.bin'));
+        fs.unlinkSync(at('d', 'm.bin'));
         assert.equal(fs.readFileSync(at('terr', 'm.bin'), 'utf8'), 'media');
         assert.equal(await fs.promises.readFile(at('d', 'f.bin'), 'utf8'), 'f');
         assert.equal(k.fs('terr').readFile('/m.bin', 'utf8'), 'media');
@@ -272,7 +285,7 @@ describe('strict, links: deny: the index of known links', () => {
 
   // Read-only places, prepared sources and fs.fallback route as they did:
   // `links` decides only where a native call on a place's disk may go.
-  for (const links of ['deny', 'verify']) {
+  for (const links of MODES) {
     it(`links: ${links}: read-only, prepared and fallback routing hold`, async () => {
       const { k, at, close } = await opened(links);
       fsPatch.install(k);
@@ -332,130 +345,286 @@ describe('strict, links: verify: a link made outside the patch', () => {
   });
 });
 
+// Under strict the patch makes, removes and moves no link on a place's
+// disk, in either mode: every such call is ENOTSUP before any native call,
+// and the disk is as it was. `jk` is a link the index knows ('deny'), `ju`
+// one made after initialize() that no watcher reported — its lstat tells.
+// Both lead out of appRoot, so 'verify' lets a path through them be proven
+// and it is the link rule that refuses.
+const SYMLINKS = [
+  ['symlinkSync', (t, p) => fs.symlinkSync(t, p, 'junction')],
+  ['symlink', (t, p) => called((cb) => fs.symlink(t, p, 'junction', cb))],
+  ['promises.symlink', (t, p) => fs.promises.symlink(t, p, 'junction')],
+];
+const HARD_LINKS = [
+  ['linkSync', (a, b) => fs.linkSync(a, b)],
+  ['link', (a, b) => called((cb) => fs.link(a, b, cb))],
+  ['promises.link', (a, b) => fs.promises.link(a, b)],
+];
+const CPS = [
+  ['cpSync', (a, b) => fs.cpSync(a, b)],
+  ['cp', (a, b) => called((cb) => fs.cp(a, b, cb))],
+  ['promises.cp', (a, b) => fs.promises.cp(a, b)],
+];
+const REMOVALS = [
+  ['unlinkSync', 'unlink', (p) => fs.unlinkSync(p)],
+  ['unlink', 'unlink', (p) => called((cb) => fs.unlink(p, cb))],
+  ['promises.unlink', 'unlink', (p) => fs.promises.unlink(p)],
+  ['rmdirSync', 'rmdir', (p) => fs.rmdirSync(p)],
+  ['promises.rmdir', 'rmdir', (p) => fs.promises.rmdir(p)],
+  ['rmSync', 'rm', (p) => fs.rmSync(p)],
+  ['rmSync recursive', 'rm', (p) => fs.rmSync(p, { recursive: true })],
+  ['promises.rm', 'rm', (p) => fs.promises.rm(p, { recursive: true })],
+];
+const RENAMES = [
+  ['renameSync', (a, b) => fs.renameSync(a, b)],
+  ['rename', (a, b) => called((cb) => fs.rename(a, b, cb))],
+  ['promises.rename', (a, b) => fs.promises.rename(a, b)],
+];
+
+// Every call of `families` with `args`, refused as `code` names it.
+const refusesAll = async (families, args, expected) => {
+  for (const [call, run] of families) {
+    await assert.rejects(async () => run(...args), expected, call);
+  }
+};
+
+for (const links of MODES) {
+  describe(`strict, links: ${links}: the patch changes no link on a place's disk`, () => {
+    const setup = ({ at, outside, link }) => {
+      link(outside, at('d', 'jk'));
+      disk.mkdirSync(at('d', 'tree'));
+      link(outside, at('d', 'tree', 'jt'));
+    };
+
+    it('no link is made: symlink, link, cp of a link', async () => {
+      const { k, at, outside, link, close } = await opened(links, { setup });
+      const jo = path.join(outside, 'jo');
+      link(path.join(outside, 'sub'), jo);
+      fsPatch.install(k);
+      try {
+        const before = disk.readdirSync(at('d')).sort();
+        const made = at('d', 'jn');
+        await refusesAll(
+          SYMLINKS,
+          [outside, made],
+          refused('ENOTSUP', 'symlink', outside, made),
+        );
+        const file = path.join(outside, 'o.bin');
+        await refusesAll(
+          HARD_LINKS,
+          [file, made],
+          refused('ENOTSUP', 'link', file, made),
+        );
+        await refusesAll(CPS, [jo, made], refused('ENOTSUP', 'cp', jo, made));
+        // At a place's own path too, the place having no directory yet.
+        const site = at('site');
+        await refusesAll(
+          SYMLINKS.slice(0, 1),
+          [outside, site],
+          refused('ENOTSUP', 'symlink', outside, site),
+        );
+        assert.deepEqual(disk.readdirSync(at('d')).sort(), before);
+        assert.equal(disk.existsSync(site), false);
+        // A copy of a file, and a link off every place, are made.
+        fs.cpSync(file, at('d', 'copied.bin'));
+        assert.equal(disk.readFileSync(at('d', 'copied.bin'), 'utf8'), 'o');
+        const off = path.join(outside, 'jx');
+        fs.symlinkSync(outside, off, 'junction');
+        assert.ok(isLink(off));
+        unlinkDir(off);
+      } finally {
+        close();
+      }
+    });
+
+    it('no link is removed or moved: unlink, rmdir, rm, rename, known or not', async () => {
+      const { k, at, outside, link, close } = await opened(links, { setup });
+      const ju = at('d', 'ju');
+      link(outside, ju);
+      fsPatch.install(k);
+      try {
+        for (const p of [at('d', 'jk'), ju]) {
+          for (const [call, syscall, run] of REMOVALS) {
+            await assert.rejects(
+              async () => run(p),
+              refused('ENOTSUP', syscall, p),
+              `${call} ${p}`,
+            );
+          }
+          const to = at('d', 'moved');
+          await refusesAll(
+            RENAMES,
+            [p, to],
+            refused('ENOTSUP', 'rename', p, to),
+          );
+          const onto = at('d', 'f.bin');
+          await refusesAll(
+            RENAMES.slice(0, 1),
+            [onto, p],
+            refused('ENOTSUP', 'rename', onto, p),
+          );
+          assert.ok(isLink(p), p);
+          // The link itself is looked at.
+          assert.ok(fs.lstatSync(p).isSymbolicLink());
+          assert.match(fs.readlinkSync(p), /outside[\\/]?$/);
+        }
+        assert.equal(disk.existsSync(at('d', 'moved')), false);
+        assert.equal(disk.readFileSync(at('d', 'f.bin'), 'utf8'), 'f');
+      } finally {
+        close();
+      }
+    });
+
+    // With 'deny' the index knows the link under `tree`: renaming the
+    // directory would move it past the index, removing it would remove
+    // it. With 'verify' each call proves its path, and both go on.
+    it(`a directory holding a link: ${links === 'deny' ? 'neither renamed nor removed' : 'renamed and removed'}`, async () => {
+      const { k, at, close } = await opened(links, { setup });
+      fsPatch.install(k);
+      try {
+        const tree = at('d', 'tree');
+        const to = at('d', 'tree2');
+        if (links === 'deny') {
+          await refusesAll(
+            RENAMES,
+            [tree, to],
+            refused('ENOTSUP', 'rename', tree, to),
+          );
+          await assert.rejects(
+            async () => fs.rmSync(tree, { recursive: true }),
+            refused('ENOTSUP', 'rm', tree),
+          );
+          assert.ok(isLink(at('d', 'tree', 'jt')));
+          return;
+        }
+        fs.renameSync(tree, to);
+        assert.equal(
+          fs.readFileSync(path.join(to, 'jt', 'o.bin'), 'utf8'),
+          'o',
+        );
+        fs.rmSync(to, { recursive: true });
+        assert.equal(disk.existsSync(to), false);
+      } finally {
+        close();
+      }
+    });
+
+    // A tree moved into a place from outside appRoot would bring its links:
+    // refused when it holds one, into a place's directory or onto a
+    // place's own path; one that holds none moves in.
+    it('a tree from outside moves in only without links', async () => {
+      const { k, at, outside, link, close } = await opened(links, { setup });
+      const box = writeTree(path.join(outside, 'box'), { 'b.bin': 'b' });
+      link(path.join(outside, 'sub'), path.join(box, 'deep-link'));
+      const plain = writeTree(path.join(outside, 'plain'), { 'p.bin': 'p' });
+      fsPatch.install(k);
+      try {
+        for (const to of [at('d', 'box'), at('site')]) {
+          await refusesAll(
+            RENAMES,
+            [box, to],
+            refused('ENOTSUP', 'rename', box, to),
+          );
+        }
+        assert.ok(isLink(path.join(box, 'deep-link')));
+        fs.renameSync(plain, at('site'));
+        assert.equal(fs.readFileSync(at('site', 'p.bin'), 'utf8'), 'p');
+      } finally {
+        close();
+      }
+    });
+  });
+}
+
+describe('without strict: links in a place are made and removed natively', () => {
+  it('symlink, rename, unlink', async () => {
+    const base = tmpDir('links-free');
+    const root = writeTree(path.join(base, 'app'), TREE);
+    const outside = writeTree(path.join(base, 'outside'), { 'o.bin': 'o' });
+    const at = (...p) => path.join(root, ...p);
+    const k = await kernel(root, PLACES, {}, { preparers: PREPARERS });
+    fsPatch.install(k);
+    try {
+      fs.symlinkSync(outside, at('d', 'j'), 'junction');
+      assert.equal(fs.readFileSync(at('d', 'j', 'o.bin'), 'utf8'), 'o');
+      fs.renameSync(at('d', 'j'), at('d', 'k'));
+      fs.unlinkSync(at('d', 'k'));
+      assert.deepEqual(disk.readdirSync(at('d')).sort(), ['f.bin', 'sub']);
+    } finally {
+      fsPatch.uninstall();
+      k.close();
+      rm(base);
+    }
+  });
+});
+
 // Every thread keeps an index of its own. A worker's comes with its
-// snapshot; a link one thread makes through the patch reaches the others
-// as a message — and until it has, they ask the disk for the names below
-// the place's directory, so no thread goes through it meanwhile. Worker
-// kernels here are attached in this thread (helpers.worker).
+// snapshot; a link main's watcher finds reaches the workers linked then as
+// a `vfs-links` message, one way, with the generation of main's index: a
+// message no newer than what a worker holds changes nothing. Worker kernels
+// here are attached in this thread (helpers.worker).
 describe('strict, links: deny: every thread knows the links', () => {
-  // The patch calls linkMade / linkMoved before the native call; here the
-  // kernels are called as it calls them, the links made natively after.
-  // `stray` is a link no thread made, which only the disk knows: refused
-  // while a thread asks the disk, passed once it is told (outside the
-  // guarantee, as a link another process makes).
-  it('from the snapshot, and from the thread that made one, at once', async () => {
+  it('from the snapshot, and from what the watcher finds', async () => {
     const { k, at, outside, link, close } = await opened('deny', {
-      setup: ({ at: to, link: make }) => make(to('ro'), to('d', 'j0')),
+      defaults: { watch: true },
+      setup: ({ at: to, link: make }) => make(to('ro'), to('terr', 'j0')),
     });
     const w1 = worker(k);
-    const w2 = worker(k);
     const through = (p) => path.join(p, 'x.bin');
     const denied = (kernel, p) => kernel.routeRead(through(p)).kind === 'deny';
-    const stray = at('d', 'stray');
+    const unlinked = () => {
+      const { vfs } = k.link();
+      const config = new VfsConfig(vfs.config);
+      const alone = VfsKernel.fromSnapshot(vfs.snapshot, config, {
+        appRoot: vfs.appRoot,
+      });
+      vfs.port.close();
+      return alone;
+    };
+    let w2 = null;
+    let alone = null;
     try {
-      assert.equal(denied(w1.kernel, at('d', 'j0')), true, 'snapshot');
-      assert.equal(w1.kernel.routeRead(at('d', 'f.bin')).kind, 'passthrough');
-      link(outside, stray);
-      assert.equal(denied(w1.kernel, stray), false, 'no thread made it');
-
-      // Main makes one: the workers refuse it before the message comes.
-      let told = Promise.all([nextMessage(w1.port), nextMessage(w2.port)]);
-      k.linkMade(at('d', 'jm'));
-      link(outside, at('d', 'jm'));
-      assert.equal(denied(w1.kernel, at('d', 'jm')), true, 'worker, at once');
-      assert.equal(denied(w1.kernel, stray), true, 'worker, asks the disk');
-      assert.equal(w1.kernel.routeRead(at('d', 'f.bin')).kind, 'passthrough');
-      await told;
-      assert.equal(denied(w1.kernel, at('d', 'jm')), true, 'worker, told');
-      assert.equal(denied(w2.kernel, at('d', 'jm')), true, 'other, told');
-      assert.equal(denied(w1.kernel, stray), false, 'worker, told: index');
-
-      // A worker makes one: main at once, the other worker once main
-      // passes it on.
-      told = Promise.all([nextMessage(w1.main), nextMessage(w2.port)]);
-      w1.kernel.linkMade(at('d', 'jw'));
-      link(outside, at('d', 'jw'));
-      assert.equal(denied(k, at('d', 'jw')), true, 'main, at once');
-      assert.equal(denied(w2.kernel, at('d', 'jw')), true, 'other, at once');
-      await told;
-      assert.equal(denied(k, at('d', 'jw')), true, 'main, told');
-      assert.equal(denied(w2.kernel, at('d', 'jw')), true, 'other, told');
-      assert.equal(denied(k, stray), false, 'main, told: index');
-      assert.equal(denied(w2.kernel, stray), false, 'other, told: index');
-      assert.equal(denied(w1.kernel, stray), false, 'maker: no echo');
-      assert.equal(k.diagnostics().strict.known, 3);
-
-      // A directory renamed in a worker takes its links along everywhere.
-      fs.mkdirSync(at('d', 'box'));
-      told = Promise.all([nextMessage(w2.main), nextMessage(w1.port)]);
-      w2.kernel.linkMade(at('d', 'box', 'jb'));
-      link(outside, at('d', 'box', 'jb'));
-      await told;
-      told = Promise.all([nextMessage(w1.main), nextMessage(w2.port)]);
-      w1.kernel.linkMoved(at('d', 'box'), at('d', 'moved'));
-      disk.renameSync(at('d', 'box'), at('d', 'moved'));
-      assert.equal(denied(k, at('d', 'moved', 'jb')), true, 'moved, at once');
-      await told;
-      assert.equal(denied(k, at('d', 'moved', 'jb')), true, 'moved, told');
-      assert.equal(denied(w2.kernel, at('d', 'moved', 'jb')), true);
-
-      // A new worker takes what main knows by then.
-      const w3 = worker(k);
-      assert.equal(denied(w3.kernel, at('d', 'jw')), true, 'late snapshot');
-      assert.equal(denied(w3.kernel, at('d', 'moved', 'jb')), true);
-      assert.equal(denied(w3.kernel, stray), false, 'late snapshot: index');
-      w3.kernel.close();
+      assert.equal(denied(w1.kernel, at('terr', 'j0')), true, 'snapshot');
+      assert.equal(w1.kernel.routeRead(at('terr', 'm.bin')).kind, 'disk');
+      const jw = at('terr', 'jw');
+      link(outside, jw);
+      assert.equal(denied(w1.kernel, jw), false, 'not reported yet');
+      const told = nextMessage(w1.port);
+      k.watcher.emit('epoch', new Map([[jw, 'scan']]));
+      await k.watchQueue.idle;
+      const msg = await told;
+      assert.equal(msg.name, 'vfs-links');
+      assert.equal(msg.generation, 2);
+      assert.equal(denied(k, jw), true, 'main');
+      assert.equal(denied(w1.kernel, jw), true, 'worker, told');
+      // A worker linked now has it in its snapshot; an old message adds
+      // nothing to it, a newer one does.
+      w2 = worker(k);
+      alone = unlinked();
+      assert.equal(denied(w2.kernel, jw), true, 'late snapshot');
+      assert.equal(denied(alone, jw), true, 'unlinked worker: snapshot');
+      const stray = at('terr', 'stray');
+      const stale = nextMessage(w2.port);
+      w2.main.postMessage({ name: 'vfs-links', add: [stray], generation: 2 });
+      await stale;
+      assert.equal(denied(w2.kernel, stray), false, 'stale: ignored');
+      const fresh = nextMessage(w2.port);
+      w2.main.postMessage({ name: 'vfs-links', add: [stray], generation: 3 });
+      await fresh;
+      assert.equal(denied(w2.kernel, stray), true, 'newer: added');
     } finally {
+      alone?.close();
+      w2?.kernel.close();
       w1.kernel.close();
-      w2.kernel.close();
-      unlinkDir(at('d', 'moved', 'jb'));
       close();
     }
   });
 });
 
-// What the review of 'deny' found: a link the patch is making, checked
-// before the call makes it; spellings node:fs resolves before the OS opens
-// them; a place's own directory; rmdir of a link; a name a file or a
-// failed link takes; a closed or unlinked worker.
+// Edges: spellings node:fs resolves before the OS opens them; a place's
+// own directory.
 describe('strict, links: deny: edges', () => {
-  // The patch adds a link before its call makes it: a check in between
-  // finds nothing there and passes, and the link stays known.
-  it('a link made or moved by an asynchronous call is known once it is there', async () => {
-    const { k, at, outside, close } = await opened('deny');
-    fsPatch.install(k);
-    const quietly = (p) => {
-      try {
-        fs.readFileSync(p);
-      } catch {
-        // nothing there yet, or refused already
-      }
-    };
-    try {
-      const j = at('d', 'j');
-      const through = path.join(j, 'o.bin');
-      const making = fs.promises.symlink(outside, j, 'junction');
-      quietly(through);
-      await making;
-      assert.throws(
-        () => fs.readFileSync(through),
-        refused('EACCES', 'open', through),
-      );
-      const moved = at('d', 'j2');
-      const after = path.join(moved, 'o.bin');
-      const moving = fs.promises.rename(j, moved);
-      quietly(after);
-      await moving;
-      assert.throws(
-        () => fs.readFileSync(after),
-        refused('EACCES', 'open', after),
-      );
-      fs.unlinkSync(moved);
-    } finally {
-      close();
-    }
-  });
-
   it(
     'Windows: a drive-relative or root-relative spelling of a path through a link',
     { skip: process.platform !== 'win32' },
@@ -487,19 +656,16 @@ describe('strict, links: deny: edges', () => {
   );
 
   // A place's directory may be a link out of appRoot (a media store): it is
-  // the place's own disk, never a known link — not when the watcher names
-  // it, nor when the patch makes it.
+  // the place's own disk, never a known link, whatever the watcher says.
   it("a place's own directory is never a known link", async () => {
     const base = tmpDir('links-root');
     const root = writeTree(path.join(base, 'app'), { 'ro/h.bin': 'hidden' });
     const outside = writeTree(path.join(base, 'outside'), { 'o.bin': 'o' });
-    const store = writeTree(path.join(base, 'store'), { 's.bin': 's' });
     const at = (...p) => path.join(root, ...p);
     linkDir(outside, at('media'));
     const places = {
       ro: PLACES.ro,
       media: { fs: { ext: ['txt'], fallback: 'disk' } },
-      later: { provider: 'disk', fs: { writable: true } },
     };
     const defaults = { strict: true, watch: true, watchTimeout: 60000 };
     const k = await kernel(root, places, defaults, { preparers: PREPARERS });
@@ -510,131 +676,11 @@ describe('strict, links: deny: edges', () => {
       await k.watchQueue.idle;
       assert.equal(k.diagnostics().strict.known, 0);
       assert.equal(fs.readFileSync(at('media', 'o.bin'), 'utf8'), 'o');
-      fs.symlinkSync(store, at('later'), 'junction');
-      assert.equal(k.diagnostics().strict.known, 0);
-      assert.equal(fs.readFileSync(at('later', 's.bin'), 'utf8'), 's');
     } finally {
       fsPatch.uninstall();
       k.close();
       unlinkDir(at('media'));
-      if (disk.existsSync(at('later'))) unlinkDir(at('later'));
       rm(base);
-    }
-  });
-
-  // A release renamed into place — a directory onto a place's own path —
-  // brings the links it holds into the index; the directory is no link.
-  it("a directory renamed onto a place's own directory brings its links", async () => {
-    const base = tmpDir('links-deploy');
-    const root = writeTree(path.join(base, 'app'), { 'ro/h.bin': 'hidden' });
-    const build = writeTree(path.join(base, 'build'), { 'x.bin': 'x' });
-    const at = (...p) => path.join(root, ...p);
-    linkDir(at('ro'), path.join(build, 'jro'));
-    const places = {
-      ro: PLACES.ro,
-      site: { provider: 'disk', fs: { writable: true } },
-    };
-    const k = await kernel(
-      root,
-      places,
-      { strict: true },
-      {
-        preparers: PREPARERS,
-      },
-    );
-    fsPatch.install(k);
-    try {
-      fs.renameSync(build, at('site'));
-      assert.equal(fs.readFileSync(at('site', 'x.bin'), 'utf8'), 'x');
-      const hidden = at('site', 'jro', 'h.bin');
-      assert.throws(
-        () => fs.readFileSync(hidden),
-        refused('EACCES', 'open', hidden),
-      );
-      assert.equal(k.diagnostics().strict.known, 1);
-    } finally {
-      fsPatch.uninstall();
-      k.close();
-      for (const j of [at('site', 'jro'), path.join(build, 'jro')]) {
-        if (disk.existsSync(j)) unlinkDir(j);
-      }
-      rm(base);
-    }
-  });
-
-  // rmdir does not follow its last name: a link there is removed on
-  // Windows, ENOTDIR on POSIX — never EACCES.
-  it('rmdir of the link itself is not refused', async () => {
-    const { k, at, outside, close } = await opened('deny');
-    fsPatch.install(k);
-    try {
-      const j = at('d', 'j');
-      fs.symlinkSync(outside, j, 'junction');
-      try {
-        fs.rmdirSync(j);
-      } catch (err) {
-        assert.equal(err.code, 'ENOTDIR');
-        fs.unlinkSync(j);
-      }
-      assert.equal(disk.existsSync(j), false);
-      assert.deepEqual(disk.readdirSync(outside), ['o.bin']);
-    } finally {
-      close();
-    }
-  });
-
-  // A file renamed over a known link's name, and a directory made where a
-  // link failed to be made: the name holds no link, and nothing is refused.
-  it('a file or a directory where a link was known is served', async () => {
-    const { k, at, outside, close } = await opened('deny');
-    fsPatch.install(k);
-    try {
-      const j = at('d', 'j');
-      fs.symlinkSync(outside, j, 'junction');
-      fs.writeFileSync(at('d', 'n.bin'), 'n');
-      fs.unlinkSync(j);
-      fs.renameSync(at('d', 'n.bin'), j);
-      assert.equal(fs.readFileSync(j, 'utf8'), 'n');
-      const failed = at('d', 'none', 'j');
-      assert.throws(() => fs.symlinkSync(outside, failed, 'junction'), {
-        code: 'ENOENT',
-      });
-      fs.mkdirSync(failed, { recursive: true });
-      fs.writeFileSync(path.join(failed, 'f.bin'), 'f');
-      assert.equal(fs.readFileSync(path.join(failed, 'f.bin'), 'utf8'), 'f');
-    } finally {
-      close();
-    }
-  });
-
-  // A closed worker, or one not linked to the main kernel, counts no link:
-  // the other threads stay settled — they answer from their index, and a
-  // link only the disk knows is not asked of it.
-  it('a closed or unlinked worker leaves the other threads settled', async () => {
-    const { k, at, outside, link, close } = await opened('deny');
-    const stray = at('d', 'stray');
-    link(outside, stray);
-    const through = path.join(stray, 'x.bin');
-    const denied = (kernel) => kernel.routeRead(through).kind === 'deny';
-    const w = worker(k);
-    const { vfs } = k.link();
-    const config = new VfsConfig(vfs.config);
-    const alone = VfsKernel.fromSnapshot(vfs.snapshot, config, {
-      appRoot: vfs.appRoot,
-    });
-    try {
-      assert.equal(denied(k), false);
-      w.kernel.close();
-      w.kernel.linkMade(at('d', 'jw'));
-      alone.linkMade(at('d', 'ja'));
-      assert.equal(denied(k), false, 'main: settled');
-      assert.equal(denied(alone), false, 'unlinked: settled');
-      k.linkMade(at('d', 'jm'));
-      assert.equal(denied(alone), false, 'unlinked: hears of nothing');
-    } finally {
-      alone.close();
-      vfs.port.close();
-      close();
     }
   });
 });

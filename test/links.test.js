@@ -178,11 +178,20 @@ const outOfPlace = (links) => () => {
     await refusesEach(FILE_MUTATIONS, files);
     const dirs = [at('d', 'jro', 'sub'), at('d', 'jdro', 'sub')];
     await refusesEach(DIR_MUTATIONS, dirs);
-    // The link itself: 'deny' lets rmdir and rm remove it (below).
+    // The link itself: 'deny' routes rmdir and rm to it, which remove no
+    // link on a place's disk (ENOTSUP).
+    const removals = ([call]) => /^(promises\.)?rm/.test(call);
     const own = verify
       ? DIR_MUTATIONS
-      : DIR_MUTATIONS.filter(([call]) => !/^(promises\.)?rm/.test(call));
+      : DIR_MUTATIONS.filter((f) => !removals(f));
     await refusesEach(own, [at('d', 'jro')]);
+    if (!verify) {
+      await refusesEach(
+        DIR_MUTATIONS.filter(removals),
+        [at('d', 'jro')],
+        'ENOTSUP',
+      );
+    }
     assert.deepEqual(native.calls, []);
     assert.deepEqual(listDisk(at('ro')), ['a.txt', 'h.bin']);
     assert.deepEqual(listDisk(at('dro')), ['r.bin']);
@@ -301,33 +310,28 @@ const outOfPlace = (links) => () => {
     },
   );
 
-  // Not followed: lstat, readlink, the l* forms, unlink, rm and rename name
-  // the link, not what it names.
+  // Not followed: lstat, readlink and the l* forms name the link, not what
+  // it names, and 'deny' lets them look at it; a rename or a removal of it
+  // is ENOTSUP in either mode (links-deny.test.js).
   it(
-    'deny: the link itself is looked at, moved and removed',
+    'deny: the link itself is looked at, neither moved nor removed',
     { skip: verify },
-    () => {
+    async () => {
       const link = at('d', 'jout');
       assert.ok(fs.lstatSync(link).isSymbolicLink());
       assert.match(fs.readlinkSync(link), /outside[\\/]?$/);
       const moved = at('d', 'jmoved');
-      fs.renameSync(link, moved);
       assert.throws(
-        () => fs.readFileSync(path.join(moved, 'o.bin')),
-        refused('EACCES', 'open', path.join(moved, 'o.bin')),
+        () => fs.renameSync(link, moved),
+        refused('ENOTSUP', 'rename', link, moved),
       );
-      fs.renameSync(moved, link);
       const jro = at('d', 'jro');
-      fs.unlinkSync(jro);
-      assert.equal(onDisk(jro), false);
+      assert.throws(
+        () => fs.unlinkSync(jro),
+        refused('ENOTSUP', 'unlink', jro),
+      );
+      assert.ok(fs.lstatSync(jro).isSymbolicLink());
       assert.deepEqual(listDisk(at('ro')), ['a.txt', 'h.bin']);
-      // A directory where the link was is no link: known links found gone
-      // are forgotten.
-      fs.mkdirSync(jro);
-      fs.writeFileSync(path.join(jro, 'n.bin'), 'n');
-      assert.equal(fs.readFileSync(path.join(jro, 'n.bin'), 'utf8'), 'n');
-      rm(jro);
-      linkDir(at('ro'), jro);
     },
   );
 
@@ -568,30 +572,26 @@ const makingLinks = (links) => () => {
     assert.deepEqual(native.calls, []);
   });
 
-  // With 'deny' it is known from then on: nothing is read through it, but
-  // it is looked at and removed like any link.
-  it('a link to a path off the line of appRoot is made', async () => {
+  // No link is made on a place's disk under strict, whatever its target: a
+  // link to a path off the line of appRoot is made off every place.
+  it('a link to a path off the line of appRoot: not on a place disk, made elsewhere', async () => {
     const junction = at('d', 'jnew');
-    const through = path.join(junction, 'o.bin');
-    fs.symlinkSync(tree.outside, junction, 'junction');
-    try {
-      if (links === 'verify') {
-        assert.equal(fs.readFileSync(through, 'utf8'), 'o');
-      } else {
-        assert.throws(
-          () => fs.readFileSync(through),
-          refused('EACCES', 'open', through),
-        );
-        assert.ok(fs.lstatSync(junction).isSymbolicLink());
-      }
-    } finally {
-      fs.unlinkSync(junction);
-    }
+    assert.throws(
+      () => fs.symlinkSync(tree.outside, junction, 'junction'),
+      refused('ENOTSUP', 'symlink', tree.outside, junction),
+    );
     assert.equal(onDisk(junction), false);
+    const file = path.join(tree.outside, 'o.bin');
     const hard = at('d', 'o.bin');
-    fs.linkSync(path.join(tree.outside, 'o.bin'), hard);
-    assert.equal(readDisk(hard, 'utf8'), 'o');
-    unlinkDisk(hard);
+    assert.throws(
+      () => fs.linkSync(file, hard),
+      refused('ENOTSUP', 'link', file, hard),
+    );
+    assert.equal(onDisk(hard), false);
+    const elsewhere = path.join(path.dirname(tree.outside), 'jelse');
+    fs.symlinkSync(tree.outside, elsewhere, 'junction');
+    assert.equal(fs.readFileSync(path.join(elsewhere, 'o.bin'), 'utf8'), 'o');
+    unlinkDir(elsewhere);
   });
 };
 
@@ -867,8 +867,10 @@ describe('strict: what a rename takes out of a place', () => {
     return { base, root, outside, at };
   };
 
-  // Within the place, or into it from outside, a directory moves, and a
-  // link in it goes on refusing what lies through it.
+  // Within the place a directory moves — with 'verify' one holding a link
+  // too, which goes on refusing what lies through it; with 'deny' one that
+  // holds a link the index knows is ENOTSUP. From outside a directory moves
+  // in only when it holds no link.
   const movesOut = (links) => async () => {
     const { base, root, outside, at } = moving();
     const options = { preparers: PREPARERS };
@@ -897,22 +899,32 @@ describe('strict: what a rename takes out of a place', () => {
       assert.ok(onDisk(at('d', 'sub', 'deeper', 'jro', 'h.bin')));
       fs.renameSync(at('d', 'f.bin'), path.join(outside, 'f.bin'));
       assert.equal(readDisk(path.join(outside, 'f.bin'), 'utf8'), 'f');
-      fs.renameSync(at('d', 'sub'), at('d', 'moved'));
-      assert.ok(onDisk(at('d', 'moved', 'deeper', 'g.bin')));
-      const hidden = at('d', 'moved', 'deeper', 'jro', 'h.bin');
-      assert.throws(
-        () => fs.readFileSync(hidden),
-        refused('EACCES', 'open', hidden),
-      );
+      const sub = at('d', 'sub');
+      const moved = at('d', 'moved');
+      if (links === 'deny') {
+        assert.throws(
+          () => fs.renameSync(sub, moved),
+          refused('ENOTSUP', 'rename', sub, moved),
+        );
+      } else {
+        fs.renameSync(sub, moved);
+        assert.ok(onDisk(at('d', 'moved', 'deeper', 'g.bin')));
+        const hidden = at('d', 'moved', 'deeper', 'jro', 'h.bin');
+        assert.throws(
+          () => fs.readFileSync(hidden),
+          refused('EACCES', 'open', hidden),
+        );
+      }
       const into = writeTree(path.join(outside, 'into'), { 'i.bin': 'i' });
       linkDir(at('ro'), path.join(into, 'jx'));
-      fs.renameSync(into, at('d', 'into'));
-      assert.equal(readDisk(at('d', 'into', 'i.bin'), 'utf8'), 'i');
-      const brought = at('d', 'into', 'jx', 'h.bin');
+      const intoPlace = at('d', 'into');
       assert.throws(
-        () => fs.readFileSync(brought),
-        refused('EACCES', 'open', brought),
+        () => fs.renameSync(into, intoPlace),
+        refused('ENOTSUP', 'rename', into, intoPlace),
       );
+      unlinkDir(path.join(into, 'jx'));
+      fs.renameSync(into, intoPlace);
+      assert.equal(readDisk(at('d', 'into', 'i.bin'), 'utf8'), 'i');
     } finally {
       fsPatch.uninstall();
       native.restore();
