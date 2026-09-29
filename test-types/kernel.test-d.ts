@@ -141,6 +141,11 @@ expectType<{
   };
   readonly version: number;
   readonly instance: string;
+  readonly links?: {
+    readonly known: readonly string[];
+    readonly made: Int32Array;
+    readonly seen: number;
+  };
 }>()(kernel.snapshot());
 const { vfs, transferList } = kernel.link();
 expectType<{
@@ -155,6 +160,11 @@ expectType<{
       };
       readonly version: number;
       readonly instance: string;
+      readonly links?: {
+        readonly known: readonly string[];
+        readonly made: Int32Array;
+        readonly seen: number;
+      };
     };
     config: DeepReadonly<VfsRawConfig>;
     appRoot: string;
@@ -229,6 +239,10 @@ expectType<{
     readonly failures: number;
     readonly places: { readonly [place: string]: number };
   };
+  readonly strict: {
+    readonly links: { readonly [place: string]: 'deny' | 'verify' };
+    readonly known: number;
+  } | null;
   readonly queues: {
     readonly watch: { readonly epochs: number; readonly rechecks: number };
     readonly mutations: { readonly keys: number; readonly barriers: number };

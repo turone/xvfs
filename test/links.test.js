@@ -24,13 +24,17 @@ const {
 const WIN = process.platform === 'win32';
 
 // Under strict a native call on a place's disk — fs.fallback: 'disk', a
-// disk or node-default place — goes only where the disk says its path
-// really lies: in the place's directory, or off appRoot's line. A link out
+// disk or node-default place — follows the place's `links`. With 'deny'
+// (the default) a path through a link the kernel knows is refused before
+// any native I/O, wherever the link goes; the link itself may be looked at
+// and removed. With 'verify' it goes only where the disk says its path
+// really lies: in the place's directory, or off appRoot's line — a link out
 // of the place into another place, appRoot or a directory above it is
-// refused before any native I/O; one that stays in the place or leaves
-// appRoot's line is followed. The links are junctions on Windows, which
-// take no privilege, and symbolic links elsewhere. The rule itself, with a
-// table for realpath: aliases.test.js.
+// refused, one that stays in the place or leaves appRoot's line is
+// followed. The links are junctions on Windows, which take no privilege,
+// and symbolic links elsewhere. The rule of 'verify', with a table for
+// realpath: aliases.test.js; the index of 'deny': link-index.test.js.
+const MODES = ['deny', 'verify'];
 
 // The disk as it is, behind the patch: captured before any install.
 const {
@@ -108,7 +112,8 @@ const linkedTree = (prefix, up = true) => {
   return { root, outside, at, remove };
 };
 
-describe('strict: a link out of a place disk', () => {
+const outOfPlace = (links) => () => {
+  const verify = links === 'verify';
   let tree;
   let k;
   let native;
@@ -118,7 +123,7 @@ describe('strict: a link out of a place disk', () => {
   before(async () => {
     tree = linkedTree('links');
     const options = { preparers: PREPARERS };
-    k = await kernel(tree.root, PLACES, { strict: true }, options);
+    k = await kernel(tree.root, PLACES, { strict: true, links }, options);
     native = countNative();
     fsPatch.install(k);
     moduleHook.install(k);
@@ -171,12 +176,13 @@ describe('strict: a link out of a place disk', () => {
       at('nd', 'jlib', 'n.js'),
     ];
     await refusesEach(FILE_MUTATIONS, files);
-    const dirs = [
-      at('d', 'jro', 'sub'),
-      at('d', 'jdro', 'sub'),
-      at('d', 'jro'),
-    ];
+    const dirs = [at('d', 'jro', 'sub'), at('d', 'jdro', 'sub')];
     await refusesEach(DIR_MUTATIONS, dirs);
+    // The link itself: 'deny' lets rm remove it (below).
+    const own = verify
+      ? DIR_MUTATIONS
+      : DIR_MUTATIONS.filter(([call]) => call !== 'rmSync recursive');
+    await refusesEach(own, [at('d', 'jro')]);
     assert.deepEqual(native.calls, []);
     assert.deepEqual(listDisk(at('ro')), ['a.txt', 'h.bin']);
     assert.deepEqual(listDisk(at('dro')), ['r.bin']);
@@ -186,9 +192,8 @@ describe('strict: a link out of a place disk', () => {
   });
 
   // mkdtemp makes its prefix and six characters, a mutation of the place's
-  // disk like any other: proven where the directory would really lie, its
-  // path named as node:fs names it (`XXXXXX`). Through a link that stays
-  // in the place it is made.
+  // disk like any other, its path named as node:fs names it (`XXXXXX`).
+  // Through a link that stays in the place it is made with 'verify'.
   it('mkdtemp through it: EACCES, nothing made', async () => {
     const MKDTEMPS = [
       ['mkdtempSync', (p) => fs.mkdtempSync(p)],
@@ -221,7 +226,16 @@ describe('strict: a link out of a place disk', () => {
     assert.deepEqual(listDisk(at('ro')), ['a.txt', 'h.bin']);
     assert.deepEqual(listDisk(at('dro')), ['r.bin']);
     assert.deepEqual(listDisk(at('lib')), ['e.mjs', 'm.js']);
-    const made = fs.mkdtempSync(at('d', 'jin', 'tmp-'));
+    const inside = at('d', 'jin', 'tmp-');
+    if (!verify) {
+      assert.throws(
+        () => fs.mkdtempSync(inside),
+        refused('EACCES', 'mkdtemp', `${inside}XXXXXX`),
+      );
+      assert.deepEqual(listDisk(at('d', 'sub')), ['s.bin']);
+      return;
+    }
+    const made = fs.mkdtempSync(inside);
     try {
       assert.ok(onDisk(at('d', 'sub', path.basename(made))), made);
       assert.ok(native.calls.includes('mkdtempSync'));
@@ -264,21 +278,78 @@ describe('strict: a link out of a place disk', () => {
     assert.equal(readDisk(at('d', 'f.bin'), 'utf8'), 'f');
   });
 
-  it('a link that stays in the place or leaves the line of appRoot is followed', () => {
-    native.calls.length = 0;
-    assert.equal(fs.readFileSync(at('terr', 'jin', 's.bin'), 'utf8'), 's');
-    assert.equal(fs.readFileSync(at('terr', 'jout', 'o.bin'), 'utf8'), 'o');
-    assert.equal(fs.readFileSync(at('d', 'jin', 's.bin'), 'utf8'), 's');
-    assert.equal(fs.readFileSync(at('d', 'jout', 'o.bin'), 'utf8'), 'o');
-    assert.deepEqual(fs.readdirSync(at('d', 'jout')), ['o.bin']);
-    fs.writeFileSync(at('d', 'jin', 'w.bin'), 'w');
-    assert.equal(readDisk(at('d', 'sub', 'w.bin'), 'utf8'), 'w');
-    assert.equal(fs.readFileSync(at('d', 'f.bin'), 'utf8'), 'f');
-    assert.ok(native.calls.includes('readFileSync'));
-    assert.equal(k.fs('terr').readFile('/jout/o.bin', 'utf8'), 'o');
-    assert.equal(k.fs('terr').readFile('/jin/s.bin', 'utf8'), 's');
-    fs.unlinkSync(at('d', 'sub', 'w.bin'));
-  });
+  it(
+    'deny: a link that stays in the place or leaves the line of appRoot is refused too',
+    { skip: verify },
+    async () => {
+      native.calls.length = 0;
+      const files = [
+        at('terr', 'jin', 's.bin'),
+        at('terr', 'jout', 'o.bin'),
+        at('d', 'jin', 's.bin'),
+        at('d', 'jout', 'o.bin'),
+      ];
+      await refusesEach(FILE_READS, files);
+      await refusesEach(FILE_MUTATIONS.slice(0, 3), [at('d', 'jin', 'w.bin')]);
+      await refusesEach(DIR_READS, [at('d', 'jout'), at('d', 'jin')]);
+      assert.deepEqual(native.calls, []);
+      assert.deepEqual(listDisk(at('d', 'sub')), ['s.bin']);
+      assert.equal(fs.readFileSync(at('d', 'f.bin'), 'utf8'), 'f');
+      assert.equal(k.fs('terr').readFile('/jout/o.bin'), null);
+      assert.equal(k.fs('terr').readFile('/jin/s.bin'), null);
+      assert.equal(k.fs('terr').readFile('/sub/s.bin', 'utf8'), 's');
+    },
+  );
+
+  // Not followed: lstat, readlink, the l* forms, unlink, rm and rename name
+  // the link, not what it names.
+  it(
+    'deny: the link itself is looked at, moved and removed',
+    { skip: verify },
+    () => {
+      const link = at('d', 'jout');
+      assert.ok(fs.lstatSync(link).isSymbolicLink());
+      assert.match(fs.readlinkSync(link), /outside[\\/]?$/);
+      const moved = at('d', 'jmoved');
+      fs.renameSync(link, moved);
+      assert.throws(
+        () => fs.readFileSync(path.join(moved, 'o.bin')),
+        refused('EACCES', 'open', path.join(moved, 'o.bin')),
+      );
+      fs.renameSync(moved, link);
+      const jro = at('d', 'jro');
+      fs.unlinkSync(jro);
+      assert.equal(onDisk(jro), false);
+      assert.deepEqual(listDisk(at('ro')), ['a.txt', 'h.bin']);
+      // A directory where the link was is no link: known links found gone
+      // are forgotten.
+      fs.mkdirSync(jro);
+      fs.writeFileSync(path.join(jro, 'n.bin'), 'n');
+      assert.equal(fs.readFileSync(path.join(jro, 'n.bin'), 'utf8'), 'n');
+      rm(jro);
+      linkDir(at('ro'), jro);
+    },
+  );
+
+  it(
+    'verify: a link that stays in the place or leaves the line of appRoot is followed',
+    { skip: !verify },
+    () => {
+      native.calls.length = 0;
+      assert.equal(fs.readFileSync(at('terr', 'jin', 's.bin'), 'utf8'), 's');
+      assert.equal(fs.readFileSync(at('terr', 'jout', 'o.bin'), 'utf8'), 'o');
+      assert.equal(fs.readFileSync(at('d', 'jin', 's.bin'), 'utf8'), 's');
+      assert.equal(fs.readFileSync(at('d', 'jout', 'o.bin'), 'utf8'), 'o');
+      assert.deepEqual(fs.readdirSync(at('d', 'jout')), ['o.bin']);
+      fs.writeFileSync(at('d', 'jin', 'w.bin'), 'w');
+      assert.equal(readDisk(at('d', 'sub', 'w.bin'), 'utf8'), 'w');
+      assert.equal(fs.readFileSync(at('d', 'f.bin'), 'utf8'), 'f');
+      assert.ok(native.calls.includes('readFileSync'));
+      assert.equal(k.fs('terr').readFile('/jout/o.bin', 'utf8'), 'o');
+      assert.equal(k.fs('terr').readFile('/jin/s.bin', 'utf8'), 's');
+      fs.unlinkSync(at('d', 'sub', 'w.bin'));
+    },
+  );
 
   it('the facade serves nothing through it', () => {
     const terr = k.fs('terr');
@@ -294,7 +365,10 @@ describe('strict: a link out of a place disk', () => {
   // takes the real path, which lib routes: never the raw file past it.
   it('require and import through it: refused, or routed by the real path', async () => {
     const linked = at('nd', 'jlib', 'm.js');
-    assert.throws(() => require(linked), { code: 'EACCES', syscall: 'lstat' });
+    assert.throws(() => require(linked), {
+      code: 'EACCES',
+      syscall: 'lstat',
+    });
     assert.equal(globalThis.__smfsLinked, undefined);
     assert.equal(require(at('nd', 'own.js')), 'own');
     const esm = pathToFileURL(at('nd', 'jlib', 'e.mjs')).href;
@@ -309,7 +383,7 @@ describe('strict: a link out of a place disk', () => {
     const script = path.join(__dirname, 'fixtures', 'links-preserve.cjs');
     const out = execFileSync(
       process.execPath,
-      ['--preserve-symlinks', script, tree.root],
+      ['--preserve-symlinks', script, tree.root, links],
       { encoding: 'utf8' },
     );
     assert.deepEqual(JSON.parse(out), {
@@ -319,7 +393,14 @@ describe('strict: a link out of a place disk', () => {
       ran: false,
     });
   });
-});
+};
+
+for (const links of MODES) {
+  describe(
+    `strict, links: ${links}: a link out of a place disk`,
+    outOfPlace(links),
+  );
+}
 
 // node:fs's own recursive readdir enters a link to a directory — on
 // Windows a junction even with withFileTypes — and so would a native copy
@@ -410,7 +491,7 @@ describe('strict: a recursive listing of a place disk', () => {
 // resolves it — lies below appRoot, is appRoot or a directory above it,
 // and a hard link to a file below appRoot. A junction takes no privilege
 // on Windows, so these are made or refused for real.
-describe('strict: making a link to managed territory', () => {
+const makingLinks = (links) => () => {
   let tree;
   let k;
   let native;
@@ -429,7 +510,7 @@ describe('strict: making a link to managed territory', () => {
   before(async () => {
     tree = linkedTree('links-make', false);
     const options = { preparers: PREPARERS };
-    k = await kernel(tree.root, PLACES, { strict: true }, options);
+    k = await kernel(tree.root, PLACES, { strict: true, links }, options);
     native = countNative();
     fsPatch.install(k);
   });
@@ -487,22 +568,44 @@ describe('strict: making a link to managed territory', () => {
     assert.deepEqual(native.calls, []);
   });
 
+  // With 'deny' it is known from then on: nothing is read through it, but
+  // it is looked at and removed like any link.
   it('a link to a path off the line of appRoot is made', async () => {
     const junction = at('d', 'jnew');
+    const through = path.join(junction, 'o.bin');
     fs.symlinkSync(tree.outside, junction, 'junction');
     try {
-      assert.equal(fs.readFileSync(path.join(junction, 'o.bin'), 'utf8'), 'o');
+      if (links === 'verify') {
+        assert.equal(fs.readFileSync(through, 'utf8'), 'o');
+      } else {
+        assert.throws(
+          () => fs.readFileSync(through),
+          refused('EACCES', 'open', through),
+        );
+        assert.ok(fs.lstatSync(junction).isSymbolicLink());
+      }
     } finally {
-      unlinkDir(junction);
+      fs.unlinkSync(junction);
     }
+    assert.equal(onDisk(junction), false);
     const hard = at('d', 'o.bin');
     fs.linkSync(path.join(tree.outside, 'o.bin'), hard);
     assert.equal(readDisk(hard, 'utf8'), 'o');
     unlinkDisk(hard);
   });
-});
+};
 
-describe('strict: a symbolic link to a file out of a place disk', () => {
+for (const links of MODES) {
+  describe(
+    `strict, links: ${links}: making a link to managed territory`,
+    makingLinks(links),
+  );
+}
+
+// The reads of a link itself, which 'deny' lets through.
+const OWN_READS = /^(promises\.)?(lstat|readlink)/;
+
+const fileLinks = (links) => () => {
   it('reads and writes through it: EACCES, nothing reaches node:fs', async (t) => {
     const root = writeTree(tmpDir('file-links'), TREE);
     const link = path.join(root, 'd', 'h.bin');
@@ -515,13 +618,17 @@ describe('strict: a symbolic link to a file out of a place disk', () => {
     const k = await kernel(
       root,
       PLACES,
-      { strict: true },
+      { strict: true, links },
       { preparers: PREPARERS },
     );
     const native = countNative();
     fsPatch.install(k);
     try {
-      await refusesEach(FILE_READS, [link]);
+      const reads =
+        links === 'verify'
+          ? FILE_READS
+          : FILE_READS.filter(([call]) => !OWN_READS.test(call));
+      await refusesEach(reads, [link]);
       await refusesEach(FILE_MUTATIONS.slice(0, 3), [link]);
       assert.deepEqual(native.calls, []);
       assert.equal(readDisk(path.join(root, 'ro', 'h.bin'), 'utf8'), 'hidden');
@@ -547,7 +654,7 @@ describe('strict: a symbolic link to a file out of a place disk', () => {
       return void t.skip(`no symbolic link to a file here (${err.code})`);
     }
     const options = { preparers: PREPARERS };
-    const k = await kernel(root, PLACES, { strict: true }, options);
+    const k = await kernel(root, PLACES, { strict: true, links }, options);
     const native = countNative();
     fsPatch.install(k);
     try {
@@ -566,7 +673,14 @@ describe('strict: a symbolic link to a file out of a place disk', () => {
       rm(root);
     }
   });
-});
+};
+
+for (const links of MODES) {
+  describe(
+    `strict, links: ${links}: a symbolic link to a file out of a place disk`,
+    fileLinks(links),
+  );
+}
 
 describe('without strict: links answer as before', () => {
   it('node:fs follows them natively', async () => {
@@ -603,121 +717,128 @@ describe('without strict: links answer as before', () => {
 // On POSIX the kernel resolves `..` from the real directory before it, past
 // a symbolic link, so a path with `..` after a link into a place reaches
 // what the link's target holds. The disk proof (aliases) is asked the path
-// the OS opens — not path.resolve's folded form — and the router owns to
-// nobody a path that leaves appRoot through `..` after a name inside it.
+// the OS opens — not path.resolve's folded form — and the index of 'deny'
+// checks the link's name before the `..` after it applies; the router owns
+// to nobody a path that leaves appRoot through `..` after a name inside it.
 // Windows node:fs folds `..` before the OS, so it never reaches past the
 // link there; these are real symbolic links, so the describe is skipped.
-describe(
-  'POSIX strict: `..` past a symbolic link into a place',
-  { skip: WIN ? 'POSIX: node:fs folds `..` before the OS on Windows' : false },
-  () => {
-    let root;
-    let outside;
-    let k;
-    let native;
-    const at = (...p) => path.join(root, ...p);
-    // Built with literal `..`, which path.join would fold away.
-    const hidden = () => `${at('d', 'jro')}/../ro/h.bin`; // folds inside `d`
-    const hiddenDir = () => `${at('d', 'jro')}/../ro`;
-    const climb = () => `${at('d', 'jdeep')}/../../../h.bin`; // folds outside
-    const climbDir = () => `${at('d', 'jdeep')}/../../..`;
+const dotdot = (links) => () => {
+  let root;
+  let outside;
+  let k;
+  let native;
+  const at = (...p) => path.join(root, ...p);
+  // Built with literal `..`, which path.join would fold away.
+  const hidden = () => `${at('d', 'jro')}/../ro/h.bin`; // folds inside `d`
+  const hiddenDir = () => `${at('d', 'jro')}/../ro`;
+  const climb = () => `${at('d', 'jdeep')}/../../../h.bin`; // folds outside
+  const climbDir = () => `${at('d', 'jdeep')}/../../..`;
 
-    before(async () => {
-      const base = tmpDir('dotdot');
-      root = writeTree(path.join(base, 'app'), {
-        'ro/h.bin': 'hidden',
-        'ro/a/b/c/x.bin': 'x',
-        'd/f.bin': 'f',
-      });
-      outside = writeTree(path.join(base, 'outside'), { 'o.bin': 'o' });
-      linkDir(at('ro'), at('d', 'jro')); // into another place
-      linkDir(at('ro', 'a', 'b', 'c'), at('d', 'jdeep')); // deep into it
-      k = await kernel(
-        root,
-        { ro: PLACES.ro, d: PLACES.d },
-        { strict: true },
-        { preparers: PREPARERS },
-      );
-      native = countNative();
-      fsPatch.install(k);
+  before(async () => {
+    const base = tmpDir('dotdot');
+    root = writeTree(path.join(base, 'app'), {
+      'ro/h.bin': 'hidden',
+      'ro/a/b/c/x.bin': 'x',
+      'd/f.bin': 'f',
     });
+    outside = writeTree(path.join(base, 'outside'), { 'o.bin': 'o' });
+    linkDir(at('ro'), at('d', 'jro')); // into another place
+    linkDir(at('ro', 'a', 'b', 'c'), at('d', 'jdeep')); // deep into it
+    k = await kernel(
+      root,
+      { ro: PLACES.ro, d: PLACES.d },
+      { strict: true, links },
+      { preparers: PREPARERS },
+    );
+    native = countNative();
+    fsPatch.install(k);
+  });
 
-    after(() => {
-      fsPatch.uninstall();
-      native.restore();
-      k.close();
-      rm(path.dirname(root));
-    });
+  after(() => {
+    fsPatch.uninstall();
+    native.restore();
+    k.close();
+    rm(path.dirname(root));
+  });
 
-    it('reads and lists the hidden through it: EACCES, nothing reaches node:fs', async () => {
-      native.calls.length = 0;
-      // Folds to /app/d/ro inside place `d`; the OS opens /app/ro (hidden).
-      await refusesEach(FILE_READS, [hidden()]);
-      await refusesEach(DIR_READS, [hiddenDir()]);
-      // Folds outside appRoot; the OS climbs back into ro through the link.
-      await refusesEach(FILE_READS, [climb()]);
-      await refusesEach(DIR_READS, [climbDir()]);
-      assert.deepEqual(native.calls, []);
-      assert.equal(readDisk(at('ro', 'h.bin'), 'utf8'), 'hidden');
-    });
+  it('reads and lists the hidden through it: EACCES, nothing reaches node:fs', async () => {
+    native.calls.length = 0;
+    // Folds to /app/d/ro inside place `d`; the OS opens /app/ro (hidden).
+    await refusesEach(FILE_READS, [hidden()]);
+    await refusesEach(DIR_READS, [hiddenDir()]);
+    // Folds outside appRoot; the OS climbs back into ro through the link.
+    await refusesEach(FILE_READS, [climb()]);
+    await refusesEach(DIR_READS, [climbDir()]);
+    assert.deepEqual(native.calls, []);
+    assert.equal(readDisk(at('ro', 'h.bin'), 'utf8'), 'hidden');
+  });
 
-    it('writes to a read-only place through it: EACCES, nothing written', async () => {
-      native.calls.length = 0;
-      await refusesEach(FILE_MUTATIONS, [`${at('d', 'jro')}/../ro/new.bin`]);
-      assert.deepEqual(native.calls, []);
-      assert.deepEqual(listDisk(at('ro')).sort(), ['a', 'h.bin']);
-    });
+  it('writes to a read-only place through it: EACCES, nothing written', async () => {
+    native.calls.length = 0;
+    await refusesEach(FILE_MUTATIONS, [`${at('d', 'jro')}/../ro/new.bin`]);
+    assert.deepEqual(native.calls, []);
+    assert.deepEqual(listDisk(at('ro')).sort(), ['a', 'h.bin']);
+  });
 
-    it('mkdtemp through it: EACCES, nothing made', async () => {
-      native.calls.length = 0;
-      const prefix = `${at('d', 'jro')}/../ro/tmp-`;
+  it('mkdtemp through it: EACCES, nothing made', async () => {
+    native.calls.length = 0;
+    const prefix = `${at('d', 'jro')}/../ro/tmp-`;
+    await assert.rejects(
+      async () => fs.mkdtempSync(prefix),
+      refused('EACCES', 'mkdtemp', `${prefix}XXXXXX`),
+    );
+    assert.deepEqual(native.calls, []);
+    assert.deepEqual(listDisk(at('ro')).sort(), ['a', 'h.bin']);
+  });
+
+  it('a symlink whose target climbs into a place through it: EACCES, nothing made', async () => {
+    native.calls.length = 0;
+    // A target resolved from the link's directory: an absolute one that
+    // folds outside appRoot (the OS climbs back in), and a relative one
+    // (outside/.. then into the place, past the fold).
+    const app = path.basename(root);
+    const cases = [
+      [climb(), path.join(outside, 's1')],
+      [`../${app}/d/jro/../ro/h.bin`, path.join(outside, 's2')],
+    ];
+    for (const [target, link] of cases) {
       await assert.rejects(
-        async () => fs.mkdtempSync(prefix),
-        refused('EACCES', 'mkdtemp', `${prefix}XXXXXX`),
+        async () => fs.symlinkSync(target, link),
+        refused('EACCES', 'symlink', target, link),
+        `${target} -> ${link}`,
       );
-      assert.deepEqual(native.calls, []);
-      assert.deepEqual(listDisk(at('ro')).sort(), ['a', 'h.bin']);
-    });
+      assert.equal(onDisk(link), false, link);
+    }
+    assert.deepEqual(native.calls, []);
+  });
 
-    it('a symlink whose target climbs into a place through it: EACCES, nothing made', async () => {
-      native.calls.length = 0;
-      // A target resolved from the link's directory: an absolute one that
-      // folds outside appRoot (the OS climbs back in), and a relative one
-      // (outside/.. then into the place, past the fold).
-      const app = path.basename(root);
-      const cases = [
-        [climb(), path.join(outside, 's1')],
-        [`../${app}/d/jro/../ro/h.bin`, path.join(outside, 's2')],
-      ];
-      for (const [target, link] of cases) {
-        await assert.rejects(
-          async () => fs.symlinkSync(target, link),
-          refused('EACCES', 'symlink', target, link),
-          `${target} -> ${link}`,
-        );
-        assert.equal(onDisk(link), false, link);
-      }
-      assert.deepEqual(native.calls, []);
-    });
+  it('a hard link whose source climbs into a place through it: EACCES, nothing made', async () => {
+    native.calls.length = 0;
+    // The OS names the inode of the source physically: `..` past the link
+    // reaches the hidden file, folded inside `d` or climbed outside.
+    const froms = [hidden(), climb()];
+    for (const from of froms) {
+      const to = path.join(outside, 'hard');
+      await assert.rejects(
+        async () => fs.linkSync(from, to),
+        refused('EACCES', 'link', from, to),
+        from,
+      );
+      assert.equal(onDisk(to), false, to);
+    }
+    assert.deepEqual(native.calls, []);
+  });
+};
 
-    it('a hard link whose source climbs into a place through it: EACCES, nothing made', async () => {
-      native.calls.length = 0;
-      // The OS names the inode of the source physically: `..` past the link
-      // reaches the hidden file, folded inside `d` or climbed outside.
-      const froms = [hidden(), climb()];
-      for (const from of froms) {
-        const to = path.join(outside, 'hard');
-        await assert.rejects(
-          async () => fs.linkSync(from, to),
-          refused('EACCES', 'link', from, to),
-          from,
-        );
-        assert.equal(onDisk(to), false, to);
-      }
-      assert.deepEqual(native.calls, []);
-    });
-  },
-);
+for (const links of MODES) {
+  describe(
+    `POSIX strict, links: ${links}: \`..\` past a symbolic link into a place`,
+    {
+      skip: WIN ? 'POSIX: node:fs folds `..` before the OS on Windows' : false,
+    },
+    dotdot(links),
+  );
+}
 
 // Under strict a rename that leaves a place moves a regular file only: a
 // directory holding a link out of the place, or a link itself, would turn
@@ -746,10 +867,13 @@ describe('strict: what a rename takes out of a place', () => {
     return { base, root, outside, at };
   };
 
-  it('a directory or a link: ENOTSUP, nothing moves; a file moves', async () => {
+  // Within the place, or into it from outside, a directory moves, and a
+  // link in it goes on refusing what lies through it.
+  const movesOut = (links) => async () => {
     const { base, root, outside, at } = moving();
     const options = { preparers: PREPARERS };
-    const k = await kernel(root, MOVE_PLACES, { strict: true }, options);
+    const defaults = { strict: true, links };
+    const k = await kernel(root, MOVE_PLACES, defaults, options);
     const native = countNative();
     fsPatch.install(k);
     try {
@@ -775,16 +899,33 @@ describe('strict: what a rename takes out of a place', () => {
       assert.equal(readDisk(path.join(outside, 'f.bin'), 'utf8'), 'f');
       fs.renameSync(at('d', 'sub'), at('d', 'moved'));
       assert.ok(onDisk(at('d', 'moved', 'deeper', 'g.bin')));
+      const hidden = at('d', 'moved', 'deeper', 'jro', 'h.bin');
+      assert.throws(
+        () => fs.readFileSync(hidden),
+        refused('EACCES', 'open', hidden),
+      );
       const into = writeTree(path.join(outside, 'into'), { 'i.bin': 'i' });
+      linkDir(at('ro'), path.join(into, 'jx'));
       fs.renameSync(into, at('d', 'into'));
       assert.equal(readDisk(at('d', 'into', 'i.bin'), 'utf8'), 'i');
+      const brought = at('d', 'into', 'jx', 'h.bin');
+      assert.throws(
+        () => fs.readFileSync(brought),
+        refused('EACCES', 'open', brought),
+      );
     } finally {
       fsPatch.uninstall();
       native.restore();
       k.close();
       rm(base);
     }
-  });
+  };
+  for (const links of MODES) {
+    it(
+      `links: ${links}: a directory or a link: ENOTSUP, nothing moves; a file moves`,
+      movesOut(links),
+    );
+  }
 
   it('without strict: as before', async () => {
     const { base, root, outside, at } = moving();
@@ -854,7 +995,7 @@ describe('strict: a place whose directory is a link', () => {
     }
   });
 
-  it('out of appRoot: the place serves it, and nothing through it', async () => {
+  const servesOut = (links) => async () => {
     const { base, root, outside, at } = homed('links-home-out');
     linkDir(outside, at('dj'));
     linkDir(at('ro'), path.join(outside, 'jro'));
@@ -862,7 +1003,7 @@ describe('strict: a place whose directory is a link', () => {
     const k = await kernel(
       root,
       places,
-      { strict: true },
+      { strict: true, links },
       { preparers: PREPARERS },
     );
     fsPatch.install(k);
@@ -882,7 +1023,13 @@ describe('strict: a place whose directory is a link', () => {
       unlinkDir(at('dj'));
       rm(base);
     }
-  });
+  };
+  for (const links of MODES) {
+    it(
+      `links: ${links}: out of appRoot: the place serves it, and nothing through it`,
+      servesOut(links),
+    );
+  }
 
   it('without strict: as before', async () => {
     const { base, root, at } = homed('links-home-open');
