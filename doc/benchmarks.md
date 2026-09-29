@@ -521,6 +521,34 @@ A strict removal on a place's disk pays one `lstat` more (~15 µs on
 Windows, ~1.7 µs on Linux), a rename two; reads, stats and listings did
 not move.
 
+### No tree through a link out of a place
+
+Since `9118016` a recursive removal of a directory on a place's disk, and
+a directory's rename, ask where the directory really lies — one
+`realpath` of it, and for a rename of its destination too (a missing one:
+a failed `realpath`, then its parent's) — in both modes; a file, and a
+missing path, ask nothing more. A/B against `4122e05`, four pairs,
+`--only patch --bench 99443e8`: `mkdirRmTree` makes a directory and
+removes it with `recursive`, `renameDirBack` renames a directory and back
+(two renames). ns/op, medians; the Linux (WSL) mutation rows spread
+widely between the runs of one side, so they show the order of the cost:
+
+| metric                                | Windows before |   after | Linux before |   after |
+| ------------------------------------- | -------------: | ------: | -----------: | ------: |
+| `patch.strict.w.writeUnlink`          |        153 624 | 154 940 |       18 621 |  17 402 |
+| `patch.strict.w.renameBack`           |        434 917 | 431 147 |       19 022 |  20 200 |
+| `patch.strict.w.mkdirRmTree`          |        130 862 | 174 874 |       92 925 |  99 068 |
+| `patch.strict.w.renameDirBack`        |        408 713 | 664 798 |       23 276 |  47 156 |
+| `patch.strict.verify.w.mkdirRmTree`   |        248 685 | 285 875 |      104 413 | 116 543 |
+| `patch.strict.verify.w.renameDirBack` |        639 593 | 883 513 |       39 842 |  65 257 |
+
+A directory's recursive removal pays ~44 µs on Windows (a `realpath`
+~34 µs, beside the `lstat` it paid), a directory's rename ~100–130 µs
+(`kernel.movesLink` of a directory to a missing name: 113 µs, 20 µs on
+Linux); `'deny'` pays it too, by decision. Files, reads, stats and
+listings did not move; the `rm`, `rmdir` and `unlink` of the patch route
+their path once more (`keepsRoot`, ~0.2 µs).
+
 ## Atomic `writeFiles`: a batch against a series
 
 `bench/scenarios/batch.js`: one `writeFiles` of n keys against
