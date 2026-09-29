@@ -296,8 +296,9 @@ export class VfsKernel extends EventEmitter<VfsKernelEvents> {
   routeMutation(filePath: string, own?: boolean): MutationRoute;
   /**
    * `loading`: the load hook asks about the file Node's loader is to read;
-   * under strict a module of a `disk` or `node-default` place that really
-   * lies elsewhere is `{ denied: true }` then.
+   * under strict a module of a `disk` or `node-default` place behind a
+   * known link (`links: 'deny'`) or that really lies elsewhere
+   * (`'verify'`) is `{ denied: true }` then.
    */
   resolveModule(
     filePath: string,

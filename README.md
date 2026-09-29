@@ -1371,9 +1371,10 @@ read or written:
 - unrelated paths outside `appRoot`, `disk` and `node-default` places,
   files of the disk territory (`fs.fallback: 'disk'`), and — without
   strict — unmanaged paths under `appRoot`; under strict a place's disk
-  only where the disk says the path really lies (see
-  [Strict routing](#strict-routing)), and its recursive `readdir` from a
-  walk that enters no link;
+  only past its `links` — no link the kernel knows on the path, or the
+  disk says where it really lies (see
+  [Links on a place's disk](#links-on-a-places-disk-links)) — and its
+  recursive `readdir` from a walk that enters no link;
 - `symlink`, once its path passes the mutation routing and its target —
   resolved from the link's directory, as the OS resolves it — the read
   routing, and under strict lies off `appRoot`'s line (above);
