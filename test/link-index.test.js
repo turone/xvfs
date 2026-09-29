@@ -7,22 +7,8 @@ const { LinkIndex } = require('../lib/links.js');
 
 // LinkIndex on its own, with POSIX and Windows paths on any host: which
 // paths pass through a known link, as the patch asks it for 'deny'. The
-// kernel's use of it: links.test.js, links-deny.test.js.
-
-// An lstat over a table of paths: 'link', 'dir', 'file', 'fail', or
-// missing (undefined, as with throwIfNoEntry: false).
-const lstatOf = (table) => (p) => {
-  const kind = table[p];
-  if (kind === 'fail') {
-    throw Object.assign(new Error('EPERM'), { code: 'EPERM' });
-  }
-  return kind === undefined
-    ? undefined
-    : {
-        isSymbolicLink: () => kind === 'link',
-        isDirectory: () => kind === 'dir',
-      };
-};
+// index only grows, and asks no disk. The kernel's use of it: links.test.js,
+// links-deny.test.js.
 
 describe('LinkIndex, POSIX paths', () => {
   const index = () => {
@@ -70,47 +56,18 @@ describe('LinkIndex, POSIX paths', () => {
     },
   );
 
-  it('moved: the links at or below a renamed path are known where it lands', () => {
+  it('add: a new link raises the generation, a known one changes nothing', () => {
     const x = new LinkIndex(path.posix);
-    x.add('/app/d/sub/j1');
-    x.add('/app/d/sub/deep/j2');
-    x.add('/app/d/subx/j3');
-    const added = x.moved('/app/d/sub', '/app/d/moved');
-    assert.deepEqual(added.sort(), ['/app/d/moved/deep/j2', '/app/d/moved/j1']);
-    assert.equal(x.crosses('/app/d/moved/j1/f'), true);
-    assert.equal(x.crosses('/app/d/moved/deep/j2/f'), true);
-    assert.equal(x.crosses('/app/d/movedx/j3/f'), false);
-    assert.deepEqual(x.moved('/app/d/sub/j1', '/app/d/j9'), ['/app/d/j9']);
-    assert.equal(x.crosses('/app/d/j9/f'), true);
-  });
-
-  it('moved: links found on disk under the source move too', () => {
-    const x = new LinkIndex(path.posix);
-    const added = x.moved('/tmp/into', '/app/d/into', ['/tmp/into/jx']);
-    assert.deepEqual(added, ['/app/d/into/jx']);
-    assert.equal(x.crosses('/app/d/into/jx/f'), true);
-    assert.equal(x.crosses('/tmp/into/jx/f'), false);
-    // Onto a place's own directory: what lies below, never itself.
-    const found = ['/tmp/build', '/tmp/build/j'];
-    const onto = x.moved('/tmp/build', '/app/site', found, false);
-    assert.deepEqual(onto, ['/app/site/j']);
-    assert.equal(x.crosses('/app/site/f'), false);
-    assert.equal(x.crosses('/app/site/j/f'), true);
-  });
-
-  it('delete forgets; the early exit follows', () => {
-    const x = new LinkIndex(path.posix);
-    x.add('/app/d/a/j1');
-    x.add('/app/d/a/b/j2');
-    x.add('/app/d/c/j3');
-    assert.equal(x.size, 3);
-    x.delete('/app/d/c/j3');
-    assert.equal(x.crosses('/app/d/c/j3/f'), false);
-    x.delete('/app/d/a/j1');
-    x.delete('/app/d/a/b/j2');
-    assert.equal(x.size, 0);
-    assert.equal(x.crosses('/app/d/a/b/j2/f'), false);
-    assert.deepEqual(x.list(), []);
+    assert.equal(x.generation, 0);
+    assert.equal(x.add('/app/d/a/j1'), '/app/d/a/j1');
+    assert.equal(x.add('/app/d/a/b/j2'), '/app/d/a/b/j2');
+    assert.equal(x.add('/app/d/a/j1'), null);
+    assert.equal(x.size, 2);
+    assert.equal(x.generation, 2);
+    assert.deepEqual(x.list().sort(), ['/app/d/a/b/j2', '/app/d/a/j1']);
+    assert.equal(x.holds('/app/d/a'), true);
+    assert.equal(x.holds('/app/d/a/j1'), true);
+    assert.equal(x.holds('/app/d/c'), false);
   });
 
   it('with a floor: the same answers, the names down to it compared at once', () => {
@@ -129,37 +86,6 @@ describe('LinkIndex, POSIX paths', () => {
     assert.equal(x.crosses('/app/d/jro/x'), true);
   });
 
-  // A known link is asked of the disk only on a path that would be
-  // refused. Nothing there — a link the patch is still making, or one gone
-  // — lets the path through and keeps it; a directory or a file there
-  // drops it; an lstat that fails refuses.
-  it('a known link is checked by its lstat: kept while nothing is there, dropped for a directory', () => {
-    const table = {};
-    const asked = [];
-    const lstat = (p, o) => {
-      asked.push(p);
-      return lstatOf(table)(p, o);
-    };
-    for (const floor of [null, '/app']) {
-      const x = new LinkIndex(path.posix, { lstat, floor });
-      asked.length = 0;
-      x.add('/app/d/j');
-      assert.equal(x.crosses('/app/d/other/f'), false);
-      assert.deepEqual(asked, []);
-      assert.equal(x.crosses('/app/d/j/f'), false, 'nothing there yet');
-      assert.deepEqual(asked, ['/app/d/j']);
-      assert.equal(x.size, 1, 'kept');
-      table['/app/d/j'] = 'link';
-      assert.equal(x.crosses('/app/d/j/f'), true, 'made meanwhile');
-      table['/app/d/j'] = 'fail';
-      assert.equal(x.crosses('/app/d/j/f'), true, 'an lstat that fails');
-      table['/app/d/j'] = 'dir';
-      assert.equal(x.crosses('/app/d/j/f'), false);
-      assert.equal(x.size, 0, 'a directory took its name');
-      delete table['/app/d/j'];
-    }
-  });
-
   it('caseless: on POSIX paths too (macOS)', () => {
     const x = new LinkIndex(path.posix, { caseless: true, floor: '/App' });
     x.add('/App/d/JRO');
@@ -168,23 +94,6 @@ describe('LinkIndex, POSIX paths', () => {
     const exact = new LinkIndex(path.posix);
     exact.add('/App/d/JRO');
     assert.equal(exact.crosses('/app/D/jro/x'), false);
-  });
-
-  it('below: each name under the directory is asked of the disk', () => {
-    const table = {
-      '/app/d/a': 'dir',
-      '/app/d/a/j': 'link',
-      '/app/d/b': 'dir',
-      '/app/d/e': 'fail',
-      '/app': 'link', // above the directory: never asked
-    };
-    const x = new LinkIndex(path.posix, { lstat: lstatOf(table) });
-    assert.equal(x.crosses('/app/d/a/j/f', false, '/app/d'), true);
-    assert.equal(x.crosses('/app/d/a/j', true, '/app/d'), false);
-    assert.equal(x.crosses('/app/d/b/f', false, '/app/d'), false);
-    assert.equal(x.crosses('/app/d/missing/f', false, '/app/d'), false);
-    assert.equal(x.crosses('/app/d/e/f', false, '/app/d'), true);
-    assert.equal(x.crosses('/app/d/b/../a/j/f', false, '/app/d'), true);
   });
 });
 

@@ -155,20 +155,18 @@ replaced bytes are freed. `writeFiles` is one such request: `version` is
 that of the single commit that published every file of the set, or the
 response carries `error` and nothing is published.
 
-Both ways, under strict with a place of `links: 'deny'` — the links a
-thread learned, for the others' indexes; main passes a worker's on to the
-other workers:
+Main → worker, under strict with a place of `links: 'deny'` — a link the
+main kernel's watcher found, for the worker's index:
 
 ```js
-{ name: 'vfs-links', add: ['/app/uploads/j'], made: 1 } // made through the patch
-{ name: 'vfs-links', add: ['/app/media/j'], made: 0 }   // found by the watcher
+{ name: 'vfs-links', add: ['/app/media/j'], generation: 4 }
 ```
 
-A worker's snapshot carries the index as main knows it, and a counter in
-shared memory of the links threads made through the patch: a thread whose
-index holds fewer asks the disk for the names of a path until their
-messages come ([README → Links on a place's disk](../README.md#links-on-a-places-disk-links)).
-Nothing is sent when a link goes: each thread drops one it finds gone.
+A worker's snapshot carries the index as main knows it and its
+`generation` (how many links it has come to know); a worker applies a
+`vfs-links` newer than what it holds, and nothing flows back — the patch
+makes, removes and moves no link on a place's disk under strict, and the
+index only grows ([README → Links on a place's disk](../README.md#links-on-a-places-disk-links)).
 
 There is no `file-update` / `file-delete`. One `vfs-update` per epoch.
 Source + companions of one file are published together; a companion that

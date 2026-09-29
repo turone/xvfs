@@ -439,10 +439,11 @@ libraries an agent or a plugin may call as a read-only `sab` place with
 there with `require()`; a tenant's state in a place of its own; and
 `strict: true`, so the rest of `appRoot` is `EACCES` and the tools cannot
 be written through `node:fs`. Where an agent's output goes to disk — a
-writable `disk` place — `links` refuses a path through a link there that
-the kernel knows (`'deny'`: made through the patch, found at start or
-reported by the watcher) or, with `'verify'`, one into managed territory
-whoever made it — for a directory other processes write into.
+writable `disk` place — the agent's code makes, removes and moves no link
+there, and `links` refuses a path through one that the kernel knows
+(`'deny'`: found at start or reported by the watcher) or, with
+`'verify'`, one into managed territory whoever made it — for a directory
+other processes write into.
 
 ```js
 defaults: { strict: true },

@@ -860,12 +860,12 @@ by the place's `links` before it hands the route on (`VfsKernel#proven`).
 `defaults.links`, and is `'deny'` by default: the kernel keeps an index of
 the links strictly below each such place's directory (`LinkIndex`,
 links.js) — met by the scan at `initialize()`, or found by a walk that
-enters no link (`scanner.linksOf`) where no scan runs, kept by the watcher
-(`noteLinks`) and by the patch (`linkMade`, `linkMoved`) — and a route
-whose path passes through a known link, wherever it leads, is `EACCES`
-(`#crosses`). The place's own directory is never indexed: it may be a link
-out of `appRoot`, its own disk (below). `'verify'` proves each route
-(below).** _Why:_ the proof costs a `realpath` per native call — tens of
+enters no link (`scanner.linksOf`) where no scan runs, and added by the
+watcher (`noteLinks`) — and a route whose path passes through a known
+link, wherever it leads, is `EACCES` (`#crosses`). The place's own
+directory is never indexed: it may be a link out of `appRoot`, its own
+disk (below). `'verify'` proves each route (below).** _Why:_ the proof
+costs a `realpath` per native call — tens of
 microseconds on Windows, more than many of the calls it guards
 (doc/benchmarks.md) — against what only a link can do; the index answers
 an ordinary path with a few lookups in memory and no disk call. What the
@@ -883,39 +883,49 @@ under strict, and without strict nothing is asked.
 included; on POSIX as given — name by name, each name before a `..` after
 it applies (`LinkIndex.crosses`), without case on Windows and macOS; a
 call that does not follow its last name — `lstat`, `readlink`, the `l*`
-forms, `unlink`, `rmdir`, `rm`, `rename`, the path a `symlink` makes —
-leaves that name out (`own`), but not with a trailing separator, `.` or
-`..` after it. A path through a known link asks the disk once (`lstat`,
-`#still`): a link there refuses it, a directory or a file there drops the
-link, and nothing there lets the path through and keeps the link; a
-directory with no known link below ends the check.** _Why:_ POSIX resolves
-`link/..` through the link, and the platforms resolve a last name's `.`,
-`..` and trailing separator differently, so they follow it. A key built
-from the path as given missed the OS's own reading of it (`C:d\jro\…`,
-`\Users\…\jro\…`). The patch adds a link before its native call, not
-after — so a check that finds nothing there may be looking at a link the
-call is still making, and forgetting it then lost it for good. A link
-removed and not replaced therefore stays known: memory, and one `lstat`
-for a path through its name.
+forms, and the routing of `unlink`, `rmdir`, `rm`, `rename` and the path a
+`symlink` makes — leaves that name out (`own`), but not with a trailing
+separator, `.` or `..` after it. The index asks no disk and only grows: a
+known link stays refused until the kernel restarts, even once removed or
+replaced by another process; a directory with no known link below ends
+the check.** _Why:_ POSIX resolves `link/..` through the link, and the
+platforms resolve a last name's `.`, `..` and trailing separator
+differently, so they follow it. A key built from the path as given missed
+the OS's own reading of it (`C:d\jro\…`, `\Users\…\jro\…`). Nothing in the
+process changes a link on a place's disk (next), so there is nothing to
+forget but what another process removed — which only refuses more.
 
-**Every thread keeps its own index: a worker's comes in its snapshot, and
-a link one thread makes or moves through the patch reaches the others as
-`vfs-links`, through the main kernel. Before the native call the thread
-that makes one raises a counter in shared memory (`#linksMade`); a thread
-whose own count of what its index holds (`#linksSeen`) differs asks the
-disk (`lstat`) for each name of a path below the place's directory until
-the message comes, and a rename there — or from outside a `'deny'` place
-into one — reads the links below its source from disk
-(`linksBelowSync`).** _Why:_ a worker's kernel never runs `initialize()`,
-so it knew no link; and a message alone left a window in which a link one
-thread had made — its call returned — passed in another. A link made
-through the patch is known in every thread of the process from the moment
-the call starts; a call not ordered after it may still find nothing there,
-as a proof per call may. The counter costs one `Atomics.load` per asked
-route; the disk is asked only inside the window. A closed kernel counts
-nothing, and a worker kernel without a port keeps a count of its own —
-it hears of no link, and would otherwise ask the disk for good. Nothing
-dropped is sent: each thread drops what it finds replaced.
+**Under strict the patch makes, removes and moves no link on a place's
+disk, in either mode: `symlink` and a hard `link` there, a `cp` of a link
+into it without `dereference`, an `unlink`, `rmdir`, `rm` or `rename` of a
+link there or a `rename` onto one (its `lstat`: `kernel.touchesLink`,
+`movesLink`), a `rename` into a place of a tree from outside `appRoot` that
+holds a link (a walk of it), and — with `'deny'` — a `rename` or a
+recursive `rm` of a directory under which the index knows a link, are
+`ENOTSUP` before any native call (`kernel.makesLink`, fs-patch).** _Why:_
+no confirmed consumer makes links in managed territory through the patch —
+installs, release switches and log links run in their own process or
+outside `appRoot` — while keeping an index true under the process's own
+changes took a counter in shared memory, messages both ways between the
+threads, a walk of the disk while one was in flight, and still left a link
+made or dropped mid-call to chance. A link the process cannot make, the
+index need not follow. The `lstat` of a removal or a rename is one disk
+call on a mutation, never on a read; it also catches a link the watcher
+has not reported yet. With `'verify'` the index knows nothing, and a
+directory holding a link moves or goes: every call through the link is
+proven anyway.
+
+**Every thread keeps its own index: a worker's comes in its snapshot, with
+the main index's generation — how many links it has come to know — and
+each link the main kernel's watcher finds after reaches the linked workers
+as `vfs-links { add, generation }`, one way (`#learnLinks`); a worker
+applies one newer than what it holds (`#heardLinks`).** _Why:_ a worker's
+kernel never runs `initialize()`, so it knew no link; the watcher runs on
+the main thread only, and a link it reports would stay open in the workers
+already running. Nothing flows back, nothing is dropped, and a message no
+newer than a worker's snapshot — a duplicate, a late one — changes
+nothing. A worker kernel made from a snapshot without a port knows what
+the snapshot held.
 
 **With `links: 'verify'` the kernel's route API asks the disk where the
 path really lies before it hands the route on (`VfsKernel#proven`,
@@ -1594,12 +1604,11 @@ workers call `attach()`.** _Why:_ preloads do not run in worker threads.
 | The proof in FsRouter, or `realpath` for every native call under strict                                         | the router stays lexical; all other I/O would pay for it          |
 | A `realpath` proof on every place's disk, always (the only mode)                                                | tens of µs a call on Windows against what only a link can do      |
 | `links: 'allow'`                                                                                                | no scenario needs a link followed unchecked under strict          |
-| Forgetting a link when the patch unlinks or renames it                                                          | a call that fails leaves a live link unknown                      |
-| Forgetting a known link a check finds missing, or a watcher event names gone                                    | one the patch was still making was lost for good                  |
+| Links made, removed and moved through the patch on a place's disk, followed by the index                        | shared counters, two-way messages, a window per call; no consumer |
+| Forgetting a known link (a check that finds it gone, a watcher event)                                           | only another process removes one: forgetting only lets more pass  |
 | The index asked about a Windows path as given                                                                   | `C:d\…`, `\Users\…`: node:fs resolves them, the keys did not      |
 | An index kept by the main kernel alone                                                                          | a worker's kernel never initializes: it would know no link        |
-| `vfs-links` messages alone between threads                                                                      | a link made in one thread passed in another until its message     |
-| Walking every renamed directory for its links                                                                   | a rename's cost would grow with its tree; the index knows them    |
+| Walking every renamed or removed directory for links                                                            | a rename's cost would grow with its tree; the index knows them    |
 | `node:fs`'s recursive `readdir` or `cp` over a place's disk under strict                                        | they enter junctions, `readdir` even with `withFileTypes`         |
 | A new link within one place under strict                                                                        | the place decides which of its names alias, not code under strict |
 | Routing a symbolic link's target from the cwd                                                                   | the OS resolves it from the link's directory                      |
@@ -1746,23 +1755,21 @@ workers call `attach()`.** _Why:_ preloads do not run in worker threads.
   real spelling, or on a drive that names a share or `appRoot`'s line,
   reaches neither `node:fs` nor Node's loader.
 - Under strict no native call on a place's disk — through the patch, the
-  facade or the load hook — runs through a link the kernel knows and finds
-  there (`links: 'deny'`; known in every thread from the moment the
-  patched call that makes it starts), or before the disk has said its path
-  really lies in the place's directory or off `appRoot`'s line
-  (`'verify'`); a recursive listing there enters no link, and no native
-  recursive copy walks it.
-- The index of links forgets nothing ahead of the disk: a link leaves it
-  only once a check finds a directory or a file in its place. A place's
-  own directory is never in it.
+  facade or the load hook — runs through a link the kernel knows
+  (`links: 'deny'`, in every thread once it knows it), or before the disk
+  has said its path really lies in the place's directory or off
+  `appRoot`'s line (`'verify'`); a recursive listing there enters no link,
+  and no native recursive copy walks it.
+- The index of links only grows until the kernel restarts; a place's own
+  directory is never in it.
 - Under strict the patch makes no link, symbolic or hard, to managed
-  territory.
+  territory, and makes, removes and moves none on a place's disk.
 
 ## Protocol
 
 ```
 snapshot    { segments: [{ id, sab }], places: { <name>: { entries: [[key, entry]] } },
-              version, instance, links?: { known: [path], made: Int32Array, seen } }
+              version, instance, links?: { known: [path], generation } }
 vfs-update  { name, updateId, version, places: { <name>: { entries, removals,
               retired: [[key, retireId]] } }, newSegments: [{ id, sab }] }   main → worker
 vfs-ack     { name: 'vfs-ack', updateId, retained?: [retireId] }              worker → main
@@ -1771,7 +1778,7 @@ vfs-mutate  { name, id, place, op, key, to?, options?, data? }                wo
             writeFiles: { name, id, place, op, keys, sizes, options, data }
 vfs-mutated { name, id, error?: { code, message, syscall, path, dest },
               version? }                                                      main → worker
-vfs-links   { name: 'vfs-links', add: [path], made: 0 | 1 }                   both ways
+vfs-links   { name: 'vfs-links', add: [path], generation }                    main → worker
 entry       shared { kind, segmentId, offset, length, stat, version, scriptOptions?, meta? }
             | disk { kind, path, stat, version, scriptOptions?, meta? }
 stat        { size, mtimeMs } (+ sourceSize, encoding for compressed companions)

@@ -14,12 +14,26 @@ const { tmpDir, writeTree, cleanup, kernel, memory } = require('../lib.js');
 // against the links the kernel knows; `strict.verify.*` proves where its
 // path really lies first (one realpath) — strict as it was where the
 // library does not know `links` (a base of bench/ab.js before it).
+// `*.w.*` are mutations of a writable `disk` place — a file written and
+// removed, a file renamed and back — where under strict a removal or a
+// rename also asks whether its path is a link (one lstat each).
 
 const OPS = {
   readFileSync: (p) => fs.readFileSync(p.file),
   statSync: (p) => fs.statSync(p.file),
   existsSync: (p) => fs.existsSync(p.file),
   readdirSync: (p) => fs.readdirSync(p.dir),
+};
+
+const MUTATIONS = {
+  writeUnlink: (p) => {
+    fs.writeFileSync(p.fresh, 'x');
+    fs.unlinkSync(p.fresh);
+  },
+  renameBack: (p) => {
+    fs.renameSync(p.file, p.moved);
+    fs.renameSync(p.moved, p.file);
+  },
 };
 
 const dirOf = (prefix, ext) => {
@@ -32,14 +46,17 @@ const PLACES = {
   vfs: { fs: true },
   terr: { fs: { ext: ['txt'], fallback: 'disk' } },
   d: { provider: 'disk', fs: true },
+  w: { provider: 'disk', fs: { writable: true } },
 };
 
-// Every target of `targets` under the patch installed with `k`.
+// Every target of `targets` under the patch installed with `k`: the reads,
+// and the mutations of `w`.
 const measure = (b, prefix, k, targets) => {
   fsPatch.install(k);
   try {
     for (const [where, p] of Object.entries(targets)) {
-      for (const [name, op] of Object.entries(OPS)) {
+      const ops = where === 'w' ? MUTATIONS : OPS;
+      for (const [name, op] of Object.entries(ops)) {
         b.ops(`${prefix}.${where}.${name}`, () => op(p));
       }
     }
@@ -67,6 +84,7 @@ module.exports = async (b) => {
     ...dirOf('terr', 'bin'),
     'd/a.bin': one,
     ...dirOf('d', 'bin'),
+    'w/a.bin': one,
   });
   const outside = writeTree(tmpDir('patch-out'), {
     'a.txt': one,
@@ -78,6 +96,8 @@ module.exports = async (b) => {
   const at = (place) => ({
     file: path.join(root, place, place === 'vfs' ? 'a.txt' : 'a.bin'),
     dir: path.join(root, place, 'dir'),
+    fresh: path.join(root, place, 'n.bin'),
+    moved: path.join(root, place, 'b.bin'),
   });
   const targets = {
     vfs: at('vfs'),
@@ -87,14 +107,16 @@ module.exports = async (b) => {
     },
     territory: at('terr'),
   };
+  const w = at('w');
   try {
     for (const [name, op] of Object.entries(OPS)) {
       b.ops(`patch.native.${name}`, () => op(targets.outside));
     }
-    measure(b, 'patch', k, targets);
-    measure(b, 'patch.strict', strict, { ...targets, disk: at('d') });
+    measure(b, 'patch', k, { ...targets, w });
+    measure(b, 'patch.strict', strict, { ...targets, disk: at('d'), w });
     const { territory } = targets;
-    measure(b, 'patch.strict.verify', verify, { territory, disk: at('d') });
+    const onDisk = { territory, disk: at('d'), w };
+    measure(b, 'patch.strict.verify', verify, onDisk);
     memory(b, 'patch', k);
   } finally {
     k.close();

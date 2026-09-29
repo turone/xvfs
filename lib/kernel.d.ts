@@ -290,7 +290,8 @@ export class VfsKernel extends EventEmitter<VfsKernelEvents> {
   // views, without the ownership and ext policies PlaceFs applies.
   /**
    * `own`: the operation does not follow the path's last name (`lstat`,
-   * `readlink`, `unlink`, …), which `links: 'deny'` then lets be a link.
+   * `readlink`, `unlink`, …), which `links: 'deny'` then lets be a known
+   * link; under strict the patch still changes no link on a place's disk.
    */
   routeRead(filePath: string, own?: boolean): ReadRoute;
   routeMutation(filePath: string, own?: boolean): MutationRoute;
