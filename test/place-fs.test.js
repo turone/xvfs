@@ -616,4 +616,51 @@ describe('PlaceFs: writable sab place writes to disk', () => {
       rm(root);
     }
   });
+
+  // A rename takes the router's answer for its source, as through the
+  // patched node:fs (FsRouter.rename): one the place hides — an extension
+  // it does not publish, a file not published yet where `fs.fallback` is
+  // 'deny' (strict's default) — is EACCES, and so is a published file
+  // named as a directory ENOTDIR; a published file moves.
+  for (const strict of [true, false]) {
+    it(`a rename refuses a hidden source as the patch does${strict ? ', under strict' : ''}`, async () => {
+      const root = writeTree(tmpDir('placefs-hidden'), {
+        'data/pub.txt': 'p',
+        'data/hidden.bin': 'h',
+      });
+      const places = {
+        data: { fs: { ext: ['txt'], writable: true, fallback: 'deny' } },
+      };
+      const k = await kernel(root, places, { strict, watchTimeout: 60000 });
+      const at = (name) => path.join(root, 'data', name);
+      const refused = (code, from, to) => ({
+        code,
+        syscall: 'rename',
+        path: at(from),
+        dest: at(to),
+      });
+      try {
+        const data = k.fs('data');
+        assert.throws(
+          () => data.rename('/hidden.bin', '/shown.txt'),
+          refused('EACCES', 'hidden.bin', 'shown.txt'),
+        );
+        data.writeFile('/late.txt', 'l');
+        assert.throws(
+          () => data.rename('/late.txt', '/later.txt'),
+          refused('EACCES', 'late.txt', 'later.txt'),
+        );
+        assert.throws(() => data.rename('/pub.txt/', '/x.txt'), {
+          code: 'ENOTDIR',
+          syscall: 'rename',
+        });
+        data.rename('/pub.txt', '/moved.txt');
+        const names = fs.readdirSync(path.join(root, 'data')).sort();
+        assert.deepEqual(names, ['hidden.bin', 'late.txt', 'moved.txt']);
+      } finally {
+        k.close();
+        rm(root);
+      }
+    });
+  }
 });
