@@ -843,6 +843,7 @@ describe('VfsConfig.fromArgv', () => {
         '--vfs.defaults.memory.limit=512mib',
         '--vfs.defaults.strict=true',
         '--vfs.defaults.hooks.fs=false',
+        '--vfs.places.tools.require.compile=js,cjs',
         '--vfs.enable=tools,workspace',
         '--vfs.disable=static',
       ),
@@ -851,6 +852,10 @@ describe('VfsConfig.fromArgv', () => {
     assert.equal(fromIntegrationDoc.global.memory.limit, 512 * 1024 ** 2);
     assert.equal(fromIntegrationDoc.global.strict, true);
     assert.equal(fromIntegrationDoc.global.hooks.fs, false);
+    assert.deepEqual(fromIntegrationDoc.place('tools').require, {
+      ext: ['js', 'cjs'],
+      compile: ['js', 'cjs'],
+    });
     assert.deepEqual(
       fromIntegrationDoc.places.map((p) => p.name),
       ['tools', 'workspace'],
@@ -860,6 +865,7 @@ describe('VfsConfig.fromArgv', () => {
       argv(
         '--vfs.defaults.memory.limit=512mib',
         '--vfs.defaults.strict=true',
+        '--vfs.places.lib.require.compile=js,cjs',
         '--vfs.enable=static,lib',
         '--vfs.disable=scratch',
       ),
@@ -875,6 +881,7 @@ describe('VfsConfig.fromArgv', () => {
       fromReadme.places.map((p) => p.name),
       ['static', 'lib'],
     );
+    assert.deepEqual(fromReadme.place('lib').require.compile, ['js', 'cjs']);
   });
 
   it('overrides place options and toggles places', () => {

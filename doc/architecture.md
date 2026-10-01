@@ -99,7 +99,7 @@ SAB segments ──────────── one physical copy ────
 | `lib/adapters/fs-copy.js`       | the copy engine of the patch: a copy's options, the source's raw input, the write through the destination — its store or the disk                         |
 | `lib/adapters/fs-surface.js`    | every export of `node:fs` and `node:fs/promises` the patch knows, and what it does with each: implemented, guarded, delegated, path-free                  |
 | `lib/adapters/fs-dir.js`        | `VfsDir`: the `fs.Dir` of the patch's `opendir`, over a listing taken when the directory is opened, with the `node:fs` close semantics                    |
-| `lib/adapters/module-hook.js`   | `module.registerHooks` resolve/load + `_compile` cached data                                                                                              |
+| `lib/adapters/module-hook.js`   | `module.registerHooks` resolve/load + `_compile` cached data + `_resolveFilename` (`require.resolve()`)                                                   |
 | `lib/bootstrap/*`               | `register.mjs` (main thread, `--import`), `attach.js` (workers)                                                                                           |
 
 ## Places and configuration
@@ -131,6 +131,20 @@ before anything is read — e.g. `compress.retainRaw: false` on a virtual
 place (no raw file to serve) or `prepare` on a passthrough provider. Every
 resolved value is explicit (origin, `fs.fallback`), so a resolved config
 describes itself.
+
+**The CLI says what a config file says: `--vfs.<path>=<value>` builds the
+same raw config, merged over the file's and validated as one. A setting
+that takes a list takes a comma-separated one, by one table of the list
+settings; its items stay strings, and `true` / `false` stay booleans
+everywhere. A place name with dots is the longest one the file defines.**
+_Why:_ a JS file, a JSON file and flags are three spellings of one input:
+one validation, one resolved config. Comma lists are what `--vfs.enable`
+already takes, and they pass unquoted through bash, zsh, PowerShell and
+cmd — PowerShell 5.1 drops the quotes of a JSON value, zsh globs `[a,b]`.
+Typing by the setting, not by the value, makes one item a list and keeps
+an extension `3` a string; a table instead of a rule per setting keeps
+the parser general. `compile=true` stays a boolean and is refused as
+`compile: true` is: nothing is migrated in hiding.
 
 **A place's projection indexes the directories its source keys imply
 (`PlaceFiles`: `Map<dir, Set<name>>`), kept by the projection's own `set`
@@ -489,14 +503,13 @@ would be ambiguous, and silent priority rules hide configuration mistakes.
 An error that named the first two sent the user back once per extra
 declaration.
 
-**The short form `prepare: 'name'` covers the domain's own finite `ext` —
-in fs, the extensions it lists itself in `fs.ext`, `fs.script.ext` and
-`fs.script.compile`, never the defaults of `script: true`; an fs that
-lists none takes only the object form.** _Why:_ "every file" is not a
-meaningful preparation target. fs names an extension once, in one of its
-lists, so the short form covers them all — a script extension is no
-longer repeated in `fs.ext`; defaults the user never wrote would hand the
-preparer files nobody named.
+**The short form `prepare: 'name'` covers the domain's effective, finite
+`ext` — in fs, what `fs.ext`, `fs.script.ext` and `fs.script.compile`
+list; an fs that lists none takes only the object form.** _Why:_ "every
+file" is not a meaningful preparation target. fs names an extension once,
+in one of its lists, so the short form covers them all — a script
+extension is no longer repeated in `fs.ext` — and `fs.script` has no
+default that would hand the preparer files nobody named.
 
 **`prepare` routes, it never selects: neither form adds or removes
 extensions of a domain or of the scan, and every declaration resolves into
@@ -555,23 +568,34 @@ options — the bare source under the preparer's `scriptOptions` for
 `vm.Script`, `Module.wrap(source)` under the module filename for Node's
 loader. The library invents no `scriptOptions`.
 
-**`compile` is a list: the extensions of a domain that get cached data;
-`ext` lists those that get none, and `compile` adds its own to the
-domain. A domain lists an extension once — require in `ext` or
-`compile`, fs in `fs.ext`, `fs.script.ext` or `fs.script.compile` — and
-`json` or `mjs` in a `compile` is an error. The defaults — `js` and `cjs`
-compiled, `json` as it is for require — apply only when a domain gives
-neither list; `Place.compiles()` decides both flavors and the companions
-a source may hold.** _Why:_ a boolean compiled a fixed set — js and cjs
-for require — so a template a module requires by its full name
+**`compile` is a list: the extensions of a domain that get cached data,
+and nothing else gets any; `ext` lists those that get none, and
+`compile` adds its own to the domain. A domain lists an extension once —
+require in `ext` or `compile`, fs in `fs.ext`, `fs.script.ext` or
+`fs.script.compile` — a list names it once, and `json` or `mjs` in a
+`compile` is an error. No default compiles: `require: true` takes js,
+cjs and json without cached data, and `fs.script` is an object that
+names its sources (`ext`, `compile` or both), never `true`.
+`Place.compiles()` decides both flavors and the companions a source may
+hold.** _Why:_ a boolean compiled a fixed set — js and cjs for require —
+so a template a module requires by its full name
 (`require('./view.dhtml')`, served as CommonJS already) never got cached
 data, and a script extension had to be written in `fs.ext` and in
 `fs.script.ext`. One list per meaning says of each extension whether it
-gets cached data; an extension in two lists would say both. Node loads
-JSON and ES modules without `_compile`, and neither is a `vm.Script`
-source: their cached data would never be used. A specifier without its
-extension still finds js, cjs and json only (`require('./view')`), as
-before.
+gets cached data; an extension in two lists — or twice in one — would
+say it twice. A default compile list made `ext` alone mean "compile
+these" in one config and "do not" in the next; with none, what a config
+compiles is what it lists. Node loads JSON and ES modules without
+`_compile`, and neither is a `vm.Script` source: their cached data would
+never be used. A specifier without its extension still finds js, cjs and
+json only (`require('./view')`), as before.
+
+**A script bundle without a companion carries `cachedData` undefined,
+never null.** _Why:_ `vm.Script` refuses null (`ERR_INVALID_ARG_TYPE`)
+and takes undefined, so `{ ...scriptOptions, cachedData }` serves every
+bundle and no caller has to test it. Cached data an isolate rejects is
+that isolate's: the script compiles from its canonical source there, and
+nothing is published again.
 
 ## Virtual places and worker mutations
 
@@ -1595,6 +1619,20 @@ the same identity as files on disk (`import.meta.url`, `__filename`,
 `require.cache`), bytecode reuse without changing module semantics; a
 throwing module body is never re-executed.
 
+**`require.resolve()` names what `require()` loads: install() also
+patches `Module._resolveFilename` with the resolve hook's own lookup,
+which answers first — a strict refusal included — and leaves to Node what
+no place publishes; uninstall() restores it. No `require.extensions`
+entry is ever made.** _Why:_ Node's `require.resolve()` asks the resolve
+hooks from 24.20 on; on 22.x and 24.12 it asks `_resolveFilename` alone,
+which knows no memory, and so does the `require` the `_compile` patch
+gives a module on every version: a memory-only module resolved
+`MODULE_NOT_FOUND` although `require()` loaded it, and under strict an
+old Node named a disk file `require()` refuses. One lookup for both keeps
+them equal; while the hook hands a miss to the default resolver the patch
+does not look again. A `require.extensions` entry would make
+`require('./view')` find `view.dhtml` — new resolution, process-wide.
+
 **`load` returns the source decoded to a string.** _Why:_ the ESM loader
 may compile after an async gap, when the shared bytes could already belong
 to a newer version.
@@ -1611,6 +1649,12 @@ workers call `attach()`.** _Why:_ preloads do not run in worker threads.
 | Domain priority or merging of `prepare` declarations                                                            | hides mistakes; one extension, one declaration                    |
 | `fs.script.prepare`                                                                                             | preparation belongs to the file, not to the script consumer       |
 | `compile: boolean`, or an alias for it                                                                          | a fixed set of extensions; `fs.ext` repeated the script ones      |
+| `script: true`; a default compile list                                                                          | what a config compiles would not be what it lists                 |
+| Collapsing a repeat within one extension list                                                                   | a list that names an extension twice hides a mistake              |
+| JSON or bracket values for lists on the CLI                                                                     | PowerShell drops the quotes of JSON; zsh globs `[a,b]`            |
+| A list typed by its value on the CLI (a comma makes a list)                                                     | one item would be a string, an extension `3` a number             |
+| A `require.extensions` entry for each extension a place serves                                                  | `require('./view')` would find `view.dhtml`; process-wide         |
+| Leaving `require.resolve()` to Node's resolver                                                                  | on 22.x and 24.12 it sees no memory and no strict refusal         |
 | Synchronous worker mutations via `Atomics.wait()`                                                               | deadlock- and stall-prone                                         |
 | Workers allocating in SAB                                                                                       | one writer keeps the allocator lock-free                          |
 | Echoing file bytes in mutation responses                                                                        | the bytes are already in SAB; the update carries metadata         |

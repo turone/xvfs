@@ -84,11 +84,10 @@ Publication:
   (`PlaceFs.script()`), with a V8 bytecode companion of the canonical
   source for the extensions of `fs.script.compile`, independent of
   `require.compile`.
-- **V8 bytecode** — `compile` lists the extensions that get it:
-  `require.compile` (CommonJS; `js` and `cjs` by default, and any other
-  extension a module requires by its full name — a template, say) and
-  `fs.script.compile` (bare source; `js` and `cjs` by default). ESM and
-  JSON have no bytecode cache.
+- **V8 bytecode** — built for the extensions a `compile` list names and
+  for nothing else: `require.compile` (CommonJS — `js`, `cjs`, or any
+  other extension a module requires by its full name, a template say) and
+  `fs.script.compile` (bare source). ESM and JSON have no bytecode cache.
 - **Pre-compressed representations** — `gzip`, `deflate`, `br`, `zstd`
   built once and shared from SAB. HTTP negotiation stays in your server.
 - **Live reload** — watcher batches disk events into epochs processed
@@ -119,7 +118,9 @@ Control:
 Integration:
 
 - **Hooks** — `hooks.fs` patches `node:fs`; `hooks.module` is one
-  `module.registerHooks` chain for `require()` and `import`.
+  `module.registerHooks` chain for `require()` and `import`, with
+  `require.resolve()` naming what `require()` loads on every supported
+  Node.
 - **Chunked streaming** — `PlaceFs.createReadStream()` with HTTP Range;
   a stream always finishes the version it started with.
 
@@ -153,7 +154,9 @@ Bootstrap (main thread only):
 node --import xvfs/register app.js -- --vfs.config=./vfs.config.cjs
 ```
 
-Config file: `--vfs.config=…` or `vfs.config.{js,cjs,mjs,json}` in cwd.
+Config file: `--vfs.config=…` or `vfs.config.{js,cjs,mjs,json}` in cwd;
+`--vfs.*` flags override it, or say it all — see
+[CLI overrides](#cli-overrides).
 Order: load config → `initialize()` → install hooks → publish
 `VfsKernel.current`. Failure uninstalls, closes the kernel and rethrows —
 the entry never runs.
@@ -295,7 +298,7 @@ places: {
     provider: 'map',
     origin: 'virtual',
     fs: { writable: true },
-    require: true, // compiles js and cjs
+    require: { compile: ['js'] }, // V8 cached data for .js
   },
 }
 
@@ -327,19 +330,27 @@ places: {
 
 Here `.js`, `.cjs` and `.dhtml` get both companions — a module of the
 place loads `require('./view.dhtml')` as CommonJS through its cached
-data; `.mjs` is a script source whose bundle has `cachedData: null`;
-`.json` gets none.
+data, and `require.resolve('./view.dhtml')` names that file; `.mjs` is a
+script source without cached data; `.json` gets none. The same config
+on the CLI is in [CLI overrides](#cli-overrides).
 
-- **Lists.** `compile` adds its extensions to the domain by itself: the
-  resolved `ext` holds both lists, `compile` first. A domain lists an
-  extension once — fs in `fs.ext`, `fs.script.ext` or
+- **Lists.** Cached data is built for what a `compile` list names and
+  for nothing else. `compile` adds its extensions to the domain by
+  itself: the resolved `ext` holds both lists, `compile` first. A domain
+  lists an extension once — fs in `fs.ext`, `fs.script.ext` or
   `fs.script.compile`, require in `require.ext` or `require.compile` —
-  and `json` and `mjs` get no cached data: an extension listed twice, or
-  `json` or `mjs` in a `compile`, is a config error. With neither list,
-  `script: true` compiles `js` and `cjs`, and `require: true` compiles
-  `js` and `cjs` and takes `json` as it is; a list given replaces those
-  defaults whole. `require('./view')` still tries `.js`, `.cjs` and
-  `.json` only: a name without its extension never finds `view.dhtml`.
+  and a list names it once; `json` and `mjs` get no cached data. An
+  extension listed twice, a boolean `compile`, `[]`, or `json` / `mjs`
+  in a `compile` is a config error. `require: true` (or `{}`,
+  `{ prepare }`) takes `js`, `cjs` and `json` and compiles nothing; a
+  list given replaces that default. `fs.script` has none: it is an
+  object with `ext`, `compile` or both, or `false`.
+- **No new resolution.** `require('./view')` still tries `.js`, `.cjs`
+  and `.json` only: a name without its extension never finds
+  `view.dhtml`, and no `require.extensions` entry is made. With the module
+  hook installed, `require.resolve()` names the file `require()` loads,
+  on every supported Node — memory-only files and strict refusals
+  included.
 - `fs.script.compile` builds `\0script:bytecode` — cached data of the
   **bare** canonical source under the preparer's `scriptOptions`.
   `require.compile` builds `\0require:bytecode` — cached data of
@@ -354,30 +365,37 @@ data; `.mjs` is a script source whose bundle has `cachedData: null`;
 - `kernel.fs(name).script(key)` →
   `{ source, cachedData, scriptOptions, meta, version } | null`; `ENOTSUP`
   when the place has no `fs.script`. It never prepares or compiles
-  anything itself. `cachedData` is null for an extension outside
-  `fs.script.compile`, and `vm.Script` refuses a null one — pass it only
-  when it is there:
+  anything itself. `cachedData` is undefined for an extension outside
+  `fs.script.compile` — never null, which `vm.Script` refuses — so one
+  line serves every bundle:
 
   ```js
   const { source, cachedData, scriptOptions } = files.script('/view.dhtml');
-  const script = new vm.Script(source, {
-    ...scriptOptions,
-    cachedData: cachedData ?? undefined,
-  });
+  const script = new vm.Script(source, { ...scriptOptions, cachedData });
   ```
 
+  Cached data V8 rejects in one isolate (`script.cachedDataRejected`) is
+  that isolate's: the script compiles from `source` there, and the file,
+  its companion and its version stay as published. The module hook does
+  the same for a module: its original compiler runs the source once.
   `version` is the file's ([Versions](#versions)): a `vm.Script` built
   from the bundle serves until it changes.
 
-- **Earlier versions.** `compile` was a boolean, `true` by default; a
-  boolean is now a config error, with no alias. `{ ext: X, compile: true }`
-  becomes `{ compile: X }` — in `require`, `json` stays in `ext` — and
-  `compile: false` becomes `ext`; `fs.ext` no longer repeats an extension
-  of `fs.script`. A domain that gives `ext` alone changes meaning
-  silently: `require: { ext: ['js'] }` compiled `.js` and now compiles
-  nothing; `script: { ext: X }` gave cached data and now gives
-  `cachedData: null`, which `vm.Script` refuses with
-  `ERR_INVALID_ARG_TYPE` when it is handed over as it is.
+- **`mjs`.** `fs.script.ext: ['mjs']` hands out the text of a module and
+  nothing more: no cached data (`compile` refuses `mjs`), no module
+  semantics — `vm.Script` does not parse `export`; build a
+  `vm.SourceTextModule` yourself — and no `import()`, which is the import
+  domain's.
+- **Earlier versions.** `compile` was a boolean, `true` by default, and
+  `script: true` took `js` and `cjs` compiled; both are config errors now,
+  with no alias. `{ ext: X, compile: true }` becomes `{ compile: X }` (in
+  `require`, with `json` left in `ext`), `compile: false` becomes `ext`,
+  `script: true` becomes `script: { compile: ['js', 'cjs'] }`, and
+  `fs.ext` no longer repeats an extension of `fs.script`. Changes of
+  meaning: `require: true`, and a domain that gives `ext` alone, compiled
+  their `js` and `cjs` and compile nothing now; an extension listed twice
+  in one list is an error, not dropped; `script()` gives `cachedData`
+  undefined, not null.
 
 ### SEA provider
 
@@ -444,12 +462,11 @@ Here `.js` goes through `api` once; that one prepared source is what
 `fs` reads, `fs.script.compile` and `require.compile` compile and
 `require()` loads. `.css` goes through `styles`.
 
-- **Forms.** `prepare: 'name'` covers every extension of the domain's own
-  finite `ext`: for `require` / `import` including the defaults — so
-  `require: { prepare }` also covers `json` — and for `fs` the extensions
-  it lists itself in `fs.ext`, `fs.script.ext` and `fs.script.compile`,
-  never the defaults of `script: true`. An `fs` that lists none (no `ext`,
-  at most `script: true`) takes only the object form.
+- **Forms.** `prepare: 'name'` covers every extension of the domain's
+  effective, finite `ext`: for `require` / `import` including the
+  defaults — so `require: { prepare }` also covers `json` — and for `fs`
+  what `fs.ext`, `fs.script.ext` and `fs.script.compile` list. An `fs`
+  that lists none (every file) takes only the object form.
   `prepare: { name: [ext, …] }` routes extensions explicitly; with a
   finite domain `ext` each one must be in it. Neither form adds
   extensions to a domain or removes any.
@@ -538,11 +555,10 @@ zlib defaults (brotli quality 11, gzip/deflate 6, zstd 3).
 
 **`retainRaw: false`** keeps only compressed bytes in SAB; the source
 stays a disk entry. Requires provider `sab` with `origin: 'disk'` (a
-virtual place has no raw file to serve), no `require.compile` —
-`require: true` compiles `js` and `cjs`; list them in `require.ext`
-instead — and no `fs.script` or `prepare`. `place.readFile()` and the
-patched `fs` then read the source from disk; `readFileView()` has no view
-of it.
+virtual place has no raw file to serve), no `require.compile` (`require:
+true` compiles nothing and is fine) and no `fs.script` or `prepare`.
+`place.readFile()` and the patched `fs` then read the source from disk;
+`readFileView()` has no view of it.
 
 A compressed representation is never content of its own: a copy or a
 rename hands on the raw input — from disk with `retainRaw: false` — and
@@ -942,18 +958,18 @@ res.end(lease.view);
 Deep-frozen after construction. `config.raw` is the merged input,
 cloneable so workers rebuild from it.
 
-| `defaults.*`           | Type   | Default    | Description                         |
-| ---------------------- | ------ | ---------- | ----------------------------------- |
-| `memory.limit`         | size   | `'1 gib'`  | Total SAB pool budget               |
-| `memory.segmentSize`   | size   | `'64 mib'` | SAB segment size                    |
-| `memory.maxFileSize`   | size   | `'10 mb'`  | Larger disk files stay on disk      |
-| `compaction.threshold` | number | `0.3`      | 0 = off; else compact below this    |
-| `hooks.fs`             | bool   | `true`     | Patch `node:fs`                     |
-| `hooks.module`         | bool   | `true`     | `module.registerHooks` + `_compile` |
-| `watch`                | bool   | `false`    | Watch disk-origin places            |
-| `watchTimeout`         | number | `1000`     | Watcher debounce (ms)               |
-| `strict`               | bool   | `false`    | Routing policy inside `appRoot`     |
-| `links`                | string | `'deny'`   | Under strict: `deny` \| `verify`    |
+| `defaults.*`           | Type   | Default    | Description                                             |
+| ---------------------- | ------ | ---------- | ------------------------------------------------------- |
+| `memory.limit`         | size   | `'1 gib'`  | Total SAB pool budget                                   |
+| `memory.segmentSize`   | size   | `'64 mib'` | SAB segment size                                        |
+| `memory.maxFileSize`   | size   | `'10 mb'`  | Larger disk files stay on disk                          |
+| `compaction.threshold` | number | `0.3`      | 0 = off; else compact below this                        |
+| `hooks.fs`             | bool   | `true`     | Patch `node:fs`                                         |
+| `hooks.module`         | bool   | `true`     | `module.registerHooks` + `_compile`, `_resolveFilename` |
+| `watch`                | bool   | `false`    | Watch disk-origin places                                |
+| `watchTimeout`         | number | `1000`     | Watcher debounce (ms)                                   |
+| `strict`               | bool   | `false`    | Routing policy inside `appRoot`                         |
+| `links`                | string | `'deny'`   | Under strict: `deny` \| `verify`                        |
 
 Sizes accept `metautil.sizeToBytes` strings or numbers: a bare integer
 (bytes), or one followed by a decimal (`kb`, `mb`, `gb`, `tb`, `pb`, `eb`,
@@ -994,27 +1010,30 @@ also per place — in [Links on a place's disk](#links-on-a-places-disk-links).
 Place name: ASCII `[A-Za-z0-9][A-Za-z0-9._-]*`, no trailing dot, no
 Windows reserved names, unique after lowercasing.
 
-Domain defaults: require `compile` `js,cjs` and `ext` `json`, fs.script
-`compile` `js,cjs` — each only when the domain gives neither list; import
-ext `js,mjs,json`; fs ext `null` = everything. The resolved `ext` of
-require and fs.script holds `compile` first, then their own `ext`
-(require: `js,cjs,json` by default); the resolved `fs.ext` is the union of
-`fs.ext` and the resolved `fs.script.ext`. A domain lists an extension
-once (see [`fs.script`](#fsscript)). At least one domain must be on.
+Domain defaults: require ext `js,cjs,json` with nothing compiled, when
+it gives neither `ext` nor `compile`; import ext `js,mjs,json`; fs ext
+`null` = everything; `fs.script` has none. Nothing is compiled unless a
+`compile` list names it. The resolved `ext` of require and fs.script
+holds `compile` first, then their own `ext`; the resolved `fs.ext` is
+the union of `fs.ext` and the resolved `fs.script.ext`. A domain lists
+an extension once, and a list names it once (see
+[`fs.script`](#fsscript)). At least one domain must be on.
 
 `<domain>.prepare` is `'name'` or `{ name: [ext, …] }` — see
 [Preparation](#preparation-prepare). The resolved place carries one index,
 `place.prepare = { [ext]: name } | null`.
 
-| `places.<name>.require.*` | Type     | Default        | Description                                                        |
-| ------------------------- | -------- | -------------- | ------------------------------------------------------------------ |
-| `ext`                     | string[] | `['json']`     | Extensions without cached data                                     |
-| `compile`                 | string[] | `['js','cjs']` | Extensions with the `\0require:bytecode` companion; no json or mjs |
+| `places.<name>.require.*` | Type     | Default               | Description                                                        |
+| ------------------------- | -------- | --------------------- | ------------------------------------------------------------------ |
+| `ext`                     | string[] | `['js','cjs','json']` | Extensions without cached data                                     |
+| `compile`                 | string[] | —                     | Extensions with the `\0require:bytecode` companion; no json or mjs |
 
-| `places.<name>.fs.script.*` | Type     | Default        | Description                                                    |
-| --------------------------- | -------- | -------------- | -------------------------------------------------------------- |
-| `ext`                       | string[] | —              | Sources without cached data: `cachedData: null`                |
-| `compile`                   | string[] | `['js','cjs']` | Sources with the `\0script:bytecode` companion; no json or mjs |
+| `places.<name>.fs.script.*` | Type     | Default | Description                                                    |
+| --------------------------- | -------- | ------- | -------------------------------------------------------------- |
+| `ext`                       | string[] | —       | Sources without cached data: `cachedData` undefined            |
+| `compile`                   | string[] | —       | Sources with the `\0script:bytecode` companion; no json or mjs |
+
+`fs.script` is an object with `ext`, `compile` or both, or `false`.
 
 | `places.<name>.fs.compress.*` | Type               | Default | Description                     |
 | ----------------------------- | ------------------ | ------- | ------------------------------- |
@@ -1023,17 +1042,53 @@ once (see [`fs.script`](#fsscript)). At least one domain must be on.
 | `ext`                         | string[] \| string | all     | Or `'compressible'`             |
 | `retainRaw`                   | bool               | `true`  | Keep uncompressed source in SAB |
 
-`VfsConfig.fromArgv(argv, appConfig)` parses `--vfs.*` after `--`:
-`--vfs.defaults.*`, `--vfs.places.<n>.*`, `--vfs.enable` /
-`--vfs.disable`. Coerces `"true"` / `"false"` / numbers only.
-`setNested` rejects `__proto__` | `prototype` | `constructor`.
+#### CLI overrides
+
+`VfsConfig.fromArgv(argv, appConfig)` — what `--import xvfs/register`
+uses — reads the `--vfs.*` flags after `--` into the raw config a JS or
+JSON file gives, over `appConfig`, and validates the result as it
+validates a file: `--vfs.defaults.*`, `--vfs.places.<name>.*`, and
+`--vfs.enable` / `--vfs.disable` with comma-separated place names.
+
+- `true` / `false` are booleans and a decimal is a number; anything else
+  is a string.
+- A setting that takes a list takes a comma-separated one, one item
+  included: `fs.ext`, `fs.script.ext`, `fs.script.compile`,
+  `fs.compress.encodings`, `fs.compress.ext`, `require.ext`,
+  `require.compile`, `import.ext`, and the object form of every
+  `prepare` (`--vfs.places.<name>.fs.prepare.<preparer>=css,html`). Items
+  stay strings as written — an extension `3` is no number — trimmed;
+  `fs.compress.ext=compressible` is the keyword. `true` / `false` stay
+  booleans there too, so `compile=true` is refused as `compile: true` is.
+- A flag replaces what the file has at its path — a list replaces the
+  file's list, it does not add to it — and leaves the rest.
+- A place name with dots (`my.app`) is read as the longest name the file
+  defines. `__proto__`, `prototype` and `constructor` are refused
+  anywhere in a key.
+
+The accepted form of [`fs.script`](#fsscript), as flags alone:
+
+```
+node --import xvfs/register app.js -- \
+  --vfs.places.views.fs.ext=json \
+  --vfs.places.views.fs.script.ext=mjs \
+  --vfs.places.views.fs.script.compile=js,cjs,dhtml \
+  --vfs.places.views.require.ext=json \
+  --vfs.places.views.require.compile=js,cjs,dhtml
+```
+
+Small overrides over a file:
 
 ```
 node app.js -- --vfs.defaults.memory.limit=512mib \
                --vfs.defaults.strict=true \
+               --vfs.places.lib.require.compile=js,cjs \
                --vfs.enable=static,lib \
                --vfs.disable=scratch
 ```
+
+A config of many places reads better as `vfs.config.json`; a JS file, a
+JSON file and flags that say the same resolve to one config.
 
 ### `VfsKernel` (main thread)
 
@@ -1315,7 +1370,7 @@ the patched `node:fs` lists with — in the same order, the keys'.
 | `statCompressed(key, enc)`                   | object \| null                                                 | `{ size, sourceSize, encoding, … }`                                                                                                               |
 | `createReadStreamCompressed(key, enc, opts)` | `VfsReadStream` \| null                                        | Range is compressed bytes                                                                                                                         |
 | `pathOf(key)`                                | string                                                         | Absolute OS path                                                                                                                                  |
-| `script(key)`                                | `{ source, cachedData, scriptOptions, meta, version }` \| null | `ENOTSUP` when no `fs.script`; `cachedData` null outside `fs.script.compile` ([`fs.script`](#fsscript))                                           |
+| `script(key)`                                | `{ source, cachedData, scriptOptions, meta, version }` \| null | `ENOTSUP` when no `fs.script`; `cachedData` undefined outside `fs.script.compile` ([`fs.script`](#fsscript))                                      |
 | `meta(key)`                                  | object \| null                                                 | Frozen preparer metadata                                                                                                                          |
 | `writeFile` / `appendFile` / `unlink`        | void \| Promise                                                | Sync for map/disk; Promise for `sab + virtual`                                                                                                    |
 | `writeFiles(files, opts)`                    | void \| `Promise<number>`                                      | Several files of a virtual place as one publication, or none — [writeFiles](#several-files-as-one-writefiles); the version of its commit          |

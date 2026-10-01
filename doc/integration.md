@@ -197,10 +197,10 @@ try {
 
 Two layers, `defaults.hooks.{fs,module}`:
 
-| Layer    | Mechanism                                              | Notes                                                                                         |
-| -------- | ------------------------------------------------------ | --------------------------------------------------------------------------------------------- |
-| `fs`     | table-driven `node:fs` patch (sync/callback/promises)  | Executes `FsRouter` decisions: implemented, recognized but unsupported, passthrough (README). |
-| `module` | `module.registerHooks({ resolve, load })` + `_compile` | One chain for `require()` and `import`. Domain = `context.conditions.includes('require')`.    |
+| Layer    | Mechanism                                                                  | Notes                                                                                                                                        |
+| -------- | -------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------- |
+| `fs`     | table-driven `node:fs` patch (sync/callback/promises)                      | Executes `FsRouter` decisions: implemented, recognized but unsupported, passthrough (README).                                                |
+| `module` | `module.registerHooks({ resolve, load })` + `_compile`, `_resolveFilename` | One chain for `require()` and `import`. Domain = `context.conditions.includes('require')`; `require.resolve()` names what `require()` loads. |
 
 Manual install (when not using `--import xvfs/register`):
 
@@ -248,7 +248,8 @@ same epoch and publishes both in one `vfs-update`.
 const metavm = require('metavm');
 const abs = path.join(kernel.appRoot, 'domain', 'handler.js');
 const source = kernel.fs('domain').readFile('/handler.js', 'utf8');
-const cachedData = kernel.bytecode(abs);
+// Null without a companion: pass undefined, which vm.Script takes.
+const cachedData = kernel.bytecode(abs) ?? undefined;
 
 const script = metavm.createScript(source, {
   filename: abs,
@@ -258,9 +259,9 @@ const handler = script.exports;
 ```
 
 This works in any thread that holds the snapshot — the bytecode lives in
-SAB and is shared zero-copy. If `cachedData` is `null` (the file's
-extension is not in `require.compile`), `metavm` creates cached data on
-first run as usual. Prove `cachedDataRejected === false` in a worker, not
+SAB and is shared zero-copy. Without a companion (the file's extension
+is not in `require.compile`) `kernel.bytecode()` is null, and the source
+compiles as usual. Prove `cachedDataRejected === false` in a worker, not
 in the compiling thread: V8's per-isolate cache masks rejection there.
 
 ### AI agent / plugin workspace
@@ -455,15 +456,14 @@ const kernel = new VfsKernel(config, {
 const bundle = kernel.fs('application').script('/handler.js');
 const script = new vm.Script(bundle.source, {
   ...bundle.scriptOptions,
-  // Null for an extension outside fs.script.compile: vm.Script refuses it.
-  cachedData: bundle.cachedData ?? undefined,
+  // Undefined for an extension outside fs.script.compile, never null.
+  cachedData: bundle.cachedData,
 });
 const handler = script.runInThisContext();
 ```
 
-- The short form covers the domain's own finite `ext` — in `fs` the
-  extensions it lists itself in `fs.ext`, `fs.script.ext` and
-  `fs.script.compile`, never the defaults of `script: true`; an `fs`
+- The short form covers the domain's effective, finite `ext` — in `fs`
+  what `fs.ext`, `fs.script.ext` and `fs.script.compile` list; an `fs`
   that lists none must use the object form. The object form must stay
   inside a finite domain `ext`. Neither adds extensions to a domain.
 - Key, path, extension and type of the file do not change. The raw disk
@@ -518,12 +518,18 @@ node --import xvfs/register app.js -- \
   --vfs.defaults.memory.limit=512mib \
   --vfs.defaults.strict=true \
   --vfs.defaults.hooks.fs=false \
+  --vfs.places.tools.require.compile=js,cjs \
   --vfs.enable=tools,workspace \
   --vfs.disable=static
 ```
 
 `VfsConfig.fromArgv(process.argv, appConfig)` applies the same flags
-when you construct the kernel yourself.
+when you construct the kernel yourself. A setting that takes a list
+takes a comma-separated one, one item included, and replaces the list of
+the config file; `true` / `false` are booleans and a decimal a number,
+and the result is validated as a JS or JSON config is. The flags can say
+a whole config — README, [CLI overrides](../README.md#cli-overrides) —
+but a config of many places reads better as `vfs.config.json`.
 
 ## Alternatives and decisions
 
@@ -582,6 +588,6 @@ other means is not contained.
 - [ ] Main: `kernel.close()` on shutdown.
 - [ ] Optional: `defaults.strict` — entry + `package.json` outside
       `appRoot`.
-- [ ] Optional: `require.compile` — the extensions that get CJS bytecode
-      (`js` and `cjs` when the require domain gives no list).
+- [ ] Optional: `require.compile` — the extensions that get CJS bytecode;
+      nothing is compiled unless it is listed.
 - [ ] Optional: `fs.compress` for pre-compressed SAB representations.
