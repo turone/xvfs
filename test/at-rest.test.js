@@ -51,7 +51,7 @@ const PREPARERS = {
 const PLACES = {
   v: { origin: 'virtual', fs: { writable: true } },
   p: { origin: 'virtual', fs: { writable: true, ext: ['txt'], prepare: 'up' } },
-  s: { origin: 'virtual', fs: { writable: true, script: { compile: true } } },
+  s: { origin: 'virtual', fs: { writable: true, script: { compile: ['js'] } } },
   u: {
     origin: 'virtual',
     fs: { writable: true, ext: ['bin'], prepare: 'placed' },

@@ -3,6 +3,7 @@
 const { describe, it, before, after } = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
+const Module = require('node:module');
 const path = require('node:path');
 const vm = require('node:vm');
 const { pathToFileURL } = require('node:url');
@@ -54,14 +55,14 @@ describe('module-hook: CommonJS', () => {
       'disk/d.js': 'module.exports = "disk";',
     });
     k = await kernel(root, {
-      lib: { require: true },
+      lib: { require: { ext: ['json'], compile: ['js', 'cjs'] } },
       mem: {
         provider: 'map',
         origin: 'virtual',
         fs: { writable: true },
-        require: true,
+        require: { ext: ['json'], compile: ['js', 'cjs'] },
       },
-      disk: { provider: 'disk', require: { compile: false } },
+      disk: { provider: 'disk', require: true },
     });
     moduleHook.install(k);
     spyScripts();
@@ -186,14 +187,461 @@ describe('module-hook: CommonJS', () => {
   });
 });
 
-describe('module-hook: bytecode accepted across isolates', () => {
+// An extension of `require.compile` beyond js and cjs: a module that names
+// it loads it as CommonJS through its cached data; one that leaves it out
+// finds nothing — only js, cjs and json are tried, as in Node.
+describe('module-hook: an extension of require.compile', () => {
+  let root;
+  let k;
+  const at = (...p) => path.join(root, ...p);
+
+  before(async () => {
+    root = writeTree(tmpDir('modhook-compile'), {
+      'app/main.js':
+        "exports.view = require('./view.dhtml'); exports.data = require('./data.json');",
+      'app/bare.js': "module.exports = require('./view');",
+      'app/view.dhtml': '<p>{{name}}</p>',
+      'app/data.json': '{"name": "ann"}',
+    });
+    const view = (raw) =>
+      `module.exports = (data) => ${JSON.stringify(raw.toString())}` +
+      ".replace('{{name}}', data.name);";
+    k = await kernel(
+      root,
+      {
+        app: {
+          require: {
+            ext: ['json'],
+            compile: ['js', 'cjs', 'dhtml'],
+            prepare: { view: ['dhtml'] },
+          },
+        },
+      },
+      {},
+      { preparers: { view } },
+    );
+    moduleHook.install(k);
+    spyScripts();
+  });
+
+  after(() => {
+    unspy();
+    moduleHook.uninstall();
+    k.close();
+    rm(root);
+  });
+
+  it('require of the full name takes the cached-data path', () => {
+    const main = require(at('app', 'main.js'));
+    assert.equal(main.view({ name: 'ann' }), '<p>ann</p>');
+    const file = at('app', 'view.dhtml');
+    assert.ok(k.bytecode(file));
+    assert.equal(scripts.filter((s) => s.filename === file).length, 1);
+  });
+
+  it('json loads without bytecode', () => {
+    const file = at('app', 'data.json');
+    assert.deepEqual(require(at('app', 'main.js')).data, { name: 'ann' });
+    assert.equal(k.bytecode(file), null);
+    assert.equal(scripts.filter((s) => s.filename === file).length, 0);
+  });
+
+  it('a specifier without the extension finds nothing', () => {
+    assert.throws(() => require(at('app', 'bare.js')), {
+      code: 'MODULE_NOT_FOUND',
+    });
+  });
+});
+
+// require.resolve() names the file require() loads, on every Node version
+// — Node's own asks the resolve hooks only from 24.20 on — for files that
+// exist in memory alone: from a module compiled with cached data (the
+// hook's require), from one Node compiled, and from outside the places.
+// Install touches no `require.extensions`; uninstall puts back what it
+// replaced.
+describe('module-hook: require.resolve names what require() loads', () => {
+  let root;
+  let k;
+  let native;
+  const at = (...p) => path.join(root, ...p);
+  const PROBE =
+    'const named = (id) => { try { return require.resolve(id); } ' +
+    'catch (err) { return err.code; } };\n' +
+    "module.exports = { view: named('./view.dhtml'), " +
+    "data: named('./data.json'), bare: named('./view'), " +
+    "loaded: require('./view.dhtml') };";
+
+  before(async () => {
+    native = {
+      compile: Module.prototype._compile,
+      resolveFilename: Module._resolveFilename,
+      extensions: Object.keys(require.extensions),
+    };
+    root = tmpDir('modhook-resolve');
+    k = await kernel(root, {
+      mem: {
+        provider: 'map',
+        origin: 'virtual',
+        fs: { writable: true },
+        require: { ext: ['json', 'cjs'], compile: ['js', 'dhtml'] },
+      },
+    });
+    const mem = k.fs('mem');
+    mem.writeFile('/compiled.js', PROBE);
+    mem.writeFile('/plain.cjs', PROBE);
+    mem.writeFile('/view.dhtml', "module.exports = 'view';");
+    mem.writeFile('/data.json', '{"a": 1}');
+    moduleHook.install(k);
+    spyScripts();
+  });
+
+  after(() => {
+    unspy();
+    moduleHook.uninstall();
+    k.close();
+    rm(root);
+  });
+
+  it('from a module compiled with cached data and from one Node compiled', () => {
+    const expected = {
+      view: at('mem', 'view.dhtml'),
+      data: at('mem', 'data.json'),
+      bare: 'MODULE_NOT_FOUND',
+      loaded: 'view',
+    };
+    assert.deepEqual(require(at('mem', 'compiled.js')), expected);
+    assert.deepEqual(require(at('mem', 'plain.cjs')), expected);
+    const compiled = at('mem', 'compiled.js');
+    assert.ok(k.bytecode(compiled));
+    assert.equal(scripts.filter((s) => s.filename === compiled).length, 1);
+    assert.equal(k.bytecode(at('mem', 'plain.cjs')), null);
+  });
+
+  it('from outside the places', () => {
+    assert.equal(
+      require.resolve(at('mem', 'view.dhtml')),
+      at('mem', 'view.dhtml'),
+    );
+    assert.throws(() => require.resolve(at('mem', 'view')), {
+      code: 'MODULE_NOT_FOUND',
+    });
+  });
+
+  it('install adds no require.extensions entry', () => {
+    assert.deepEqual(Object.keys(require.extensions), native.extensions);
+    assert.equal(require.extensions['.dhtml'], undefined);
+  });
+
+  it('uninstall restores _compile and _resolveFilename', () => {
+    assert.notEqual(Module.prototype._compile, native.compile);
+    assert.notEqual(Module._resolveFilename, native.resolveFilename);
+    moduleHook.uninstall();
+    try {
+      assert.equal(Module.prototype._compile, native.compile);
+      assert.equal(Module._resolveFilename, native.resolveFilename);
+      assert.deepEqual(Object.keys(require.extensions), native.extensions);
+      assert.throws(() => require.resolve(at('mem', 'view.dhtml')), {
+        code: 'MODULE_NOT_FOUND',
+      });
+    } finally {
+      moduleHook.install(k);
+    }
+    assert.equal(
+      require.resolve(at('mem', 'view.dhtml')),
+      at('mem', 'view.dhtml'),
+    );
+  });
+});
+
+// The Module._resolveFilename patch over its life, against kernels that
+// note what they are asked: install() twice wraps once; uninstall() puts
+// back what was there; a patch kept past uninstall() — or past a later
+// install() — goes to the function it replaced, never to a kernel; what no
+// place serves is Node's own answer.
+describe('module-hook: the _resolveFilename patch over its life', () => {
+  let native;
+  const noting = (name) => {
+    const own = path.join(__dirname, 'xvfs-unmounted', name, 'view.dhtml');
+    const asked = [];
+    return {
+      own,
+      asked,
+      resolveModule: (candidate) => {
+        asked.push(candidate);
+        return candidate === own ? { file: { data: Buffer.from('') } } : null;
+      },
+      bytecode: () => null,
+    };
+  };
+  // What `resolve` answers for `request` from this file: a path, or the
+  // code of its error.
+  const answer = (resolve, request, options) => {
+    try {
+      return resolve.call(Module, request, module, false, options);
+    } catch (err) {
+      return err.code;
+    }
+  };
+
+  before(() => {
+    native = Module._resolveFilename;
+  });
+
+  it('install() twice wraps once; uninstall() puts back what was there', () => {
+    const a = noting('a');
+    moduleHook.install(a);
+    const patch = Module._resolveFilename;
+    try {
+      moduleHook.install(noting('b'));
+      assert.equal(Module._resolveFilename, patch, 'no second wrapper');
+      assert.equal(answer(Module._resolveFilename, a.own), a.own);
+    } finally {
+      moduleHook.uninstall();
+    }
+    assert.equal(Module._resolveFilename, native);
+    // Another patch found there is what comes back.
+    const theirs = (...args) => native.apply(Module, args);
+    Module._resolveFilename = theirs;
+    try {
+      moduleHook.install(a);
+      assert.notEqual(Module._resolveFilename, theirs);
+      moduleHook.uninstall();
+      assert.equal(Module._resolveFilename, theirs);
+    } finally {
+      Module._resolveFilename = native;
+    }
+  });
+
+  it('a patch kept past uninstall() goes to what it replaced, never to a kernel', () => {
+    const a = noting('a');
+    moduleHook.install(a);
+    const kept = Module._resolveFilename;
+    moduleHook.uninstall();
+    a.asked.length = 0;
+    for (const request of [a.own, './nope', 'node:fs', 'metautil']) {
+      assert.equal(answer(kept, request), answer(native, request), request);
+    }
+    assert.deepEqual(a.asked, [], 'the kernel is never asked');
+  });
+
+  it('kernels one after another: only the current install looks, in its own kernel', () => {
+    const a = noting('a');
+    const b = noting('b');
+    moduleHook.install(a);
+    const first = Module._resolveFilename;
+    moduleHook.uninstall();
+    moduleHook.install(b);
+    try {
+      a.asked.length = 0;
+      assert.equal(answer(Module._resolveFilename, b.own), b.own);
+      assert.equal(answer(Module._resolveFilename, a.own), 'MODULE_NOT_FOUND');
+      assert.deepEqual(a.asked, [], 'the earlier kernel is never asked');
+      b.asked.length = 0;
+      assert.equal(answer(first, b.own), 'MODULE_NOT_FOUND');
+      assert.deepEqual(b.asked, [], 'the earlier patch asks no kernel');
+    } finally {
+      moduleHook.uninstall();
+    }
+    assert.equal(Module._resolveFilename, native);
+  });
+
+  it("what no place serves is Node's own answer", () => {
+    moduleHook.install(noting('a'));
+    try {
+      for (const request of [
+        'node:fs',
+        'fs',
+        'metautil',
+        './helpers.js',
+        '../package.json',
+        './nope',
+        'xvfs-no-such-package',
+      ]) {
+        assert.equal(
+          answer(Module._resolveFilename, request),
+          answer(native, request),
+          request,
+        );
+      }
+      const paths = { paths: [__dirname] };
+      assert.equal(
+        answer(Module._resolveFilename, './helpers.js', paths),
+        answer(native, './helpers.js', paths),
+      );
+      assert.equal(
+        require.resolve('./helpers.js'),
+        path.join(__dirname, 'helpers.js'),
+      );
+    } finally {
+      moduleHook.uninstall();
+    }
+  });
+});
+
+// The Module.prototype._compile patch over its life, as the
+// _resolveFilename patch's: a patch kept past uninstall() compiles with the
+// function it replaced and asks no kernel, not even after another kernel
+// installs; install() twice wraps once; uninstall() puts back a patch
+// found there; require() goes on as before.
+describe('module-hook: the _compile patch over its life', () => {
+  let native;
+  const base = path.join(__dirname, 'xvfs-unmounted');
+  // A kernel that notes the files it is asked cached data for and serves
+  // none; once closed, a question is an error.
+  const noting = () => {
+    let closed = false;
+    const asked = [];
+    return {
+      resolveModule: () => null,
+      bytecode: (filename) => {
+        if (!filename.startsWith(base)) return null;
+        asked.push(filename);
+        if (closed) throw new Error('a closed kernel was asked');
+        return Buffer.from('not cached data');
+      },
+      asked,
+      close: () => {
+        closed = true;
+      },
+    };
+  };
+  // `content` compiled by `patch` as Node calls Module.prototype._compile:
+  // on a module of `name`.
+  const compileWith = (patch, name, content) => {
+    const filename = path.join(base, name);
+    const mod = new Module(filename, module);
+    mod.filename = filename;
+    mod.paths = Module._nodeModulePaths(base);
+    patch.call(mod, content, filename);
+    return mod.exports;
+  };
+
+  before(() => {
+    native = Module.prototype._compile;
+  });
+
+  it('a patch kept past uninstall() compiles with what it replaced and asks no kernel', () => {
+    const replaced = [];
+    const theirs = function compile(content, filename, ...rest) {
+      replaced.push(path.basename(filename));
+      // eslint-disable-next-line no-invalid-this
+      return native.call(this, content, filename, ...rest);
+    };
+    Module.prototype._compile = theirs;
+    try {
+      const a = noting();
+      moduleHook.install(a);
+      const kept = Module.prototype._compile;
+      moduleHook.uninstall();
+      a.close();
+      assert.equal(compileWith(kept, 'k.js', 'module.exports = 42;'), 42);
+      assert.deepEqual(replaced, ['k.js'], 'the function it replaced');
+      assert.deepEqual(a.asked, [], 'the kernel is never asked');
+    } finally {
+      Module.prototype._compile = native;
+    }
+  });
+
+  it('kernels one after another: a kept patch is not sent to the new kernel', () => {
+    const a = noting();
+    const b = noting();
+    moduleHook.install(a);
+    const first = Module.prototype._compile;
+    moduleHook.uninstall();
+    a.close();
+    moduleHook.install(b);
+    try {
+      assert.equal(compileWith(first, 'first.js', 'module.exports = 1;'), 1);
+      assert.deepEqual(
+        b.asked,
+        [],
+        'the earlier patch asks the new kernel nothing',
+      );
+      const current = Module.prototype._compile;
+      assert.equal(
+        compileWith(current, 'current.js', 'module.exports = 2;'),
+        2,
+      );
+      assert.deepEqual(b.asked, [path.join(base, 'current.js')]);
+      assert.deepEqual(a.asked, []);
+    } finally {
+      moduleHook.uninstall();
+    }
+    assert.equal(Module.prototype._compile, native);
+  });
+
+  it('install() twice wraps once', () => {
+    const a = noting();
+    moduleHook.install(a);
+    const patch = Module.prototype._compile;
+    try {
+      moduleHook.install(noting());
+      assert.equal(Module.prototype._compile, patch, 'no second wrapper');
+      assert.equal(compileWith(patch, 'once.js', 'module.exports = 3;'), 3);
+      assert.deepEqual(a.asked, [path.join(base, 'once.js')]);
+    } finally {
+      moduleHook.uninstall();
+    }
+    assert.equal(Module.prototype._compile, native, 'nothing left over');
+  });
+
+  it('uninstall() puts back a patch that was there before install()', () => {
+    const theirs = function compile(...args) {
+      // eslint-disable-next-line no-invalid-this
+      return native.apply(this, args);
+    };
+    Module.prototype._compile = theirs;
+    try {
+      moduleHook.install(noting());
+      assert.notEqual(Module.prototype._compile, theirs);
+      moduleHook.uninstall();
+      assert.equal(Module.prototype._compile, theirs);
+    } finally {
+      Module.prototype._compile = native;
+    }
+  });
+
+  it('require() goes on as before: cached data while installed, Node after', async () => {
+    const root = writeTree(tmpDir('modhook-compile-life'), {
+      'lib/a.js': 'module.exports = "a";',
+      'lib/b.js': 'module.exports = "b";',
+      'lib/c.js': 'module.exports = "c";',
+    });
+    const k = await kernel(root, { lib: { require: { compile: ['js'] } } });
+    const at = (name) => path.join(root, 'lib', name);
+    const cached = (name) =>
+      scripts.filter((s) => s.filename === at(name)).length;
+    spyScripts();
+    try {
+      moduleHook.install(k);
+      assert.equal(require(at('a.js')), 'a');
+      assert.equal(cached('a.js'), 1, 'through its cached data');
+      moduleHook.uninstall();
+      assert.equal(Module.prototype._compile, native);
+      assert.equal(require(at('b.js')), 'b', 'from disk, by Node');
+      assert.equal(cached('b.js'), 0);
+      moduleHook.install(k);
+      assert.equal(require(at('c.js')), 'c');
+      assert.equal(cached('c.js'), 1, 'installed again: cached data again');
+    } finally {
+      unspy();
+      moduleHook.uninstall();
+      k.close();
+      rm(root);
+    }
+  });
+});
+
+describe('module-hook: cached data across isolates', () => {
   it('a worker attached to the snapshot compiles with cached data V8 does not reject', async () => {
     const { Worker } = require('node:worker_threads');
     const { until, within } = require('./helpers.js');
     const root = writeTree(tmpDir('modhook-worker'), {
       'lib/m.js': 'module.exports = [1, 2, 3].map((x) => x * 2);',
     });
-    const k = await kernel(root, { lib: { require: true } });
+    const k = await kernel(root, {
+      lib: { require: { ext: ['json'], compile: ['js', 'cjs'] } },
+    });
     let worker = null;
     try {
       const { vfs, transferList } = k.link();
@@ -232,6 +680,89 @@ describe('module-hook: bytecode accepted across isolates', () => {
       rm(root);
     }
   });
+
+  // Cached data one thread's V8 rejects is that thread's alone: the module
+  // compiles from its source there, once, with nothing published again;
+  // the file, its companion and the version stay, and another thread still
+  // runs the cached data.
+  it('cached data a worker rejects: the source runs there, once; the file and the version stay', async () => {
+    const { Worker } = require('node:worker_threads');
+    const { within } = require('./helpers.js');
+    const root = writeTree(tmpDir('modhook-reject'), {
+      'lib/m.js':
+        'globalThis.__vfsRuns = (globalThis.__vfsRuns || 0) + 1;\n' +
+        'module.exports = [1, 2, 3].map((x) => x * 2);',
+    });
+    const k = await kernel(root, { lib: { require: { compile: ['js'] } } });
+    const run = async (damage) => {
+      const { vfs, transferList } = k.link();
+      const worker = new Worker(
+        `
+        const vm = require('node:vm');
+        const { parentPort, workerData } = require('node:worker_threads');
+        const { bytecodeKey } = require(${JSON.stringify(path.resolve(__dirname, '../lib/companion.js'))});
+        const seen = [];
+        const Real = vm.Script;
+        vm.Script = class extends Real {
+          constructor(code, options) {
+            super(code, options);
+            if (options?.cachedData) seen.push(this.cachedDataRejected);
+          }
+        };
+        const kernel = require(${JSON.stringify(path.resolve(__dirname, '..'))}).attach();
+        if (workerData.damage) {
+          // This thread's own projection of the companion, nothing shared.
+          const { files } = kernel.registry.get('lib');
+          const key = bytecodeKey('/m.js');
+          files.set(key, { ...files.get(key), data: Buffer.from('not cached data') });
+        }
+        const result = require(workerData.file);
+        parentPort.postMessage({ result, seen, runs: globalThis.__vfsRuns });
+        `,
+        {
+          eval: true,
+          workerData: { vfs, damage, file: path.join(root, 'lib', 'm.js') },
+          transferList,
+        },
+      );
+      try {
+        return await within(
+          new Promise((resolve, reject) => {
+            worker.once('message', resolve);
+            worker.once('error', reject);
+          }),
+          'the answer of the worker',
+        );
+      } finally {
+        await worker.terminate();
+      }
+    };
+    try {
+      const place = k.registry.get('lib');
+      const source = place.files.get('/m.js');
+      const companion = place.files.get(bytecodeKey('/m.js'));
+      const version = k.version;
+      let published = 0;
+      k.on('publish', () => published++);
+      assert.deepEqual(await run(true), {
+        result: [2, 4, 6],
+        seen: [true],
+        runs: 1,
+      });
+      assert.deepEqual(await run(false), {
+        result: [2, 4, 6],
+        seen: [false],
+        runs: 1,
+      });
+      assert.equal(k.version, version);
+      assert.equal(published, 0, 'nothing published again');
+      assert.equal(place.files.get('/m.js'), source);
+      assert.equal(place.files.get(bytecodeKey('/m.js')), companion);
+    } finally {
+      k.close();
+      rm(root);
+    }
+  });
 });
 
 describe('module-hook: strict', () => {
@@ -250,6 +781,15 @@ describe('module-hook: strict', () => {
       );
       assert.equal(require(path.join(root, 'lib', 'a.js')), 'a');
       assert.throws(() => require(path.join(root, 'lib', 'late.js')), {
+        code: 'MODULE_NOT_FOUND',
+      });
+      // require.resolve() refuses what require() refuses, on every Node
+      // version, though Node's own resolver would find the file on disk.
+      assert.equal(
+        require.resolve(path.join(root, 'lib', 'a.js')),
+        path.join(root, 'lib', 'a.js'),
+      );
+      assert.throws(() => require.resolve(path.join(root, 'lib', 'late.js')), {
         code: 'MODULE_NOT_FOUND',
       });
       assert.throws(() => require(path.join(root, 'lib', 'nope')), {
@@ -293,7 +833,7 @@ describe('module-hook: dot-prefixed directories inside a place', () => {
     });
     const k = await kernel(
       root,
-      { lib: { require: { ext: ['js'] }, import: { ext: ['mjs'] } } },
+      { lib: { require: { compile: ['js'] }, import: { ext: ['mjs'] } } },
       { strict: true },
     );
     moduleHook.install(k);

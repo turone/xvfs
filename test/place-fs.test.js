@@ -357,7 +357,7 @@ describe('PlaceFs: memory mutations', () => {
         provider: 'map',
         origin: 'virtual',
         fs: { writable: true },
-        require: true,
+        require: { compile: ['js'] },
       },
     });
     mem = k.fs('mem');
@@ -532,13 +532,13 @@ describe('PlaceFs: a virtual rename keeps the metadata', () => {
       provider: 'sab',
       origin: 'virtual',
       fs: { writable: true, compress: { encodings: ['gzip'], ext: ['js'] } },
-      require: true,
+      require: { compile: ['js'] },
     },
     'map + virtual': {
       provider: 'map',
       origin: 'virtual',
       fs: { writable: true },
-      require: true,
+      require: { compile: ['js'] },
     },
   };
 

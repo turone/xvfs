@@ -29,8 +29,9 @@ curl http://localhost:3000/hello   # /hello replaced with new body at +6 s
   used by the agent.
 - The module hook resolves absolute paths inside the place even when the
   file does not exist on disk (map places have no disk backing), and
-  `require: true` gives each written route V8 bytecode.
+  `require: { compile: ['js'] }` gives each written route V8 bytecode.
 - Hot reload = `delete require.cache[absPath]` after each write. The next
   `require()` recompiles from the updated buffer.
-- `require: true` already compiles V8 bytecode (`require.compile` defaults
-  to `true`); it is rebuilt on every write automatically.
+- The bytecode is rebuilt on every write automatically; `require: true`
+  alone would compile nothing — only what `require.compile` lists gets
+  cached data.

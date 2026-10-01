@@ -34,7 +34,7 @@ describe('SEA provider', () => {
         bundle: {
           provider: 'sea',
           fs: { ext: ['html', 'css', 'js'], zeroCopy: true },
-          require: true,
+          require: { compile: ['js'] },
         },
       }),
       { appRoot: root, console: quiet, seaModule: seaModule(assets) },

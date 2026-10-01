@@ -58,10 +58,11 @@ stored frozen with the entry and read in every thread with `meta(key)`. The
 library ships the mechanism and no preparers. → README
 [Preparation](../README.md#preparation-prepare).
 
-**V8 cached data, built once.** `require: { compile: true }` compiles
-CommonJS sources on the main thread and stores the bytecode next to the
-source; a worker's `require()` gets it as `cachedData` and skips parsing
-and compilation. `fs.script.compile` does the same for the bare source, for
+**V8 cached data, built once.** `require.compile` — the extensions it
+lists, a template a module requires by its full name included, and
+nothing else — compiles CommonJS sources on the main thread and stores
+the bytecode next to the source; a worker's `require()` gets it as
+`cachedData` and skips parsing and compilation. `fs.script.compile` does the same for the bare source, for
 code that builds its own `vm.Script` (`PlaceFs.script(key)`). An update
 rebuilds the bytecode and ships it in the same message as the source. A
 `map` place compiles in its own thread on every write. ESM has no bytecode
@@ -343,12 +344,14 @@ debounce. → [integration.md → Generated code with hot reload](integration.md
 
 ### Shared module bytecode
 
-`require: { compile: true }` on the places that hold the application's
-CommonJS modules. `initialize()` compiles each source once; the module
-hook's `_compile` hands the bytecode to `vm.Script` as `cachedData` in
-every worker, so V8 skips parsing and compilation, lazy functions included.
+`require.compile` listing their extensions on the places that hold the
+application's CommonJS modules (`require: true` alone compiles
+nothing). `initialize()`
+compiles each source once; the module hook's `_compile` hands the
+bytecode to `vm.Script` as `cachedData` in every worker, so V8 skips
+parsing and compilation, lazy functions included.
 `fs.script.compile` gives the same to code that runs sources through
-`vm.Script` itself ([integration.md → Sharing bytecode with `metavm`](integration.md#sharing-bytecode-with-metavm)).
+`vm.Script` itself ([integration.md → Cached data in your own `vm.Script`](integration.md#cached-data-in-your-own-vmscript)).
 
 **Against the usual way** — every worker parsing and compiling the same
 sources; Node's compile cache (`module.enableCompileCache()`: on disk,
@@ -448,7 +451,7 @@ other processes write into.
 ```js
 defaults: { strict: true },
 places: {
-  tools: { fs: { ext: ['js'] }, require: { ext: ['js'], compile: true } },
+  tools: { fs: { ext: ['js'] }, require: { compile: ['js'] } },
   workspace: {
     provider: 'map',
     origin: 'virtual',
@@ -480,7 +483,7 @@ process, a container — around it; xvfs keeps what runs inside it orderly.
 ### Plugin code generated at run time
 
 A `map + virtual` place per worker or agent — per-thread, synchronous,
-`require: true` compiles on every write — or a `sab + virtual` place when
+`require.compile` compiles on every write — or a `sab + virtual` place when
 every thread must run the same generated code: prepared and compiled once
 on the main thread, published to all before the writer's Promise resolves.
 `strict: true` closes the rest of `appRoot`.

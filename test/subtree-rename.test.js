@@ -115,9 +115,9 @@ describe('virtual subtree rename', () => {
         },
         'fs.script.compile': {
           ...config,
-          fs: { ...config.fs, script: { ext: ['js'], compile: true } },
+          fs: { ...config.fs, script: { compile: ['js'] } },
         },
-        'require.compile': { ...config, require: { compile: true } },
+        'require.compile': { ...config, require: { compile: ['js'] } },
       };
       const preparers = { wrap: (raw) => `(${raw})` };
       for (const [what, placeConfig] of Object.entries(unsupported)) {

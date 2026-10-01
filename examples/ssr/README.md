@@ -6,8 +6,8 @@ cached data -> vm.Script in a worker`.
 A `.tmpl` file is plain text with `{{ dotted.path }}` placeholders. The
 `ssr` preparer in `run.js` is the whole compiler — about a dozen lines —
 turning it once into the source of a self-contained render function; no
-template engine, no dependency. `fs.script.compile` builds V8 cached data
-from exactly that source. Each worker gets the bundle from
+template engine, no dependency. `fs.script.compile` — `['tmpl']` — builds
+V8 cached data from exactly that source. Each worker gets the bundle from
 `PlaceFs.script(key)` — `{ source, cachedData, scriptOptions, meta }` —
 builds its own `vm.Script` and runs it.
 

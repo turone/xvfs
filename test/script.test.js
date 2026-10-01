@@ -6,6 +6,9 @@ const fs = require('node:fs');
 const path = require('node:path');
 const vm = require('node:vm');
 const { Worker } = require('node:worker_threads');
+const { pathToFileURL } = require('node:url');
+const { VfsConfig } = require('../lib/config.js');
+const moduleHook = require('../lib/adapters/module-hook.js');
 const { createBytecode } = require('../lib/pipeline.js');
 const { bytecodeKey } = require('../lib/companion.js');
 const {
@@ -127,7 +130,7 @@ describe('script domain: live reload in a linked worker', () => {
       });
       parentPort.postMessage({
         source: bundle.source,
-        hasCachedData: bundle.cachedData !== null,
+        hasCachedData: bundle.cachedData !== undefined,
         rejected: script.cachedDataRejected,
         result: script.runInThisContext()({ user: 'ann' }),
       });
@@ -155,7 +158,7 @@ describe('script domain: live reload in a linked worker', () => {
     root = writeTree(tmpDir('script-live'), { 'api/h.js': V1 });
     k = await kernel(
       root,
-      { api: { fs: { ext: ['js', 'cjs'], prepare: 'wrap', script: true } } },
+      { api: { fs: { prepare: 'wrap', script: { compile: ['js', 'cjs'] } } } },
       { watch: true, watchTimeout: 60 },
       {
         preparers: {
@@ -223,5 +226,145 @@ describe('script domain: live reload in a linked worker', () => {
     assert.equal(r.hasCachedData, true);
     assert.equal(r.rejected, false, 'compatibility only, not a source check');
     assert.equal(r.result, 'howdy ann');
+  });
+});
+
+// A bundle without a companion has `cachedData` undefined — never null,
+// which vm.Script refuses — so `{ ...scriptOptions, cachedData }` holds for
+// every bundle. A rejection is one isolate's: the source runs as it is
+// there, and the file, its companion and its version stay as published.
+describe('script domain: no cached data, and cached data an isolate rejects', () => {
+  const RUN = `
+    const vm = require('node:vm');
+    const { parentPort, workerData } = require('node:worker_threads');
+    const { attach } = require(${JSON.stringify(path.resolve(__dirname, '../index.js'))});
+    const bundle = attach().fs('v').script('/s.js');
+    if (workerData.damage) bundle.cachedData.fill(0);
+    const script = new vm.Script(bundle.source, {
+      ...bundle.scriptOptions,
+      cachedData: bundle.cachedData,
+    });
+    parentPort.postMessage({
+      rejected: script.cachedDataRejected,
+      result: script.runInThisContext()('ann'),
+    });
+  `;
+  const inWorker = async (k, damage) => {
+    const { vfs, transferList } = k.link();
+    const worker = new Worker(RUN, {
+      eval: true,
+      workerData: { vfs, damage },
+      transferList,
+    });
+    try {
+      return await within(
+        new Promise((resolve, reject) => {
+          worker.once('message', resolve);
+          worker.once('error', reject);
+        }),
+        'the answer of the worker',
+      );
+    } finally {
+      await worker.terminate();
+    }
+  };
+  const SOURCE_FN = "(user) => 'hi ' + user";
+
+  it('a source of fs.script.ext alone: cachedData undefined, which vm.Script takes', async () => {
+    const root = tmpDir('script-plain');
+    const k = await kernel(root, {
+      v: { origin: 'virtual', fs: { writable: true, script: { ext: ['js'] } } },
+    });
+    try {
+      await k.fs('v').writeFile('/s.js', SOURCE_FN);
+      const bundle = k.fs('v').script('/s.js');
+      assert.ok(Object.hasOwn(bundle, 'cachedData'));
+      assert.equal(bundle.cachedData, undefined);
+      const { source, cachedData, scriptOptions } = bundle;
+      const script = new vm.Script(source, { ...scriptOptions, cachedData });
+      assert.equal(script.runInThisContext()('ann'), 'hi ann');
+      assert.equal((await inWorker(k, false)).result, 'hi ann');
+    } finally {
+      k.close();
+      rm(root);
+    }
+  });
+
+  it('cached data a worker rejects: the source runs there; the file, its companion and its version stay', async () => {
+    const root = tmpDir('script-reject');
+    const k = await kernel(root, {
+      v: {
+        origin: 'virtual',
+        fs: { writable: true, script: { compile: ['js'] } },
+      },
+    });
+    try {
+      const files = k.fs('v');
+      await files.writeFile('/s.js', SOURCE_FN);
+      const version = k.version;
+      const bundle = files.script('/s.js');
+      assert.ok(bundle.cachedData);
+      let published = 0;
+      k.on('publish', () => published++);
+      assert.deepEqual(await inWorker(k, true), {
+        rejected: true,
+        result: 'hi ann',
+      });
+      assert.deepEqual(await inWorker(k, false), {
+        rejected: false,
+        result: 'hi ann',
+      });
+      assert.equal(k.version, version);
+      assert.equal(files.version('/s.js'), version);
+      assert.equal(published, 0, 'nothing published again');
+      assert.deepEqual(files.script('/s.js'), bundle);
+    } finally {
+      k.close();
+      rm(root);
+    }
+  });
+});
+
+// `fs.script.ext: ['mjs']` hands out the text of a module and nothing more:
+// no cached data (compile refuses mjs), no module semantics — a vm.Script
+// of it does not parse — and no import(), which is the import domain's.
+describe('script domain: mjs', () => {
+  it('a bundle of text: no cached data, no module semantics, no import()', async () => {
+    const root = tmpDir('script-mjs');
+    const k = await kernel(root, {
+      v: {
+        provider: 'map',
+        origin: 'virtual',
+        fs: { writable: true, script: { ext: ['mjs'] } },
+      },
+    });
+    moduleHook.install(k);
+    try {
+      k.fs('v').writeFile('/m.mjs', 'export default 1;');
+      assert.deepEqual(k.fs('v').script('/m.mjs'), {
+        source: 'export default 1;',
+        cachedData: undefined,
+        scriptOptions: null,
+        meta: null,
+        version: null,
+      });
+      assert.throws(() => new vm.Script('export default 1;'), SyntaxError);
+      const file = path.join(root, 'v', 'm.mjs');
+      assert.equal(k.resolveModule(file, 'import'), null);
+      await assert.rejects(import(pathToFileURL(file).href), {
+        code: 'ERR_MODULE_NOT_FOUND',
+      });
+      assert.throws(
+        () =>
+          new VfsConfig({
+            places: { v: { fs: { script: { compile: ['mjs'] } } } },
+          }),
+        /fs\.script\.compile: extension "mjs" gets no cached data/,
+      );
+    } finally {
+      moduleHook.uninstall();
+      k.close();
+      rm(root);
+    }
   });
 });

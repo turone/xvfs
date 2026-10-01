@@ -4,6 +4,8 @@ const { describe, it } = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
+const v8 = require('node:v8');
+const vm = require('node:vm');
 const { once } = require('node:events');
 const { pathToFileURL } = require('node:url');
 const { Worker } = require('node:worker_threads');
@@ -25,6 +27,9 @@ const {
   nextMessage,
   until,
   within,
+  turn,
+  activeResources,
+  activeSince,
 } = require('./helpers.js');
 
 // `prepare` is declared by one domain (fs, require, import) and prepares the
@@ -93,16 +98,34 @@ describe('prepare config: forms', () => {
     assert.equal(p.scanExt, null);
   });
 
-  it('fs.script.ext is not the scope of a short fs.prepare', () => {
+  it('a short fs.prepare covers what fs.ext, fs.script.ext and fs.script.compile list', () => {
+    const p = placeOf({
+      fs: {
+        ext: ['css'],
+        prepare: 'styles',
+        script: { ext: ['mjs'], compile: ['js'] },
+      },
+    });
+    assert.deepEqual(p.prepare, { css: 'styles', mjs: 'styles', js: 'styles' });
+    assert.deepEqual(p.fs.ext, ['css', 'js', 'mjs']);
+    assert.deepEqual(
+      placeOf({ fs: { prepare: 'api', script: { compile: ['js'] } } }).prepare,
+      { js: 'api' },
+    );
+    assert.deepEqual(
+      placeOf({ fs: { prepare: 'api', script: { ext: ['mjs'] } } }).prepare,
+      { mjs: 'api' },
+    );
+    // No list names an extension: `script: true` is gone, and with it the
+    // js and cjs it brought in.
     rejects(
-      { fs: { prepare: 'api', script: { ext: ['js'] } } },
+      { fs: { prepare: 'api', script: true } },
+      /fs\.script must be false or an object/,
+    );
+    rejects(
+      { fs: { prepare: 'api', script: false } },
       /fs\.prepare: "api" needs a finite ext list/,
     );
-    const p = placeOf({
-      fs: { ext: ['css'], prepare: 'styles', script: { ext: ['js'] } },
-    });
-    assert.deepEqual(p.prepare, { css: 'styles' }, 'js is not covered');
-    assert.deepEqual(p.fs.ext, ['css', 'js']);
   });
 
   it('prepare neither adds nor removes extensions', () => {
@@ -119,14 +142,14 @@ describe('prepare config: forms', () => {
   it('a domain without prepare shares the file prepared by another', () => {
     const p = placeOf({
       fs: { ext: ['js', 'json'] },
-      require: { ext: ['js'], prepare: 'module', compile: true },
+      require: { compile: ['js'], prepare: 'module' },
     });
     assert.deepEqual(p.prepare, { js: 'module' });
   });
 
   it('resolved config is frozen and cloneable', () => {
     const [p] = places({
-      p: { fs: { ext: ['js'], prepare: 'api', script: { compile: true } } },
+      p: { fs: { prepare: 'api', script: { compile: ['js'] } } },
     });
     assert.ok(Object.isFrozen(p.prepare));
     assert.throws(() => {
@@ -249,7 +272,7 @@ describe('prepare config: errors', () => {
           prepare: 'x',
           compress: { encodings: ['gzip'], retainRaw: false },
         },
-        require: { compile: false },
+        require: true,
       },
       /retainRaw: false is incompatible with prepare/,
     );
@@ -494,13 +517,13 @@ describe('prepare pipeline: every consumer sees the canonical content', () => {
   const spec = {
     app: {
       fs: {
-        ext: ['js', 'css'],
+        ext: ['css'],
         zeroCopy: true,
         prepare: { code: ['js'], styles: ['css'] },
-        script: { ext: ['js'], compile: true },
+        script: { compile: ['js'] },
         compress: { encodings: ['gzip'] },
       },
-      require: { ext: ['js'], compile: true },
+      require: { compile: ['js'] },
     },
     esm: { import: { ext: ['mjs'], prepare: 'code' } },
   };
@@ -601,8 +624,8 @@ describe('prepare pipeline: every consumer sees the canonical content', () => {
       { 'all/a.js': RAW },
       {
         all: {
-          fs: { ext: ['js'], prepare: 'code', script: { compile: true } },
-          require: { ext: ['js'], compile: true },
+          fs: { prepare: 'code', script: { compile: ['js'] } },
+          require: { compile: ['js'] },
           import: { ext: ['js'] },
         },
       },
@@ -629,8 +652,8 @@ describe('prepare pipeline: every consumer sees the canonical content', () => {
       { 'lib/a.js': RAW },
       {
         lib: {
-          fs: { ext: ['js', 'json'], script: { ext: ['js'] } },
-          require: { ext: ['js'], prepare: 'code', compile: true },
+          fs: { ext: ['json'], script: { compile: ['js'] } },
+          require: { compile: ['js'], prepare: 'code' },
         },
       },
       {
@@ -882,9 +905,8 @@ describe('prepare pipeline: the preparer contract', () => {
       {
         fs: {
           writable: true,
-          ext: ['js'],
           prepare: { p: ['js'] },
-          script: { compile: true },
+          script: { compile: ['js'] },
         },
       },
     );
@@ -941,7 +963,7 @@ describe('prepare pipeline: the preparer contract', () => {
         if (fail) throw new Error('bad input');
         return raw.toString();
       },
-      { require: { ext: ['js'], compile: true } },
+      { require: { compile: ['js'] } },
     );
     try {
       await v.writeFile('/a.js', 'module.exports = 1;');
@@ -956,6 +978,111 @@ describe('prepare pipeline: the preparer contract', () => {
     }
   });
 
+  // The preparer of the smallest file throws; the larger ones, published
+  // first (#publishAll: largest first), have staged their sources and
+  // companions by then. initialize() rejects with that very error and
+  // closes the kernel: nothing is committed, published or versioned, every
+  // projection is empty, and the kernel keeps no runtime reference — the
+  // pool goes whole with what the failed attempt allocated in it. Last, as
+  // an extra check, V8 collects that pool.
+  it('a preparer that throws in initialize(): rejected, closed, nothing kept', async () => {
+    const spec = {
+      sab: {
+        fs: {
+          prepare: { p: ['js'] },
+          script: { compile: ['js'] },
+          compress: { encodings: ['gzip'], ext: ['js'] },
+        },
+        require: { compile: ['js'] },
+      },
+      map: {
+        provider: 'map',
+        fs: { prepare: { p: ['js'] }, script: { compile: ['js'] } },
+        require: { compile: ['js'] },
+      },
+    };
+    for (const [provider, place] of Object.entries(spec)) {
+      const files = { 'app/bad.js': 'bad' };
+      for (let i = 0; i < 6; i++) {
+        files[`app/ok${i}.js`] = `module.exports = ${i}; // ${'x'.repeat(200)}`;
+      }
+      const root = writeTree(tmpDir('vfs-prep-init'), files);
+      const baseline = activeResources();
+      const boom = new Error('bad input');
+      let pool = null; // the kernel's pool, as its preparer saw it
+      let closed = false;
+      let late = 0; // preparer calls once initialize() rejected
+      const k = new VfsKernel(config({ app: place }, { watch: true }), {
+        appRoot: root,
+        console: quiet,
+        preparers: {
+          p: (raw) => {
+            pool ??= k.cache;
+            if (closed) late++;
+            if (raw.toString() === 'bad') throw boom;
+            return raw;
+          },
+        },
+      });
+      const events = [];
+      k.on('publish', () => events.push('publish'));
+      k.on('close', () => events.push('close'));
+      try {
+        await assert.rejects(k.initialize(), (err) => {
+          assert.equal(err, boom, provider);
+          return true;
+        });
+        closed = true;
+        // Closed.
+        assert.equal(k.state, 'closed', provider);
+        assert.equal(k.ready, false, provider);
+        assert.equal(k.registry.get('app').preparationFailures, 1, provider);
+        await turn();
+        assert.deepEqual(events, ['close'], `${provider}: no publish`);
+        // No commit, no version: the larger files allocated in the pool,
+        // none of it reached its index.
+        let used = 0;
+        for (const id of pool.pool.segments.keys()) {
+          used += pool.registry.used(id);
+        }
+        if (provider === 'sab') assert.ok(used > 0, 'staged, then left');
+        const index = pool.indexes.get('app')?.entries ?? new Map();
+        assert.deepEqual([...index], [], `${provider}: nothing committed`);
+        assert.equal(k.version, 0, `${provider}: no version`);
+        assert.equal(k.nextUpdateId, 0, `${provider}: no vfs-update`);
+        // Empty projections.
+        assert.equal(k.registry.get('app').files.size, 0, provider);
+        assert.equal(k.sources.size, 0, provider);
+        // No runtime reference: no pool, no watcher, no work left.
+        assert.equal(k.cache, null, provider);
+        assert.equal(k.compressor, null, provider);
+        assert.equal(k.segmentsMap.size, 0, provider);
+        assert.equal(k.retired.size, 0, provider);
+        assert.equal(k.links.size, 0, provider);
+        assert.equal(k.watcher, null, `${provider}: no watcher`);
+        assert.equal(k.rechecks.size, 0, provider);
+        assert.equal(late, 0, `${provider}: no preparer after the rejection`);
+        await until(() => Object.keys(activeSince(baseline)).length === 0);
+        assert.deepEqual(activeSince(baseline), {}, provider);
+        // Extra: once the test lets it go, nothing holds the pool.
+        v8.setFlagsFromString('--expose-gc');
+        const gc = vm.runInNewContext('gc');
+        const weak = new WeakRef(pool);
+        pool = null;
+        let collected = false;
+        for (let i = 0; i < 10 && !collected; i++) {
+          await turn();
+          gc();
+          collected = weak.deref() === undefined;
+        }
+        assert.ok(collected, `${provider}: the pool is collected`);
+      } finally {
+        k.close();
+        rm(root);
+      }
+    }
+  });
+
   it('a watcher-side failure keeps the previous version', async () => {
     const warnings = [];
     let fail = false;
@@ -963,7 +1090,7 @@ describe('prepare pipeline: the preparer contract', () => {
       { 'app/a.js': RAW },
       {
         app: {
-          fs: { ext: ['js'], prepare: 'code', script: { compile: true } },
+          fs: { prepare: 'code', script: { compile: ['js'] } },
         },
       },
       {
@@ -1026,12 +1153,11 @@ describe('prepare pipeline: publication', () => {
       {
         app: {
           fs: {
-            ext: ['js'],
             prepare: 'code',
-            script: { compile: true },
+            script: { compile: ['js'] },
             compress: { encodings: ['gzip'] },
           },
-          require: { ext: ['js'], compile: true },
+          require: { compile: ['js'] },
         },
       },
       { code },
@@ -1083,8 +1209,8 @@ describe('prepare pipeline: publication', () => {
       { 'app/a.js': RAW },
       {
         app: {
-          fs: { ext: ['js'], prepare: 'code', script: { compile: true } },
-          require: { ext: ['js'], compile: true },
+          fs: { prepare: 'code', script: { compile: ['js'] } },
+          require: { compile: ['js'] },
         },
       },
       { code: prep.fn },
@@ -1140,12 +1266,12 @@ describe('prepare pipeline: publication', () => {
       {
         app: {
           fs: {
-            ext: ['js', 'bin'],
+            ext: ['bin'],
             prepare: { code: ['js'] },
-            script: { compile: true },
+            script: { compile: ['js'] },
             compress: { encodings: ['gzip'], ext: ['js'] },
           },
-          require: { ext: ['js'], compile: true },
+          require: { compile: ['js'] },
         },
       },
       { code: prep.fn },

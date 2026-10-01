@@ -62,7 +62,7 @@ describe('writeFiles: one publication', () => {
       v: {
         origin: 'virtual',
         fs: { writable: true },
-        require: { compile: true },
+        require: { compile: ['js'] },
       },
     });
     const w = worker(k);
@@ -484,7 +484,7 @@ describe('writeFiles: all or nothing', () => {
 
   it('a script source that does not compile refuses the set: ENOTSUP about it', async () => {
     const root = tmpDir('vfs-batch');
-    const script = { writable: true, script: { ext: ['js'] } };
+    const script = { writable: true, script: { compile: ['js'] } };
     const k = await kernel(root, {
       v: { origin: 'virtual', fs: script },
       m: { provider: 'map', origin: 'virtual', fs: script },
@@ -624,7 +624,7 @@ describe('writeFiles: among other mutations', () => {
     const k = await kernel(root, {
       v: {
         origin: 'virtual',
-        fs: { writable: true, script: { ext: ['js'] } },
+        fs: { writable: true, script: { compile: ['js'] } },
       },
     });
     try {
@@ -833,7 +833,7 @@ describe('writeFiles: map places', () => {
           provider: 'map',
           origin: 'virtual',
           fs: { writable: true, prepare: { upper: ['txt'] } },
-          require: { compile: true },
+          require: { compile: ['js'] },
         },
       },
       {},

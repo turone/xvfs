@@ -275,7 +275,7 @@ describe('VfsKernel: lifecycle', () => {
 
   it('fs() explains unknown places, missing fs domain and passthrough providers', async () => {
     const k = await kernel(root, {
-      site: { require: { compile: false } },
+      site: { require: true },
       disk: { provider: 'disk', fs: true },
       nd: { provider: 'node-default', fs: true },
     });
@@ -316,8 +316,8 @@ describe('VfsKernel: providers', () => {
 
   it('sab: scans by scanExt, oversize files stay on disk, bytecode for require', async () => {
     const k = await kernel(root, {
-      site: { fs: true, require: true },
-      lib: { require: true },
+      site: { fs: true, require: { ext: ['json'], compile: ['js', 'cjs'] } },
+      lib: { require: { ext: ['json'], compile: ['js', 'cjs'] } },
     });
     try {
       const site = k.fs('site');
@@ -345,8 +345,8 @@ describe('VfsKernel: providers', () => {
   it('resolveModule applies domain, ext and provider rules', async () => {
     const k = await kernel(root, {
       site: { fs: true, import: { ext: ['js'] } },
-      lib: { require: { ext: ['js'], compile: false } },
-      d: { provider: 'disk', require: { compile: false } },
+      lib: { require: { ext: ['js'] } },
+      d: { provider: 'disk', require: true },
       n: { provider: 'node-default', fs: true },
     });
     try {
@@ -384,7 +384,7 @@ describe('VfsKernel: providers', () => {
       root,
       {
         lib: { require: true },
-        d: { provider: 'disk', require: { compile: false } },
+        d: { provider: 'disk', require: true },
       },
       { strict: true },
     );
@@ -658,7 +658,7 @@ describe('VfsKernel: snapshot, workers, ACK', () => {
   after(() => rm(root));
 
   const places = {
-    site: { fs: true, require: true },
+    site: { fs: true, require: { ext: ['json'], compile: ['js', 'cjs'] } },
     mem: { provider: 'map', origin: 'virtual', fs: { writable: true } },
     d: { provider: 'disk', fs: true },
   };

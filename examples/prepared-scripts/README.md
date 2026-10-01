@@ -42,7 +42,8 @@ main thread sees rules/greet.handler as (function (name) {…
   `VfsKernel` (never part of the config).
 - One canonical content per file: reads, `script()` bundles and cached data
   all refer to the prepared source.
-- `fs.script` with a custom extension, and `cachedDataRejected === false` in
-  another thread than the one that compiled.
+- `fs.script` with a custom extension — `script: { compile: ['handler'] }`
+  — and `cachedDataRejected === false` in another thread than the one that
+  compiled.
 - Worker → main mutations of a `sab + virtual` place: prepared and compiled
   once by the main thread, visible to the writer when its Promise settles.

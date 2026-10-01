@@ -26,8 +26,9 @@ export type Links = 'deny' | 'verify';
 
 /**
  * `prepare` of a domain: a preparer name for every extension of the
- * domain's own finite `ext`, or `{ name: [ext, …] }`. Names are registered
- * as functions in the kernel option `preparers`.
+ * domain's effective, finite `ext` — in fs, what `ext`, `script.ext` and
+ * `script.compile` list — or `{ name: [ext, …] }`. Names are registered as
+ * functions in the kernel option `preparers`.
  */
 export type PrepareConfig =
   string | { readonly [preparer: string]: readonly string[] };
@@ -81,30 +82,54 @@ export interface CompressConfig {
   retainRaw?: boolean;
 }
 
-export interface ScriptConfig {
-  /** Sources compiled for `PlaceFs.script()`. Default `['js', 'cjs']`. */
+interface ScriptLists {
+  /** Sources without cached data: their bundle's `cachedData` is undefined. */
   ext?: readonly string[];
-  /** Build the `\0script:bytecode` companion. Default true. */
-  compile?: boolean;
+  /**
+   * Sources with cached data (the `\0script:bytecode` companion); each is
+   * a source of the domain too. Never `json` or `mjs`.
+   */
+  compile?: readonly string[];
 }
 
+/**
+ * Sources for `PlaceFs.script()`, named by the user — `ext`, `compile` or
+ * both; there are no defaults. Every extension is listed once in fs: in
+ * `fs.ext`, `ext` or `compile`.
+ */
+export type ScriptConfig = ScriptLists &
+  ({ ext: readonly string[] } | { compile: readonly string[] });
+
 export interface FsDomainConfig {
-  /** Visible extensions; absent = every file. */
+  /**
+   * Visible extensions besides those of `script`; absent = every file,
+   * unless `script` is on.
+   */
   ext?: readonly string[];
   writable?: boolean;
   zeroCopy?: boolean;
   compress?: CompressConfig | false | null;
-  script?: ScriptConfig | boolean;
+  /** An object of lists, or `false` (off). */
+  script?: ScriptConfig | false;
   prepare?: PrepareConfig;
   /** Disk-origin places only; default `'deny'` under strict, else `'disk'`. */
   fallback?: Fallback;
 }
 
+/**
+ * With neither `ext` nor `compile` (`require: true`, `{}`, `{ prepare }`):
+ * `ext: ['js', 'cjs', 'json']`, nothing compiled; a list given replaces
+ * that default. Cached data is built for the extensions of `compile`
+ * only. Every extension is listed once: in `ext` or `compile`.
+ */
 export interface RequireDomainConfig {
-  /** Default `['js', 'cjs', 'json']`. */
+  /** Extensions without cached data. */
   ext?: readonly string[];
-  /** Build the `\0require:bytecode` companion. Default true. */
-  compile?: boolean;
+  /**
+   * Extensions with cached data (the `\0require:bytecode` companion); each
+   * is an extension of the domain too. Never `json` or `mjs`.
+   */
+  compile?: readonly string[];
   prepare?: PrepareConfig;
 }
 
@@ -183,8 +208,10 @@ export interface ResolvedCompress {
 }
 
 export interface ResolvedScript {
+  /** Every script source: `compile`, then the extensions of `ext`. */
   readonly ext: readonly string[];
-  readonly compile: boolean;
+  /** Sources with cached data; empty when none. */
+  readonly compile: readonly string[];
 }
 
 export interface ResolvedFsDomain {
@@ -199,8 +226,10 @@ export interface ResolvedFsDomain {
 }
 
 export interface ResolvedRequireDomain {
+  /** Every extension of the domain: `compile`, then those of `ext`. */
   readonly ext: readonly string[];
-  readonly compile: boolean;
+  /** Extensions with cached data; empty when none. */
+  readonly compile: readonly string[];
 }
 
 export interface ResolvedImportDomain {
@@ -249,7 +278,14 @@ export class VfsConfig {
   /**
    * `appConfig` with the `--vfs.*` overrides of `argv` (after `--`)
    * applied: `--vfs.defaults.*`, `--vfs.places.<name>.*`, `--vfs.enable`
-   * and `--vfs.disable`.
+   * and `--vfs.disable`, then validated as a JS or JSON config is.
+   * `"true"` / `"false"` are booleans, a decimal a number; a setting that
+   * takes a list takes a comma-separated one —
+   * `--vfs.places.lib.require.compile=js,cjs`, one item included — which
+   * replaces the list of `appConfig`. A place whose name holds a dot can
+   * be overridden only when `appConfig.places` declares it — its key is
+   * read with the longest name declared there; flags alone cannot create
+   * such a place.
    */
   static fromArgv(argv: readonly string[], appConfig?: VfsRawConfig): VfsConfig;
 }

@@ -80,12 +80,7 @@ const config = new VfsConfig({
   places: {
     templates: {
       origin: 'virtual',
-      fs: {
-        writable: true,
-        ext: ['tmpl'],
-        prepare: 'ssr',
-        script: { ext: ['tmpl'], compile: true },
-      },
+      fs: { writable: true, prepare: 'ssr', script: { compile: ['tmpl'] } },
     },
   },
 });

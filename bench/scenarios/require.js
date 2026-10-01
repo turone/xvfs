@@ -55,8 +55,8 @@ module.exports = async (b) => {
   const k = await kernel(
     root,
     {
-      cached: { fs: true, require: { ext: ['js'], compile: true } },
-      plain: { fs: true, require: { ext: ['js'], compile: false } },
+      cached: { fs: true, require: { compile: ['js'] } },
+      plain: { fs: true, require: { ext: ['js'] } },
     },
     { hooks: { fs: false, module: true } },
   );

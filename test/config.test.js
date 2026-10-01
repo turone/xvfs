@@ -228,9 +228,9 @@ describe('VfsConfig: domains', () => {
     assert.equal(p.scanExt, null);
   });
 
-  it('require: true means compile with default ext', () => {
+  it('require: true takes js, cjs and json and compiles nothing', () => {
     const [p] = make({ a: { require: true } }).places;
-    assert.deepEqual(p.require, { ext: ['js', 'cjs', 'json'], compile: true });
+    assert.deepEqual(p.require, { ext: ['js', 'cjs', 'json'], compile: [] });
     assert.deepEqual(p.scanExt, ['js', 'cjs', 'json']);
   });
 
@@ -239,11 +239,11 @@ describe('VfsConfig: domains', () => {
     assert.deepEqual(p.import, { ext: ['js', 'mjs', 'json'] });
   });
 
-  it('domain ext replaces defaults and is normalized', () => {
+  it('domain ext replaces defaults and is lower-cased', () => {
     const [p] = make({
-      a: { require: { ext: ['JS', 'js', 'Cjs'], compile: false } },
+      a: { require: { ext: ['JS', 'Cjs'] } },
     }).places;
-    assert.deepEqual(p.require, { ext: ['js', 'cjs'], compile: false });
+    assert.deepEqual(p.require, { ext: ['js', 'cjs'], compile: [] });
   });
 
   it('scanExt is the ordered union fs → require → import', () => {
@@ -289,6 +289,165 @@ describe('VfsConfig: domains', () => {
   });
 });
 
+// `require` and `fs.script` list the extensions that get V8 cached data in
+// `compile`, the rest in `ext`; a domain lists an extension once, and only
+// what `compile` lists gets cached data.
+describe('VfsConfig: compile lists', () => {
+  const placeOf = (spec) => make({ a: spec }).places[0];
+  const PLAIN = { ext: ['js', 'cjs', 'json'], compile: [] };
+
+  it('nothing is compiled unless compile lists it', () => {
+    for (const domain of [true, {}, { prepare: 'm' }]) {
+      assert.deepEqual(placeOf({ require: domain }).require, PLAIN);
+    }
+    assert.deepEqual(placeOf({ require: { ext: ['json'] } }).require, {
+      ext: ['json'],
+      compile: [],
+    });
+    const mjs = placeOf({ fs: { script: { ext: ['mjs'] } } });
+    assert.deepEqual(mjs.fs.script, { ext: ['mjs'], compile: [] });
+    assert.deepEqual(mjs.fs.ext, ['mjs']);
+  });
+
+  it('a list given replaces the default ext of require', () => {
+    assert.deepEqual(placeOf({ require: { compile: ['js'] } }).require, {
+      ext: ['js'],
+      compile: ['js'],
+    });
+    const tmpl = placeOf({ fs: { script: { compile: ['tmpl'] } } });
+    assert.deepEqual(tmpl.fs.script, { ext: ['tmpl'], compile: ['tmpl'] });
+    assert.deepEqual(tmpl.fs.ext, ['tmpl']);
+  });
+
+  it('fs.script is an object of lists, never true or empty', () => {
+    for (const script of [true, null, 'js', ['js'], 1]) {
+      fails(
+        { places: { a: { fs: { script } } } },
+        /places\.a\.fs\.script must be false or an object \{ ext, compile \}$/,
+      );
+    }
+    fails(
+      { places: { a: { fs: { script: {} } } } },
+      /places\.a\.fs\.script lists its sources: give ext, compile or both$/,
+    );
+    assert.equal(placeOf({ fs: { script: false } }).fs.script, null);
+  });
+
+  it('compile adds its extensions to the domain, before those of ext', () => {
+    const p = placeOf({
+      fs: {
+        ext: ['json'],
+        script: { ext: ['mjs'], compile: ['js', 'cjs', 'dhtml'] },
+      },
+      require: { ext: ['json'], compile: ['js', 'cjs', 'dhtml'] },
+    });
+    assert.deepEqual(p.fs.script, {
+      ext: ['js', 'cjs', 'dhtml', 'mjs'],
+      compile: ['js', 'cjs', 'dhtml'],
+    });
+    assert.deepEqual(p.fs.ext, ['json', 'js', 'cjs', 'dhtml', 'mjs']);
+    assert.deepEqual(p.require, {
+      ext: ['js', 'cjs', 'dhtml', 'json'],
+      compile: ['js', 'cjs', 'dhtml'],
+    });
+    assert.deepEqual(p.scanExt, ['json', 'js', 'cjs', 'dhtml', 'mjs']);
+  });
+
+  it('lists are lower-cased; a repeat within one list is refused', () => {
+    const p = placeOf({
+      fs: { script: { compile: ['Tmpl'] } },
+      require: { ext: ['JSON'], compile: ['JS', 'Cjs'] },
+    });
+    assert.deepEqual(p.fs.script, { ext: ['tmpl'], compile: ['tmpl'] });
+    assert.deepEqual(p.require, {
+      ext: ['js', 'cjs', 'json'],
+      compile: ['js', 'cjs'],
+    });
+    for (const [spec, where] of [
+      [{ fs: { ext: ['css', 'CSS'] } }, 'fs\\.ext'],
+      [{ fs: { script: { ext: ['mjs', 'mjs'] } } }, 'fs\\.script\\.ext'],
+      [
+        { fs: { script: { compile: ['Tmpl', 'tmpl'] } } },
+        'fs\\.script\\.compile',
+      ],
+      [{ require: { ext: ['json', 'JSON'] } }, 'require\\.ext'],
+      [{ require: { compile: ['js', 'Js'] } }, 'require\\.compile'],
+      [{ import: { ext: ['mjs', 'MJS'] } }, 'import\\.ext'],
+      [
+        { fs: { compress: { encodings: ['gzip'], ext: ['css', 'css'] } } },
+        'fs\\.compress\\.ext',
+      ],
+    ]) {
+      fails(
+        { places: { a: spec } },
+        new RegExp(`places\\.a\\.${where}: extension "\\w+" is listed twice$`),
+      );
+    }
+  });
+
+  it('compile is a list of extensions: no boolean, no empty list', () => {
+    for (const compile of [true, false, [], 'js', null]) {
+      fails(
+        { places: { a: { require: { compile } } } },
+        /places\.a\.require\.compile must be a non-empty array of extensions$/,
+      );
+      fails(
+        { places: { a: { fs: { script: { compile } } } } },
+        /places\.a\.fs\.script\.compile must be a non-empty array of extensions$/,
+      );
+    }
+    fails(
+      { places: { a: { require: { compile: ['.dhtml'] } } } },
+      /places\.a\.require\.compile items must be alphanumeric/,
+    );
+  });
+
+  it('a domain lists an extension once', () => {
+    fails(
+      { places: { a: { require: { ext: ['json', 'js'], compile: ['JS'] } } } },
+      /places\.a\.require: extension "js" is listed in both ext and compile$/,
+    );
+    fails(
+      { places: { a: { fs: { script: { ext: ['js'], compile: ['js'] } } } } },
+      /places\.a\.fs\.script: extension "js" is listed in both ext and compile$/,
+    );
+    fails(
+      { places: { a: { fs: { ext: ['js'], script: { compile: ['js'] } } } } },
+      /places\.a\.fs: extension "js" is listed in both ext and script\.compile$/,
+    );
+    fails(
+      { places: { a: { fs: { ext: ['mjs'], script: { ext: ['MJS'] } } } } },
+      /places\.a\.fs: extension "mjs" is listed in both ext and script\.ext$/,
+    );
+  });
+
+  it('json and mjs get no cached data: they belong in ext', () => {
+    for (const ext of ['json', 'mjs', 'JSON']) {
+      const name = ext.toLowerCase();
+      fails(
+        { places: { a: { require: { compile: ['js', ext] } } } },
+        new RegExp(
+          `places\\.a\\.require\\.compile: extension "${name}" gets no ` +
+            'cached data — list it in places\\.a\\.require\\.ext$',
+        ),
+      );
+      fails(
+        { places: { a: { fs: { script: { compile: [ext] } } } } },
+        new RegExp(
+          `places\\.a\\.fs\\.script\\.compile: extension "${name}" gets ` +
+            'no cached data — list it in places\\.a\\.fs\\.script\\.ext$',
+        ),
+      );
+    }
+    const p = placeOf({
+      fs: { script: { ext: ['mjs'] } },
+      require: { ext: ['json', 'mjs'] },
+    });
+    assert.deepEqual(p.fs.script, { ext: ['mjs'], compile: [] });
+    assert.deepEqual(p.require, { ext: ['json', 'mjs'], compile: [] });
+  });
+});
+
 describe('VfsConfig: providers', () => {
   it('defaults to sab and validates provider names', () => {
     assert.equal(make({ a: { fs: true } }).places[0].provider, 'sab');
@@ -307,18 +466,14 @@ describe('VfsConfig: providers', () => {
   });
 
   it('disk and node-default cannot compile', () => {
-    fails(
-      { places: { a: { provider: 'disk', require: true } } },
-      /compile: false/,
-    );
-    fails(
-      { places: { a: { provider: 'node-default', require: true } } },
-      /compile: false/,
-    );
-    const [p] = make({
-      a: { provider: 'disk', require: { compile: false } },
-    }).places;
-    assert.equal(p.require.compile, false);
+    const hint = /cannot store bytecode; list its extensions in require\.ext$/;
+    for (const provider of ['disk', 'node-default']) {
+      for (const compile of [['js'], ['dhtml']]) {
+        fails({ places: { a: { provider, require: { compile } } } }, hint);
+      }
+      const [p] = make({ a: { provider, require: true } }).places;
+      assert.deepEqual(p.require, { ext: ['js', 'cjs', 'json'], compile: [] });
+    }
   });
 
   it('zeroCopy and compress need in-memory providers', () => {
@@ -491,23 +646,27 @@ describe('VfsConfig: compress', () => {
       },
       /retainRaw/,
     );
-    fails(
-      {
-        places: {
-          a: {
-            fs: { compress: { encodings: ['gzip'], retainRaw: false } },
-            require: true,
+    for (const compile of [['js'], ['dhtml']]) {
+      fails(
+        {
+          places: {
+            a: {
+              fs: { compress: { encodings: ['gzip'], retainRaw: false } },
+              require: { compile },
+            },
           },
         },
-      },
-      /retainRaw/,
-    );
-    make({
-      a: {
-        fs: { compress: { encodings: ['gzip'], retainRaw: false } },
-        require: { compile: false },
-      },
-    });
+        /retainRaw: false is incompatible with require\.compile/,
+      );
+    }
+    for (const domain of [true, { ext: ['js', 'cjs', 'json'] }]) {
+      make({
+        a: {
+          fs: { compress: { encodings: ['gzip'], retainRaw: false } },
+          require: domain,
+        },
+      });
+    }
   });
 });
 
@@ -684,6 +843,7 @@ describe('VfsConfig.fromArgv', () => {
         '--vfs.defaults.memory.limit=512mib',
         '--vfs.defaults.strict=true',
         '--vfs.defaults.hooks.fs=false',
+        '--vfs.places.tools.require.compile=js,cjs',
         '--vfs.enable=tools,workspace',
         '--vfs.disable=static',
       ),
@@ -692,6 +852,10 @@ describe('VfsConfig.fromArgv', () => {
     assert.equal(fromIntegrationDoc.global.memory.limit, 512 * 1024 ** 2);
     assert.equal(fromIntegrationDoc.global.strict, true);
     assert.equal(fromIntegrationDoc.global.hooks.fs, false);
+    assert.deepEqual(fromIntegrationDoc.place('tools').require, {
+      ext: ['js', 'cjs'],
+      compile: ['js', 'cjs'],
+    });
     assert.deepEqual(
       fromIntegrationDoc.places.map((p) => p.name),
       ['tools', 'workspace'],
@@ -701,6 +865,7 @@ describe('VfsConfig.fromArgv', () => {
       argv(
         '--vfs.defaults.memory.limit=512mib',
         '--vfs.defaults.strict=true',
+        '--vfs.places.lib.require.compile=js,cjs',
         '--vfs.enable=static,lib',
         '--vfs.disable=scratch',
       ),
@@ -716,6 +881,7 @@ describe('VfsConfig.fromArgv', () => {
       fromReadme.places.map((p) => p.name),
       ['static', 'lib'],
     );
+    assert.deepEqual(fromReadme.place('lib').require.compile, ['js', 'cjs']);
   });
 
   it('overrides place options and toggles places', () => {
@@ -773,6 +939,195 @@ describe('VfsConfig.fromArgv', () => {
     assert.throws(
       () => VfsConfig.fromArgv(argv('--vfs.disable=nope'), app),
       /unknown place/,
+    );
+  });
+});
+
+// A setting that takes a list takes a comma-separated one on the CLI, so the
+// CLI says what a JS or JSON config says, and is validated the same way.
+describe('VfsConfig.fromArgv: lists', () => {
+  const argv = (...args) => ['node', 'app.js', '--', ...args];
+  const cli = (args, app) => VfsConfig.fromArgv(argv(...args), app);
+  const isPlain = (value) =>
+    value !== null && typeof value === 'object' && !Array.isArray(value);
+  // A raw config as CLI flags: a leaf per flag, a list as its items.
+  const flagsOf = (raw, at = 'vfs') =>
+    Object.entries(raw).flatMap(([key, value]) => {
+      const path = `${at}.${key}`;
+      if (isPlain(value)) return flagsOf(value, path);
+      const text = Array.isArray(value) ? value.join(',') : String(value);
+      return [`--${path}=${text}`];
+    });
+  const same = (actual, expected) => {
+    assert.deepEqual(actual.raw, expected.raw);
+    assert.deepEqual(actual.global, expected.global);
+    assert.deepEqual(actual.allPlaces, expected.allPlaces);
+  };
+
+  const ACCEPTED = {
+    places: {
+      views: {
+        fs: {
+          ext: ['json'],
+          script: { ext: ['mjs'], compile: ['js', 'cjs', 'dhtml'] },
+        },
+        require: { ext: ['json'], compile: ['js', 'cjs', 'dhtml'] },
+      },
+    },
+  };
+
+  it('the accepted form: the CLI alone, a JS object and JSON resolve alike', () => {
+    const js = new VfsConfig(ACCEPTED);
+    same(new VfsConfig(JSON.parse(JSON.stringify(ACCEPTED))), js);
+    const flags = [
+      '--vfs.places.views.fs.ext=json',
+      '--vfs.places.views.fs.script.ext=mjs',
+      '--vfs.places.views.fs.script.compile=js,cjs,dhtml',
+      '--vfs.places.views.require.ext=json',
+      '--vfs.places.views.require.compile=js,cjs,dhtml',
+    ];
+    assert.deepEqual(flagsOf(ACCEPTED), flags);
+    same(cli(flags), js);
+    assert.deepEqual(js.place('views').require, {
+      ext: ['js', 'cjs', 'dhtml', 'json'],
+      compile: ['js', 'cjs', 'dhtml'],
+    });
+  });
+
+  it('every list setting, its keyword and the scalars round-trip', () => {
+    const raw = {
+      defaults: {
+        memory: { limit: '2 mib', segmentSize: '1 mib', maxFileSize: 65536 },
+        strict: true,
+      },
+      places: {
+        site: {
+          fs: {
+            ext: ['html', 'css', 'mp3'],
+            compress: {
+              encodings: ['br', 'gzip'],
+              options: { br: { level: 5 } },
+              ext: ['css', 'html'],
+            },
+            prepare: { styles: ['css'], markup: ['html'] },
+            fallback: 'deny',
+          },
+          links: 'verify',
+        },
+        zip: {
+          fs: {
+            ext: ['txt'],
+            compress: { encodings: ['gzip'], ext: 'compressible' },
+          },
+        },
+        views: ACCEPTED.places.views,
+        lib: {
+          require: { ext: ['json'], compile: ['js'], prepare: 'mod' },
+          import: { ext: ['mjs'], prepare: { esm: ['mjs'] } },
+        },
+        mem: {
+          provider: 'map',
+          origin: 'virtual',
+          fs: { writable: true, script: { compile: ['tmpl'] } },
+        },
+      },
+    };
+    same(cli(flagsOf(raw)), new VfsConfig(raw));
+  });
+
+  it('a list given replaces the list of the config file', () => {
+    const file = {
+      places: {
+        views: {
+          fs: { script: { ext: ['mjs'] } },
+          require: { ext: ['json'], compile: ['js'] },
+        },
+      },
+    };
+    const c = cli(
+      [
+        '--vfs.places.views.fs.ext=json',
+        '--vfs.places.views.fs.script.compile=js,cjs,dhtml',
+        '--vfs.places.views.require.compile=js,cjs,dhtml',
+      ],
+      file,
+    );
+    same(c, new VfsConfig(ACCEPTED));
+    assert.throws(
+      () => cli(['--vfs.places.views.require.ext=js,json'], file),
+      /places\.views\.require: extension "js" is listed in both ext and compile$/,
+    );
+  });
+
+  it('one item is a list; items stay strings as written, trimmed', () => {
+    const c = cli([
+      '--vfs.places.p.fs.ext=css',
+      '--vfs.places.p.require.ext=3, mp3',
+      '--vfs.places.p.fs.prepare.styles=css',
+    ]);
+    assert.deepEqual(c.raw.places.p, {
+      fs: { ext: ['css'], prepare: { styles: ['css'] } },
+      require: { ext: ['3', 'mp3'] },
+    });
+    assert.deepEqual(c.place('p').prepare, { css: 'styles' });
+    assert.equal(
+      cli(['--vfs.places.p.fs.prepare=up', '--vfs.places.p.fs.ext=txt']).place(
+        'p',
+      ).prepare.txt,
+      'up',
+    );
+    assert.throws(
+      () => cli(['--vfs.places.p.fs.ext=js,,css']),
+      /places\.p\.fs\.ext items must be alphanumeric extensions without dots$/,
+    );
+    assert.throws(
+      () => cli(['--vfs.places.p.fs.ext=css,CSS']),
+      /places\.p\.fs\.ext: extension "css" is listed twice$/,
+    );
+  });
+
+  it('no boolean compile and no script: true here either', () => {
+    for (const [flag, refusal] of [
+      [
+        'places.p.require.compile=true',
+        /require\.compile must be a non-empty array/,
+      ],
+      [
+        'places.p.require.compile=false',
+        /require\.compile must be a non-empty array/,
+      ],
+      [
+        'places.p.fs.script.compile=true',
+        /script\.compile must be a non-empty array/,
+      ],
+      ['places.p.fs.script=true', /fs\.script must be false or an object/],
+    ]) {
+      assert.throws(() => cli([`--vfs.${flag}`]), refusal, flag);
+    }
+    const file = { places: { p: { fs: { script: { compile: ['js'] } } } } };
+    const off = cli(['--vfs.places.p.fs.script=false'], file);
+    assert.equal(off.place('p').fs.script, null, 'false is off, as in a file');
+  });
+
+  it('a place name with dots is the longest one the config file has', () => {
+    const file = { places: { 'my.app': { require: true }, my: { fs: true } } };
+    const c = cli(
+      ['--vfs.places.my.app.require.compile=js', '--vfs.places.my.fs.ext=txt'],
+      file,
+    );
+    assert.deepEqual(c.place('my.app').require, {
+      ext: ['js'],
+      compile: ['js'],
+    });
+    assert.deepEqual(c.place('my').fs.ext, ['txt']);
+    assert.throws(
+      () => cli(['--vfs.places.my.app.__proto__.x=1'], file),
+      /unsafe CLI key "places\.my\.app\.__proto__\.x"/,
+    );
+    // Flags alone cannot create one: the key splits at its first dot.
+    assert.throws(
+      () => cli(['--vfs.places.my.app.fs.ext=css']),
+      /places\.my: unknown option "app"/,
     );
   });
 });

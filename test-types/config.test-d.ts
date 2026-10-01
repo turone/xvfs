@@ -23,7 +23,7 @@ const quickStart = new VfsConfig({
   },
   places: {
     static: { fs: { ext: ['html', 'css', 'js', 'png', 'svg'] } },
-    lib: { fs: { ext: ['js'] }, require: { ext: ['js'], compile: true } },
+    lib: { fs: { ext: ['js'] }, require: { compile: ['js'] } },
     scratch: { provider: 'map', origin: 'virtual', fs: { writable: true } },
   },
 });
@@ -42,13 +42,21 @@ new VfsConfig({
     uploads: { provider: 'disk', fs: { writable: true }, links: 'verify' },
     application: {
       fs: {
-        ext: ['js', 'css'],
+        ext: ['css'],
         prepare: { api: ['js'], styles: ['css'] },
-        script: { ext: ['js'], compile: true },
+        script: { compile: ['js'] },
       },
-      require: { ext: ['js'], compile: true },
+      require: { compile: ['js'] },
     },
-    handlers: { fs: { ext: ['js'], prepare: 'api', script: true } },
+    handlers: { fs: { prepare: 'api', script: { compile: ['js'] } } },
+    views: {
+      fs: {
+        ext: ['json'],
+        script: { ext: ['mjs'], compile: ['js', 'cjs', 'dhtml'] },
+      },
+      require: { ext: ['json'], compile: ['js', 'cjs', 'dhtml'] },
+    },
+    modules: { fs: { script: { ext: ['mjs'] } } },
     static: {
       fs: {
         ext: ['html', 'css', 'js', 'svg', 'png', 'mp4'],
@@ -143,9 +151,10 @@ if (lib?.fs && lib.require && lib.import) {
     readonly script: ResolvedScript | null;
     readonly fallback: 'disk' | 'deny' | null;
   }>()(lib.fs);
-  expectType<{ readonly ext: readonly string[]; readonly compile: boolean }>()(
-    lib.require,
-  );
+  expectType<{
+    readonly ext: readonly string[];
+    readonly compile: readonly string[];
+  }>()(lib.require);
   expectType<{ readonly ext: readonly string[] }>()(lib.import);
   expectType<string | undefined>()(lib.prepare?.['js']);
   if (lib.fs.compress && lib.fs.script) {
@@ -159,7 +168,7 @@ if (lib?.fs && lib.require && lib.import) {
     }>()(lib.fs.compress);
     expectType<{
       readonly ext: readonly string[];
-      readonly compile: boolean;
+      readonly compile: readonly string[];
     }>()(lib.fs.script);
   }
 }
@@ -224,10 +233,18 @@ new VfsConfig({
   // @ts-expect-error the object form routes extensions to names
   places: { p: { fs: { ext: ['js'], prepare: { api: 'js' } } } },
 });
-// @ts-expect-error `compile` is a boolean
-new VfsConfig({ places: { p: { require: { compile: 1 } } } });
+// @ts-expect-error `compile` lists extensions: no boolean
+new VfsConfig({ places: { p: { require: { compile: true } } } });
+// @ts-expect-error `fs.script` names its sources: no `true`
+new VfsConfig({ places: { p: { fs: { script: true } } } });
+// @ts-expect-error `fs.script` lists `ext`, `compile` or both
+new VfsConfig({ places: { p: { fs: { script: {} } } } });
+// @ts-expect-error `fs.script.compile` lists extensions: no boolean
+new VfsConfig({ places: { p: { fs: { script: { compile: false } } } } });
+// @ts-expect-error `compile` is a list, not one extension
+new VfsConfig({ places: { p: { require: { compile: 'js' } } } });
 // @ts-expect-error `import` takes no `compile`
-new VfsConfig({ places: { p: { import: { compile: true } } } });
+new VfsConfig({ places: { p: { import: { compile: ['js'] } } } });
 // @ts-expect-error `strict` is a boolean
 new VfsConfig({ defaults: { strict: 'true' } });
 // @ts-expect-error a size is a number or a string

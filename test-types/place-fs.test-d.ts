@@ -198,13 +198,13 @@ files.createReadStreamCompressed('/app.css', 'deflate');
 const bundle = files.script('/handler.js');
 expectType<{
   source: string;
-  cachedData: Buffer | null;
+  cachedData: Buffer | undefined;
   scriptOptions: Readonly<ScriptOptions> | null;
   meta: { readonly [key: string]: unknown } | null;
   version: number | null;
 } | null>()(bundle);
 if (bundle) {
-  expectType<Buffer | null>()(bundle.cachedData);
+  expectType<Buffer | undefined>()(bundle.cachedData);
   expectType<number | null>()(bundle.version);
   expectType<string | undefined>()(bundle.scriptOptions?.filename);
   expectType<number | undefined>()(bundle.scriptOptions?.lineOffset);
