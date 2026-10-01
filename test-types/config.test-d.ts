@@ -56,7 +56,7 @@ new VfsConfig({
       },
       require: { ext: ['json'], compile: ['js', 'cjs', 'dhtml'] },
     },
-    scripts: { fs: { script: true } },
+    modules: { fs: { script: { ext: ['mjs'] } } },
     static: {
       fs: {
         ext: ['html', 'css', 'js', 'svg', 'png', 'mp4'],
@@ -235,6 +235,10 @@ new VfsConfig({
 });
 // @ts-expect-error `compile` lists extensions: no boolean
 new VfsConfig({ places: { p: { require: { compile: true } } } });
+// @ts-expect-error `fs.script` names its sources: no `true`
+new VfsConfig({ places: { p: { fs: { script: true } } } });
+// @ts-expect-error `fs.script` lists `ext`, `compile` or both
+new VfsConfig({ places: { p: { fs: { script: {} } } } });
 // @ts-expect-error `fs.script.compile` lists extensions: no boolean
 new VfsConfig({ places: { p: { fs: { script: { compile: false } } } } });
 // @ts-expect-error `compile` is a list, not one extension

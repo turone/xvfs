@@ -88,7 +88,7 @@ describe('publish: mutations of a virtual place', () => {
       v: {
         origin: 'virtual',
         fs: { writable: true, compress: { encodings: ['gzip'] } },
-        require: true,
+        require: { compile: ['js'] },
       },
     });
     try {
@@ -185,7 +185,10 @@ describe('publish: init, the watcher, compaction', () => {
     const asset = Buffer.from('p');
     const k = new VfsKernel(
       config({
-        site: { fs: { compress: { encodings: ['gzip'] } }, require: true },
+        site: {
+          fs: { compress: { encodings: ['gzip'] } },
+          require: { compile: ['js'] },
+        },
         pub: { provider: 'sea', fs: true },
         ...VIRTUAL,
       }),

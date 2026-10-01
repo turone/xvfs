@@ -34,7 +34,7 @@ const config = new VfsConfig({
       provider: 'map',
       origin: 'virtual',
       fs: { writable: true },
-      require: true,
+      require: { compile: ['js'] },
     },
   },
 });

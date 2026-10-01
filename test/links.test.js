@@ -65,11 +65,7 @@ const PLACES = {
   terr: { fs: { ext: ['txt'], fallback: 'disk', prepare: { up: ['txt'] } } },
   d: { provider: 'disk', fs: { writable: true } },
   dro: { provider: 'disk', fs: true },
-  nd: {
-    provider: 'node-default',
-    fs: true,
-    require: { ext: ['js', 'cjs', 'json'] },
-  },
+  nd: { provider: 'node-default', fs: true, require: true },
   lib: { require: { prepare: 'mod' }, import: { ext: ['mjs'] } },
 };
 

@@ -26,10 +26,9 @@ export type Links = 'deny' | 'verify';
 
 /**
  * `prepare` of a domain: a preparer name for every extension of the
- * domain's own finite `ext` — in fs, those `ext`, `script.ext` and
- * `script.compile` list, never the defaults of `script: true` — or
- * `{ name: [ext, …] }`. Names are registered as functions in the kernel
- * option `preparers`.
+ * domain's effective, finite `ext` — in fs, what `ext`, `script.ext` and
+ * `script.compile` list — or `{ name: [ext, …] }`. Names are registered as
+ * functions in the kernel option `preparers`.
  */
 export type PrepareConfig =
   string | { readonly [preparer: string]: readonly string[] };
@@ -83,12 +82,7 @@ export interface CompressConfig {
   retainRaw?: boolean;
 }
 
-/**
- * Sources for `PlaceFs.script()`. With neither `ext` nor `compile`:
- * `compile: ['js', 'cjs']`; a list given replaces that default. Every
- * extension is listed once in fs: in `fs.ext`, `ext` or `compile`.
- */
-export interface ScriptConfig {
+interface ScriptLists {
   /** Sources without cached data: their bundle's `cachedData` is null. */
   ext?: readonly string[];
   /**
@@ -97,6 +91,14 @@ export interface ScriptConfig {
    */
   compile?: readonly string[];
 }
+
+/**
+ * Sources for `PlaceFs.script()`, named by the user — `ext`, `compile` or
+ * both; there are no defaults. Every extension is listed once in fs: in
+ * `fs.ext`, `ext` or `compile`.
+ */
+export type ScriptConfig = ScriptLists &
+  ({ ext: readonly string[] } | { compile: readonly string[] });
 
 export interface FsDomainConfig {
   /**
@@ -107,16 +109,18 @@ export interface FsDomainConfig {
   writable?: boolean;
   zeroCopy?: boolean;
   compress?: CompressConfig | false | null;
-  script?: ScriptConfig | boolean;
+  /** An object of lists, or `false` (off). */
+  script?: ScriptConfig | false;
   prepare?: PrepareConfig;
   /** Disk-origin places only; default `'deny'` under strict, else `'disk'`. */
   fallback?: Fallback;
 }
 
 /**
- * With neither `ext` nor `compile`: `ext: ['json']`,
- * `compile: ['js', 'cjs']`; a list given replaces both defaults. Every
- * extension is listed once: in `ext` or `compile`.
+ * With neither `ext` nor `compile` (`require: true`, `{}`, `{ prepare }`):
+ * `ext: ['js', 'cjs', 'json']`, nothing compiled; a list given replaces
+ * that default. Cached data is built for the extensions of `compile`
+ * only. Every extension is listed once: in `ext` or `compile`.
  */
 export interface RequireDomainConfig {
   /** Extensions without cached data. */

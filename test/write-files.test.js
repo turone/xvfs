@@ -62,7 +62,7 @@ describe('writeFiles: one publication', () => {
       v: {
         origin: 'virtual',
         fs: { writable: true },
-        require: true,
+        require: { compile: ['js'] },
       },
     });
     const w = worker(k);
@@ -833,7 +833,7 @@ describe('writeFiles: map places', () => {
           provider: 'map',
           origin: 'virtual',
           fs: { writable: true, prepare: { upper: ['txt'] } },
-          require: true,
+          require: { compile: ['js'] },
         },
       },
       {},

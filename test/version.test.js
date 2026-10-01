@@ -53,7 +53,10 @@ describe('version: init', () => {
     const k = await kernel(
       root,
       {
-        site: { fs: { compress: { encodings: ['gzip'] } }, require: true },
+        site: {
+          fs: { compress: { encodings: ['gzip'] } },
+          require: { compile: ['js'] },
+        },
         pub: { provider: 'sea', fs: true },
         m: { provider: 'map', fs: true },
         ...VIRTUAL,
@@ -114,7 +117,7 @@ describe('version: mutations', () => {
       v: {
         origin: 'virtual',
         fs: { writable: true, compress: { encodings: ['gzip'] } },
-        require: true,
+        require: { compile: ['js'] },
       },
     });
     try {

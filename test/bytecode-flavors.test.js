@@ -74,7 +74,7 @@ describe('bytecode flavors: coexistence', () => {
       v: {
         origin: 'virtual',
         fs: { writable: true },
-        require: true,
+        require: { compile: ['js'] },
       },
     });
     try {
@@ -101,7 +101,7 @@ describe('bytecode flavors: coexistence', () => {
             prepare: 'id',
             script: { compile: ['js', 'cjs'] },
           },
-          require: true,
+          require: { compile: ['js'] },
         },
       },
       {},
@@ -255,6 +255,39 @@ describe('bytecode flavors: compile lists', () => {
       rm(root);
     }
   });
+
+  // No default compiles: `require: true` and a script list of `ext` alone
+  // make sources visible, and build no cached data for any of them.
+  it('only what compile lists gets cached data', async () => {
+    const root = writeTree(tmpDir('bc-explicit'), {
+      'lib/a.js': 'module.exports = 1;',
+      'lib/b.cjs': 'module.exports = 2;',
+      'app/s.js': '1 + 1',
+    });
+    const k = await kernel(root, {
+      lib: { require: true },
+      app: { fs: { script: { ext: ['js'] } }, require: true },
+      v: { origin: 'virtual', fs: { writable: true }, require: true },
+    });
+    try {
+      await k.fs('v').writeFile('/c.js', 'module.exports = 3;');
+      for (const name of ['lib', 'app', 'v']) {
+        const keys = [...k.registry.get(name).files.keys()];
+        assert.ok(keys.length > 0, name);
+        assert.deepEqual(
+          keys.filter((key) => key.includes('\0')),
+          [],
+          `${name}: no companion`,
+        );
+      }
+      assert.equal(k.bytecode(path.join(root, 'lib', 'a.js')), null);
+      assert.equal(k.fs('app').script('/s.js').source, '1 + 1');
+      assert.equal(k.fs('app').script('/s.js').cachedData, null);
+    } finally {
+      k.close();
+      rm(root);
+    }
+  });
 });
 
 describe('bytecode flavors: failure and rollback', () => {
@@ -270,7 +303,7 @@ describe('bytecode flavors: failure and rollback', () => {
             prepare: 'id',
             script: { compile: ['js', 'cjs'] },
           },
-          require: true,
+          require: { compile: ['js'] },
         },
       },
       {},
@@ -454,7 +487,7 @@ describe('bytecode flavors: failure and rollback', () => {
           ext: ['txt'],
           script: { compile: ['js'] },
         },
-        require: true,
+        require: { compile: ['js'] },
       },
     });
     const w = worker(k);
@@ -681,7 +714,7 @@ describe('bytecode flavors: failure and rollback', () => {
     });
     try {
       const init = kernel(root, {
-        app: { fs: { script: true } },
+        app: { fs: { script: { compile: ['js'] } } },
       });
       await assert.rejects(init, (err) => {
         const file = path.join(root, 'app', 'bad.js');

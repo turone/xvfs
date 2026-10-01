@@ -48,7 +48,12 @@ describe('watcher pipeline', () => {
     });
     k = await kernel(
       root,
-      { site: { fs: { compress: { encodings: ['gzip'] } }, require: true } },
+      {
+        site: {
+          fs: { compress: { encodings: ['gzip'] } },
+          require: { compile: ['js'] },
+        },
+      },
       { watch: true, watchTimeout: 60 },
     );
     // A linked worker stand-in that ACKs only when told to.
@@ -251,7 +256,12 @@ describe('watcher: one epoch publishes a key once', () => {
     const root = writeTree(tmpDir('watch-once'), { 'site/a.js': 'a' });
     const k = await kernel(
       root,
-      { site: { fs: { compress: { encodings: ['gzip'] } }, require: true } },
+      {
+        site: {
+          fs: { compress: { encodings: ['gzip'] } },
+          require: { compile: ['js'] },
+        },
+      },
       { watch: true, watchTimeout: 60000 },
     );
     try {
@@ -904,7 +914,7 @@ describe('watcher: linux edge events', () => {
     });
     const k = await kernel(
       root,
-      { site: { fs: true, require: true } },
+      { site: { fs: true, require: { compile: ['js'] } } },
       { watch: true, watchTimeout: 60 },
     );
     try {

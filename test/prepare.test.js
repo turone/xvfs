@@ -93,7 +93,7 @@ describe('prepare config: forms', () => {
     assert.equal(p.scanExt, null);
   });
 
-  it('a short fs.prepare covers the lists fs gives, never the defaults of script: true', () => {
+  it('a short fs.prepare covers what fs.ext, fs.script.ext and fs.script.compile list', () => {
     const p = placeOf({
       fs: {
         ext: ['css'],
@@ -107,15 +107,20 @@ describe('prepare config: forms', () => {
       placeOf({ fs: { prepare: 'api', script: { compile: ['js'] } } }).prepare,
       { js: 'api' },
     );
+    assert.deepEqual(
+      placeOf({ fs: { prepare: 'api', script: { ext: ['mjs'] } } }).prepare,
+      { mjs: 'api' },
+    );
+    // No list names an extension: `script: true` is gone, and with it the
+    // js and cjs it brought in.
     rejects(
       { fs: { prepare: 'api', script: true } },
+      /fs\.script must be false or an object/,
+    );
+    rejects(
+      { fs: { prepare: 'api', script: false } },
       /fs\.prepare: "api" needs a finite ext list/,
     );
-    const own = placeOf({
-      fs: { ext: ['css'], prepare: 'styles', script: true },
-    });
-    assert.deepEqual(own.prepare, { css: 'styles' }, 'js, cjs not covered');
-    assert.deepEqual(own.fs.ext, ['css', 'js', 'cjs']);
   });
 
   it('prepare neither adds nor removes extensions', () => {
@@ -262,7 +267,7 @@ describe('prepare config: errors', () => {
           prepare: 'x',
           compress: { encodings: ['gzip'], retainRaw: false },
         },
-        require: { ext: ['js', 'cjs', 'json'] },
+        require: true,
       },
       /retainRaw: false is incompatible with prepare/,
     );

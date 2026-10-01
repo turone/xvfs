@@ -312,13 +312,13 @@ describe('mutation ordering: independent keys', () => {
 });
 
 describe('mutation ordering: rename and rm coordination', () => {
-  // `require: true` gives every .js source a bytecode companion, so these
+  // `require.compile` gives every .js source a bytecode companion, so these
   // tests can also prove no orphan companion survives.
   const compiled = {
     v: {
       origin: 'virtual',
       fs: { writable: true },
-      require: true,
+      require: { compile: ['js'] },
     },
   };
   const requireCompanion = (key) => `${key}\0require:bytecode`;

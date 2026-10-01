@@ -17,11 +17,7 @@ const { kernel } = require('../helpers.js');
 const [root, links] = process.argv.slice(2);
 
 const PLACES = {
-  nd: {
-    provider: 'node-default',
-    fs: true,
-    require: { ext: ['js', 'cjs', 'json'] },
-  },
+  nd: { provider: 'node-default', fs: true, require: true },
   lib: { require: { prepare: 'mod' }, import: { ext: ['mjs'] } },
 };
 const preparers = {

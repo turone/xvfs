@@ -7,12 +7,15 @@ module.exports = {
   },
   places: {
     static: { fs: true },
-    modules: { require: true, import: true },
+    modules: {
+      require: { ext: ['json'], compile: ['js', 'cjs'] },
+      import: true,
+    },
     scratch: {
       provider: 'map',
       origin: 'virtual',
       fs: { writable: true },
-      require: true,
+      require: { compile: ['js'] },
     },
   },
 };

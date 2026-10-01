@@ -54,14 +54,14 @@ describe('module-hook: CommonJS', () => {
       'disk/d.js': 'module.exports = "disk";',
     });
     k = await kernel(root, {
-      lib: { require: true },
+      lib: { require: { ext: ['json'], compile: ['js', 'cjs'] } },
       mem: {
         provider: 'map',
         origin: 'virtual',
         fs: { writable: true },
-        require: true,
+        require: { ext: ['json'], compile: ['js', 'cjs'] },
       },
-      disk: { provider: 'disk', require: { ext: ['js', 'cjs', 'json'] } },
+      disk: { provider: 'disk', require: true },
     });
     moduleHook.install(k);
     spyScripts();
@@ -259,7 +259,9 @@ describe('module-hook: bytecode accepted across isolates', () => {
     const root = writeTree(tmpDir('modhook-worker'), {
       'lib/m.js': 'module.exports = [1, 2, 3].map((x) => x * 2);',
     });
-    const k = await kernel(root, { lib: { require: true } });
+    const k = await kernel(root, {
+      lib: { require: { ext: ['json'], compile: ['js', 'cjs'] } },
+    });
     let worker = null;
     try {
       const { vfs, transferList } = k.link();
