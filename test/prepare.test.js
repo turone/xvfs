@@ -4,6 +4,8 @@ const { describe, it } = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
+const v8 = require('node:v8');
+const vm = require('node:vm');
 const { once } = require('node:events');
 const { pathToFileURL } = require('node:url');
 const { Worker } = require('node:worker_threads');
@@ -25,6 +27,9 @@ const {
   nextMessage,
   until,
   within,
+  turn,
+  activeResources,
+  activeSince,
 } = require('./helpers.js');
 
 // `prepare` is declared by one domain (fs, require, import) and prepares the
@@ -970,6 +975,111 @@ describe('prepare pipeline: the preparer contract', () => {
       assert.equal(place.bytecode('/a.js'), bytecode);
     } finally {
       done();
+    }
+  });
+
+  // The preparer of the smallest file throws; the larger ones, published
+  // first (#publishAll: largest first), have staged their sources and
+  // companions by then. initialize() rejects with that very error and
+  // closes the kernel: nothing is committed, published or versioned, every
+  // projection is empty, and the kernel keeps no runtime reference — the
+  // pool goes whole with what the failed attempt allocated in it. Last, as
+  // an extra check, V8 collects that pool.
+  it('a preparer that throws in initialize(): rejected, closed, nothing kept', async () => {
+    const spec = {
+      sab: {
+        fs: {
+          prepare: { p: ['js'] },
+          script: { compile: ['js'] },
+          compress: { encodings: ['gzip'], ext: ['js'] },
+        },
+        require: { compile: ['js'] },
+      },
+      map: {
+        provider: 'map',
+        fs: { prepare: { p: ['js'] }, script: { compile: ['js'] } },
+        require: { compile: ['js'] },
+      },
+    };
+    for (const [provider, place] of Object.entries(spec)) {
+      const files = { 'app/bad.js': 'bad' };
+      for (let i = 0; i < 6; i++) {
+        files[`app/ok${i}.js`] = `module.exports = ${i}; // ${'x'.repeat(200)}`;
+      }
+      const root = writeTree(tmpDir('vfs-prep-init'), files);
+      const baseline = activeResources();
+      const boom = new Error('bad input');
+      let pool = null; // the kernel's pool, as its preparer saw it
+      let closed = false;
+      let late = 0; // preparer calls once initialize() rejected
+      const k = new VfsKernel(config({ app: place }, { watch: true }), {
+        appRoot: root,
+        console: quiet,
+        preparers: {
+          p: (raw) => {
+            pool ??= k.cache;
+            if (closed) late++;
+            if (raw.toString() === 'bad') throw boom;
+            return raw;
+          },
+        },
+      });
+      const events = [];
+      k.on('publish', () => events.push('publish'));
+      k.on('close', () => events.push('close'));
+      try {
+        await assert.rejects(k.initialize(), (err) => {
+          assert.equal(err, boom, provider);
+          return true;
+        });
+        closed = true;
+        // Closed.
+        assert.equal(k.state, 'closed', provider);
+        assert.equal(k.ready, false, provider);
+        assert.equal(k.registry.get('app').preparationFailures, 1, provider);
+        await turn();
+        assert.deepEqual(events, ['close'], `${provider}: no publish`);
+        // No commit, no version: the larger files allocated in the pool,
+        // none of it reached its index.
+        let used = 0;
+        for (const id of pool.pool.segments.keys()) {
+          used += pool.registry.used(id);
+        }
+        if (provider === 'sab') assert.ok(used > 0, 'staged, then left');
+        const index = pool.indexes.get('app')?.entries ?? new Map();
+        assert.deepEqual([...index], [], `${provider}: nothing committed`);
+        assert.equal(k.version, 0, `${provider}: no version`);
+        assert.equal(k.nextUpdateId, 0, `${provider}: no vfs-update`);
+        // Empty projections.
+        assert.equal(k.registry.get('app').files.size, 0, provider);
+        assert.equal(k.sources.size, 0, provider);
+        // No runtime reference: no pool, no watcher, no work left.
+        assert.equal(k.cache, null, provider);
+        assert.equal(k.compressor, null, provider);
+        assert.equal(k.segmentsMap.size, 0, provider);
+        assert.equal(k.retired.size, 0, provider);
+        assert.equal(k.links.size, 0, provider);
+        assert.equal(k.watcher, null, `${provider}: no watcher`);
+        assert.equal(k.rechecks.size, 0, provider);
+        assert.equal(late, 0, `${provider}: no preparer after the rejection`);
+        await until(() => Object.keys(activeSince(baseline)).length === 0);
+        assert.deepEqual(activeSince(baseline), {}, provider);
+        // Extra: once the test lets it go, nothing holds the pool.
+        v8.setFlagsFromString('--expose-gc');
+        const gc = vm.runInNewContext('gc');
+        const weak = new WeakRef(pool);
+        pool = null;
+        let collected = false;
+        for (let i = 0; i < 10 && !collected; i++) {
+          await turn();
+          gc();
+          collected = weak.deref() === undefined;
+        }
+        assert.ok(collected, `${provider}: the pool is collected`);
+      } finally {
+        k.close();
+        rm(root);
+      }
     }
   });
 
