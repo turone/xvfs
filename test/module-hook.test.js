@@ -478,6 +478,160 @@ describe('module-hook: the _resolveFilename patch over its life', () => {
   });
 });
 
+// The Module.prototype._compile patch over its life, as the
+// _resolveFilename patch's: a patch kept past uninstall() compiles with the
+// function it replaced and asks no kernel, not even after another kernel
+// installs; install() twice wraps once; uninstall() puts back a patch
+// found there; require() goes on as before.
+describe('module-hook: the _compile patch over its life', () => {
+  let native;
+  const base = path.join(__dirname, 'xvfs-unmounted');
+  // A kernel that notes the files it is asked cached data for and serves
+  // none; once closed, a question is an error.
+  const noting = () => {
+    let closed = false;
+    const asked = [];
+    return {
+      resolveModule: () => null,
+      bytecode: (filename) => {
+        if (!filename.startsWith(base)) return null;
+        asked.push(filename);
+        if (closed) throw new Error('a closed kernel was asked');
+        return Buffer.from('not cached data');
+      },
+      asked,
+      close: () => {
+        closed = true;
+      },
+    };
+  };
+  // `content` compiled by `patch` as Node calls Module.prototype._compile:
+  // on a module of `name`.
+  const compileWith = (patch, name, content) => {
+    const filename = path.join(base, name);
+    const mod = new Module(filename, module);
+    mod.filename = filename;
+    mod.paths = Module._nodeModulePaths(base);
+    patch.call(mod, content, filename);
+    return mod.exports;
+  };
+
+  before(() => {
+    native = Module.prototype._compile;
+  });
+
+  it('a patch kept past uninstall() compiles with what it replaced and asks no kernel', () => {
+    const replaced = [];
+    const theirs = function compile(content, filename, ...rest) {
+      replaced.push(path.basename(filename));
+      // eslint-disable-next-line no-invalid-this
+      return native.call(this, content, filename, ...rest);
+    };
+    Module.prototype._compile = theirs;
+    try {
+      const a = noting();
+      moduleHook.install(a);
+      const kept = Module.prototype._compile;
+      moduleHook.uninstall();
+      a.close();
+      assert.equal(compileWith(kept, 'k.js', 'module.exports = 42;'), 42);
+      assert.deepEqual(replaced, ['k.js'], 'the function it replaced');
+      assert.deepEqual(a.asked, [], 'the kernel is never asked');
+    } finally {
+      Module.prototype._compile = native;
+    }
+  });
+
+  it('kernels one after another: a kept patch is not sent to the new kernel', () => {
+    const a = noting();
+    const b = noting();
+    moduleHook.install(a);
+    const first = Module.prototype._compile;
+    moduleHook.uninstall();
+    a.close();
+    moduleHook.install(b);
+    try {
+      assert.equal(compileWith(first, 'first.js', 'module.exports = 1;'), 1);
+      assert.deepEqual(
+        b.asked,
+        [],
+        'the earlier patch asks the new kernel nothing',
+      );
+      const current = Module.prototype._compile;
+      assert.equal(
+        compileWith(current, 'current.js', 'module.exports = 2;'),
+        2,
+      );
+      assert.deepEqual(b.asked, [path.join(base, 'current.js')]);
+      assert.deepEqual(a.asked, []);
+    } finally {
+      moduleHook.uninstall();
+    }
+    assert.equal(Module.prototype._compile, native);
+  });
+
+  it('install() twice wraps once', () => {
+    const a = noting();
+    moduleHook.install(a);
+    const patch = Module.prototype._compile;
+    try {
+      moduleHook.install(noting());
+      assert.equal(Module.prototype._compile, patch, 'no second wrapper');
+      assert.equal(compileWith(patch, 'once.js', 'module.exports = 3;'), 3);
+      assert.deepEqual(a.asked, [path.join(base, 'once.js')]);
+    } finally {
+      moduleHook.uninstall();
+    }
+    assert.equal(Module.prototype._compile, native, 'nothing left over');
+  });
+
+  it('uninstall() puts back a patch that was there before install()', () => {
+    const theirs = function compile(...args) {
+      // eslint-disable-next-line no-invalid-this
+      return native.apply(this, args);
+    };
+    Module.prototype._compile = theirs;
+    try {
+      moduleHook.install(noting());
+      assert.notEqual(Module.prototype._compile, theirs);
+      moduleHook.uninstall();
+      assert.equal(Module.prototype._compile, theirs);
+    } finally {
+      Module.prototype._compile = native;
+    }
+  });
+
+  it('require() goes on as before: cached data while installed, Node after', async () => {
+    const root = writeTree(tmpDir('modhook-compile-life'), {
+      'lib/a.js': 'module.exports = "a";',
+      'lib/b.js': 'module.exports = "b";',
+      'lib/c.js': 'module.exports = "c";',
+    });
+    const k = await kernel(root, { lib: { require: { compile: ['js'] } } });
+    const at = (name) => path.join(root, 'lib', name);
+    const cached = (name) =>
+      scripts.filter((s) => s.filename === at(name)).length;
+    spyScripts();
+    try {
+      moduleHook.install(k);
+      assert.equal(require(at('a.js')), 'a');
+      assert.equal(cached('a.js'), 1, 'through its cached data');
+      moduleHook.uninstall();
+      assert.equal(Module.prototype._compile, native);
+      assert.equal(require(at('b.js')), 'b', 'from disk, by Node');
+      assert.equal(cached('b.js'), 0);
+      moduleHook.install(k);
+      assert.equal(require(at('c.js')), 'c');
+      assert.equal(cached('c.js'), 1, 'installed again: cached data again');
+    } finally {
+      unspy();
+      moduleHook.uninstall();
+      k.close();
+      rm(root);
+    }
+  });
+});
+
 describe('module-hook: cached data across isolates', () => {
   it('a worker attached to the snapshot compiles with cached data V8 does not reject', async () => {
     const { Worker } = require('node:worker_threads');

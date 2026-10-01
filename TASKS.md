@@ -157,23 +157,6 @@ to `doc/strict.md` alike, the README keeping a summary; and the tests of
 links (`links.test.js`, `links-deny.test.js`, `link-index.test.js`) be
 grouped by behavior, without duplicates.
 
-## P3 — A `_compile` patch kept past `uninstall()`
-
-**Problem.** The module hook's `Module.prototype._compile` patch is one
-module-level function: a reference kept past `uninstall()` — by code that
-saved it, by a wrapper — throws a `TypeError` on its next call, and after
-a later `install()` it reads the new kernel's cached data as if it were
-current. The `Module._resolveFilename` patch had the same flaw; it was
-fixed (one patch per `install()`, only the current one looks).
-
-**Cause.** `compile()` reads the module-level `kernel` and
-`originalCompile`, which `uninstall()` sets to null.
-
-**Done when.** Each `install()` builds its own `_compile` patch over the
-function it replaced, only the current one reads cached data, and a kept
-one goes straight to its original — with the lifecycle tests of the
-`_resolveFilename` patch (`test/module-hook.test.js`) extended to it.
-
 ## After the next Node.js 26.x release — `doc/alternatives.md`
 
 **Problem.** The comparison describes Node v26.10.0; `main` already removes
