@@ -595,9 +595,20 @@ json only (`require('./view')`), as before.
 **A script bundle without a companion carries `cachedData` undefined,
 never null.** _Why:_ `vm.Script` refuses null (`ERR_INVALID_ARG_TYPE`)
 and takes undefined, so `{ ...scriptOptions, cachedData }` serves every
-bundle and no caller has to test it. Cached data an isolate rejects is
-that isolate's: the script compiles from its canonical source there, and
-nothing is published again.
+bundle and no caller has to test it.
+
+**Cached data is a contract on the text: it serves only a `vm.Script` of
+the identical source with compatible `scriptOptions` — the bundle's for
+`fs.script`, `Module.wrap(source)` under the module filename for
+`require` — and the two flavors never mix. On rejection the consumer
+runs the canonical source without it: one isolate's refusal, which
+changes no file and no published version.** _Why:_ a changed source, a
+wrapper or other V8 version and flags can make V8 reject it, but V8
+checks the source's length, not the text: cached data of another text
+may be taken and run the wrong code. Only a consumer given the exact text
+it was built from is safe — a recipe that handed the require flavor to a
+third-party compiler wrapping the source its own way was removed for
+that.
 
 ## Virtual places and worker mutations
 
@@ -1657,6 +1668,7 @@ workers call `attach()`.** _Why:_ preloads do not run in worker threads.
 | A list typed by its value on the CLI (a comma makes a list)                                                     | one item would be a string, an extension `3` a number             |
 | A `require.extensions` entry for each extension a place serves                                                  | `require('./view')` would find `view.dhtml`; process-wide         |
 | Leaving `require.resolve()` to Node's resolver                                                                  | on 22.x and 24.12 it sees no memory and no strict refusal         |
+| Handing XVFS cached data to a third-party compiler that wraps the source its own way                            | cached data of another text: refused, or taken and wrong          |
 | Synchronous worker mutations via `Atomics.wait()`                                                               | deadlock- and stall-prone                                         |
 | Workers allocating in SAB                                                                                       | one writer keeps the allocator lock-free                          |
 | Echoing file bytes in mutation responses                                                                        | the bytes are already in SAB; the update carries metadata         |

@@ -366,20 +366,38 @@ on the CLI is in [CLI overrides](#cli-overrides).
   `{ source, cachedData, scriptOptions, meta, version } | null`; `ENOTSUP`
   when the place has no `fs.script`. It never prepares or compiles
   anything itself. `cachedData` is undefined for an extension outside
-  `fs.script.compile` — never null, which `vm.Script` refuses — so one
-  line serves every bundle:
+  `fs.script.compile` — never null, which `vm.Script` refuses. `version`
+  is the file's ([Versions](#versions)): a `vm.Script` built from the
+  bundle serves until it changes.
+- **The contract of cached data.** XVFS cached data serves only a
+  consumer that creates a `vm.Script` from the identical source with
+  compatible `scriptOptions` — the bundle, as it is:
 
   ```js
-  const { source, cachedData, scriptOptions } = files.script('/view.dhtml');
-  const script = new vm.Script(source, { ...scriptOptions, cachedData });
+  const bundle = files.script(key);
+  const script = new vm.Script(bundle.source, {
+    ...bundle.scriptOptions,
+    cachedData: bundle.cachedData ?? undefined,
+  });
   ```
 
-  Cached data V8 rejects in one isolate (`script.cachedDataRejected`) is
-  that isolate's: the script compiles from `source` there, and the file,
-  its companion and its version stay as published. The module hook does
-  the same for a module: its original compiler runs the source once.
-  `version` is the file's ([Versions](#versions)): a `vm.Script` built
-  from the bundle serves until it changes.
+  A changed source, a wrapper added around it, or compile parameters
+  that differ where V8 looks — its version and flags — can make V8
+  reject it: `script.cachedDataRejected === true`. V8 does not compare
+  the text itself, only the source's length, so cached data of another
+  text may also be taken and run the wrong code: never pass it with any
+  source but the bundle's. On rejection the consumer runs the canonical
+  source without cached data — the `vm.Script` has compiled
+  `bundle.source` itself. The refusal is that V8 isolate's alone: the
+  file, its companion and the published version of XVFS stay as they
+  are, and nothing is published again.
+
+- **CommonJS keeps its own.** An ordinary `require()` uses the cached
+  data `require.compile` builds for `Module.wrap(canonicalSource)` under
+  the module's filename (`\0require:bytecode`); the module hook applies
+  it, and on rejection Node's compiler runs the module from its source,
+  once. It and the bare cached data of `fs.script.compile` are cached
+  data of different texts and never mix.
 
 - **`mjs`.** `fs.script.ext: ['mjs']` hands out the text of a module and
   nothing more: no cached data (`compile` refuses `mjs`), no module
@@ -1325,8 +1343,9 @@ of the call — a frozen plain object, a new one each time:
 `lib/adapters/*`, not for application code: they hand back raw routing
 decisions and borrowed views without the ownership and ext policies
 `PlaceFs` applies. `bytecode()` in particular returns a borrowed SAB
-view that the compile hook passes straight to `vm.Script`. Application
-code should use `kernel.fs(name)`.
+view of the cached data of `Module.wrap(source)`, which the compile hook
+passes straight to `vm.Script` — never cached data for the bare source.
+Application code should use `kernel.fs(name)`.
 
 ### `VfsKernel` (worker)
 

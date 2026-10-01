@@ -239,30 +239,42 @@ bytecode cache.
 When the watcher detects a source change, it recompiles bytecode in the
 same epoch and publishes both in one `vfs-update`.
 
-### Sharing bytecode with `metavm`
+### Cached data in your own `vm.Script`
 
-`kernel.bytecode(absPath)` returns the same `Buffer` shape that
-`metavm.createScript(source, { cachedData })` expects:
+XVFS cached data serves only a consumer that creates a `vm.Script` from
+the identical source with compatible `scriptOptions`. For code that runs
+sources itself, that is the `fs.script` bundle, as it is:
 
 ```js
-const metavm = require('metavm');
-const abs = path.join(kernel.appRoot, 'domain', 'handler.js');
-const source = kernel.fs('domain').readFile('/handler.js', 'utf8');
-// Null without a companion: pass undefined, which vm.Script takes.
-const cachedData = kernel.bytecode(abs) ?? undefined;
-
-const script = metavm.createScript(source, {
-  filename: abs,
-  cachedData,
+const bundle = files.script(key);
+const script = new vm.Script(bundle.source, {
+  ...bundle.scriptOptions,
+  cachedData: bundle.cachedData ?? undefined,
 });
-const handler = script.exports;
 ```
 
-This works in any thread that holds the snapshot — the bytecode lives in
-SAB and is shared zero-copy. Without a companion (the file's extension
-is not in `require.compile`) `kernel.bytecode()` is null, and the source
-compiles as usual. Prove `cachedDataRejected === false` in a worker, not
-in the compiling thread: V8's per-isolate cache masks rejection there.
+- **What V8 refuses.** A changed source, a wrapper added around it, or
+  compile parameters that differ where V8 looks — its version and flags
+  — can make it reject the cached data:
+  `script.cachedDataRejected === true`. V8 does not compare the text
+  itself, only the source's length, so cached data of another text may
+  also be taken and run the wrong code: never pass it with any source but
+  the bundle's, nor under a compiler that wraps the source its own way.
+- **On rejection** the consumer runs the canonical source without cached
+  data: the `vm.Script` has compiled `bundle.source` itself — run it as
+  usual. The refusal is that V8 isolate's alone; it changes no file, no
+  companion and no published version of XVFS, and nothing is published
+  again.
+- **CommonJS keeps its own.** An ordinary `require()` uses the cached
+  data `require.compile` builds for `Module.wrap(canonicalSource)` under
+  the module's filename — the `\0require:bytecode` companion the module
+  hook applies, falling back to Node's compiler once on rejection. It
+  and the bare cached data of `fs.script.compile` are cached data of
+  different texts: never mix them, nor hand `kernel.bytecode()` to a
+  `vm.Script` of the bare source.
+
+Prove `cachedDataRejected === false` in a worker, not in the compiling
+thread: V8's per-isolate cache masks rejection there.
 
 ### AI agent / plugin workspace
 
@@ -456,8 +468,7 @@ const kernel = new VfsKernel(config, {
 const bundle = kernel.fs('application').script('/handler.js');
 const script = new vm.Script(bundle.source, {
   ...bundle.scriptOptions,
-  // Undefined for an extension outside fs.script.compile, never null.
-  cachedData: bundle.cachedData,
+  cachedData: bundle.cachedData ?? undefined,
 });
 const handler = script.runInThisContext();
 ```

@@ -351,7 +351,7 @@ compiles each source once; the module hook's `_compile` hands the
 bytecode to `vm.Script` as `cachedData` in every worker, so V8 skips
 parsing and compilation, lazy functions included.
 `fs.script.compile` gives the same to code that runs sources through
-`vm.Script` itself ([integration.md → Sharing bytecode with `metavm`](integration.md#sharing-bytecode-with-metavm)).
+`vm.Script` itself ([integration.md → Cached data in your own `vm.Script`](integration.md#cached-data-in-your-own-vmscript)).
 
 **Against the usual way** — every worker parsing and compiling the same
 sources; Node's compile cache (`module.enableCompileCache()`: on disk,
