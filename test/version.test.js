@@ -114,7 +114,7 @@ describe('version: mutations', () => {
       v: {
         origin: 'virtual',
         fs: { writable: true, compress: { encodings: ['gzip'] } },
-        require: { compile: true },
+        require: true,
       },
     });
     try {
@@ -302,11 +302,11 @@ describe('version: reads', () => {
     const k = await kernel(root, {
       site: {
         fs: {
-          ext: ['css', 'js'],
+          ext: ['css'],
           zeroCopy: true,
           fallback: 'disk',
           compress: { encodings: ['gzip'], ext: ['css'] },
-          script: { ext: ['js'] },
+          script: { compile: ['js'] },
         },
       },
       m: { provider: 'map', fs: true },
@@ -356,7 +356,7 @@ describe('version: reads', () => {
           compress: { encodings: ['gzip'], retainRaw: false },
         },
       },
-      mix: { fs: { ext: ['css'] }, require: { ext: ['js'], compile: false } },
+      mix: { fs: { ext: ['css'] }, require: { ext: ['js'] } },
     });
     try {
       const big = k.fs('big');

@@ -253,7 +253,7 @@ const KEY_PLACES = {
   pub: { fs: { ext: ['txt'], fallback: 'disk', prepare: { mark: ['txt'] } } },
   lock: { fs: { ext: ['txt'], fallback: 'deny', prepare: { mark: ['txt'] } } },
   mods: {
-    require: { ext: ['js'], prepare: 'mod' },
+    require: { compile: ['js'], prepare: 'mod' },
     import: { ext: ['mjs'], prepare: 'mod' },
   },
   vmod: {

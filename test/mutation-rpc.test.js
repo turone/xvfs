@@ -596,7 +596,7 @@ describe('mutation RPC: writeFiles', () => {
     const k = await kernel(root, {
       v: {
         origin: 'virtual',
-        fs: { writable: true, script: { ext: ['js'] } },
+        fs: { writable: true, script: { compile: ['js'] } },
       },
     });
     const w = worker(k);

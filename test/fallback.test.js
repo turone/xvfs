@@ -293,7 +293,7 @@ describe("fs.fallback: 'disk' — a partial disk cache", () => {
         sib: { fs: { ext: ['html'] } },
         lib: {
           fs: { ext: ['js'], fallback: 'disk' },
-          require: { ext: ['js'], compile: false },
+          require: { ext: ['js'] },
         },
         up: { fs: { ext: ['txt'], writable: true, fallback: 'disk' } },
       },

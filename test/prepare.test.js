@@ -93,16 +93,29 @@ describe('prepare config: forms', () => {
     assert.equal(p.scanExt, null);
   });
 
-  it('fs.script.ext is not the scope of a short fs.prepare', () => {
+  it('a short fs.prepare covers the lists fs gives, never the defaults of script: true', () => {
+    const p = placeOf({
+      fs: {
+        ext: ['css'],
+        prepare: 'styles',
+        script: { ext: ['mjs'], compile: ['js'] },
+      },
+    });
+    assert.deepEqual(p.prepare, { css: 'styles', mjs: 'styles', js: 'styles' });
+    assert.deepEqual(p.fs.ext, ['css', 'js', 'mjs']);
+    assert.deepEqual(
+      placeOf({ fs: { prepare: 'api', script: { compile: ['js'] } } }).prepare,
+      { js: 'api' },
+    );
     rejects(
-      { fs: { prepare: 'api', script: { ext: ['js'] } } },
+      { fs: { prepare: 'api', script: true } },
       /fs\.prepare: "api" needs a finite ext list/,
     );
-    const p = placeOf({
-      fs: { ext: ['css'], prepare: 'styles', script: { ext: ['js'] } },
+    const own = placeOf({
+      fs: { ext: ['css'], prepare: 'styles', script: true },
     });
-    assert.deepEqual(p.prepare, { css: 'styles' }, 'js is not covered');
-    assert.deepEqual(p.fs.ext, ['css', 'js']);
+    assert.deepEqual(own.prepare, { css: 'styles' }, 'js, cjs not covered');
+    assert.deepEqual(own.fs.ext, ['css', 'js', 'cjs']);
   });
 
   it('prepare neither adds nor removes extensions', () => {
@@ -119,14 +132,14 @@ describe('prepare config: forms', () => {
   it('a domain without prepare shares the file prepared by another', () => {
     const p = placeOf({
       fs: { ext: ['js', 'json'] },
-      require: { ext: ['js'], prepare: 'module', compile: true },
+      require: { compile: ['js'], prepare: 'module' },
     });
     assert.deepEqual(p.prepare, { js: 'module' });
   });
 
   it('resolved config is frozen and cloneable', () => {
     const [p] = places({
-      p: { fs: { ext: ['js'], prepare: 'api', script: { compile: true } } },
+      p: { fs: { prepare: 'api', script: { compile: ['js'] } } },
     });
     assert.ok(Object.isFrozen(p.prepare));
     assert.throws(() => {
@@ -249,7 +262,7 @@ describe('prepare config: errors', () => {
           prepare: 'x',
           compress: { encodings: ['gzip'], retainRaw: false },
         },
-        require: { compile: false },
+        require: { ext: ['js', 'cjs', 'json'] },
       },
       /retainRaw: false is incompatible with prepare/,
     );
@@ -494,13 +507,13 @@ describe('prepare pipeline: every consumer sees the canonical content', () => {
   const spec = {
     app: {
       fs: {
-        ext: ['js', 'css'],
+        ext: ['css'],
         zeroCopy: true,
         prepare: { code: ['js'], styles: ['css'] },
-        script: { ext: ['js'], compile: true },
+        script: { compile: ['js'] },
         compress: { encodings: ['gzip'] },
       },
-      require: { ext: ['js'], compile: true },
+      require: { compile: ['js'] },
     },
     esm: { import: { ext: ['mjs'], prepare: 'code' } },
   };
@@ -601,8 +614,8 @@ describe('prepare pipeline: every consumer sees the canonical content', () => {
       { 'all/a.js': RAW },
       {
         all: {
-          fs: { ext: ['js'], prepare: 'code', script: { compile: true } },
-          require: { ext: ['js'], compile: true },
+          fs: { prepare: 'code', script: { compile: ['js'] } },
+          require: { compile: ['js'] },
           import: { ext: ['js'] },
         },
       },
@@ -629,8 +642,8 @@ describe('prepare pipeline: every consumer sees the canonical content', () => {
       { 'lib/a.js': RAW },
       {
         lib: {
-          fs: { ext: ['js', 'json'], script: { ext: ['js'] } },
-          require: { ext: ['js'], prepare: 'code', compile: true },
+          fs: { ext: ['json'], script: { compile: ['js'] } },
+          require: { compile: ['js'], prepare: 'code' },
         },
       },
       {
@@ -882,9 +895,8 @@ describe('prepare pipeline: the preparer contract', () => {
       {
         fs: {
           writable: true,
-          ext: ['js'],
           prepare: { p: ['js'] },
-          script: { compile: true },
+          script: { compile: ['js'] },
         },
       },
     );
@@ -941,7 +953,7 @@ describe('prepare pipeline: the preparer contract', () => {
         if (fail) throw new Error('bad input');
         return raw.toString();
       },
-      { require: { ext: ['js'], compile: true } },
+      { require: { compile: ['js'] } },
     );
     try {
       await v.writeFile('/a.js', 'module.exports = 1;');
@@ -963,7 +975,7 @@ describe('prepare pipeline: the preparer contract', () => {
       { 'app/a.js': RAW },
       {
         app: {
-          fs: { ext: ['js'], prepare: 'code', script: { compile: true } },
+          fs: { prepare: 'code', script: { compile: ['js'] } },
         },
       },
       {
@@ -1026,12 +1038,11 @@ describe('prepare pipeline: publication', () => {
       {
         app: {
           fs: {
-            ext: ['js'],
             prepare: 'code',
-            script: { compile: true },
+            script: { compile: ['js'] },
             compress: { encodings: ['gzip'] },
           },
-          require: { ext: ['js'], compile: true },
+          require: { compile: ['js'] },
         },
       },
       { code },
@@ -1083,8 +1094,8 @@ describe('prepare pipeline: publication', () => {
       { 'app/a.js': RAW },
       {
         app: {
-          fs: { ext: ['js'], prepare: 'code', script: { compile: true } },
-          require: { ext: ['js'], compile: true },
+          fs: { prepare: 'code', script: { compile: ['js'] } },
+          require: { compile: ['js'] },
         },
       },
       { code: prep.fn },
@@ -1140,12 +1151,12 @@ describe('prepare pipeline: publication', () => {
       {
         app: {
           fs: {
-            ext: ['js', 'bin'],
+            ext: ['bin'],
             prepare: { code: ['js'] },
-            script: { compile: true },
+            script: { compile: ['js'] },
             compress: { encodings: ['gzip'], ext: ['js'] },
           },
-          require: { ext: ['js'], compile: true },
+          require: { compile: ['js'] },
         },
       },
       { code: prep.fn },

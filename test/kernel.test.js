@@ -275,7 +275,7 @@ describe('VfsKernel: lifecycle', () => {
 
   it('fs() explains unknown places, missing fs domain and passthrough providers', async () => {
     const k = await kernel(root, {
-      site: { require: { compile: false } },
+      site: { require: { ext: ['js', 'cjs', 'json'] } },
       disk: { provider: 'disk', fs: true },
       nd: { provider: 'node-default', fs: true },
     });
@@ -345,8 +345,8 @@ describe('VfsKernel: providers', () => {
   it('resolveModule applies domain, ext and provider rules', async () => {
     const k = await kernel(root, {
       site: { fs: true, import: { ext: ['js'] } },
-      lib: { require: { ext: ['js'], compile: false } },
-      d: { provider: 'disk', require: { compile: false } },
+      lib: { require: { ext: ['js'] } },
+      d: { provider: 'disk', require: { ext: ['js', 'cjs', 'json'] } },
       n: { provider: 'node-default', fs: true },
     });
     try {
@@ -384,7 +384,7 @@ describe('VfsKernel: providers', () => {
       root,
       {
         lib: { require: true },
-        d: { provider: 'disk', require: { compile: false } },
+        d: { provider: 'disk', require: { ext: ['js', 'cjs', 'json'] } },
       },
       { strict: true },
     );

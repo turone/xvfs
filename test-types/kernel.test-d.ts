@@ -27,7 +27,7 @@ const config = new VfsConfig({
   places: {
     application: {
       fs: { ext: ['js', 'css'], prepare: { api: ['js'], styles: ['css'] } },
-      require: { ext: ['js'], compile: true },
+      require: { compile: ['js'] },
     },
   },
 });

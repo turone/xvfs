@@ -88,7 +88,7 @@ describe('publish: mutations of a virtual place', () => {
       v: {
         origin: 'virtual',
         fs: { writable: true, compress: { encodings: ['gzip'] } },
-        require: { compile: true },
+        require: true,
       },
     });
     try {

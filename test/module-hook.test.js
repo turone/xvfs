@@ -61,7 +61,7 @@ describe('module-hook: CommonJS', () => {
         fs: { writable: true },
         require: true,
       },
-      disk: { provider: 'disk', require: { compile: false } },
+      disk: { provider: 'disk', require: { ext: ['js', 'cjs', 'json'] } },
     });
     moduleHook.install(k);
     spyScripts();
@@ -186,6 +186,72 @@ describe('module-hook: CommonJS', () => {
   });
 });
 
+// An extension of `require.compile` beyond js and cjs: a module that names
+// it loads it as CommonJS through its cached data; one that leaves it out
+// finds nothing — only js, cjs and json are tried, as in Node.
+describe('module-hook: an extension of require.compile', () => {
+  let root;
+  let k;
+  const at = (...p) => path.join(root, ...p);
+
+  before(async () => {
+    root = writeTree(tmpDir('modhook-compile'), {
+      'app/main.js':
+        "exports.view = require('./view.dhtml'); exports.data = require('./data.json');",
+      'app/bare.js': "module.exports = require('./view');",
+      'app/view.dhtml': '<p>{{name}}</p>',
+      'app/data.json': '{"name": "ann"}',
+    });
+    const view = (raw) =>
+      `module.exports = (data) => ${JSON.stringify(raw.toString())}` +
+      ".replace('{{name}}', data.name);";
+    k = await kernel(
+      root,
+      {
+        app: {
+          require: {
+            ext: ['json'],
+            compile: ['js', 'cjs', 'dhtml'],
+            prepare: { view: ['dhtml'] },
+          },
+        },
+      },
+      {},
+      { preparers: { view } },
+    );
+    moduleHook.install(k);
+    spyScripts();
+  });
+
+  after(() => {
+    unspy();
+    moduleHook.uninstall();
+    k.close();
+    rm(root);
+  });
+
+  it('require of the full name takes the cached-data path', () => {
+    const main = require(at('app', 'main.js'));
+    assert.equal(main.view({ name: 'ann' }), '<p>ann</p>');
+    const file = at('app', 'view.dhtml');
+    assert.ok(k.bytecode(file));
+    assert.equal(scripts.filter((s) => s.filename === file).length, 1);
+  });
+
+  it('json loads without bytecode', () => {
+    const file = at('app', 'data.json');
+    assert.deepEqual(require(at('app', 'main.js')).data, { name: 'ann' });
+    assert.equal(k.bytecode(file), null);
+    assert.equal(scripts.filter((s) => s.filename === file).length, 0);
+  });
+
+  it('a specifier without the extension finds nothing', () => {
+    assert.throws(() => require(at('app', 'bare.js')), {
+      code: 'MODULE_NOT_FOUND',
+    });
+  });
+});
+
 describe('module-hook: bytecode accepted across isolates', () => {
   it('a worker attached to the snapshot compiles with cached data V8 does not reject', async () => {
     const { Worker } = require('node:worker_threads');
@@ -293,7 +359,7 @@ describe('module-hook: dot-prefixed directories inside a place', () => {
     });
     const k = await kernel(
       root,
-      { lib: { require: { ext: ['js'] }, import: { ext: ['mjs'] } } },
+      { lib: { require: { compile: ['js'] }, import: { ext: ['mjs'] } } },
       { strict: true },
     );
     moduleHook.install(k);

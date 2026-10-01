@@ -228,9 +228,12 @@ describe('VfsConfig: domains', () => {
     assert.equal(p.scanExt, null);
   });
 
-  it('require: true means compile with default ext', () => {
+  it('require: true compiles js and cjs, and takes json as it is', () => {
     const [p] = make({ a: { require: true } }).places;
-    assert.deepEqual(p.require, { ext: ['js', 'cjs', 'json'], compile: true });
+    assert.deepEqual(p.require, {
+      ext: ['js', 'cjs', 'json'],
+      compile: ['js', 'cjs'],
+    });
     assert.deepEqual(p.scanExt, ['js', 'cjs', 'json']);
   });
 
@@ -241,9 +244,9 @@ describe('VfsConfig: domains', () => {
 
   it('domain ext replaces defaults and is normalized', () => {
     const [p] = make({
-      a: { require: { ext: ['JS', 'js', 'Cjs'], compile: false } },
+      a: { require: { ext: ['JS', 'js', 'Cjs'] } },
     }).places;
-    assert.deepEqual(p.require, { ext: ['js', 'cjs'], compile: false });
+    assert.deepEqual(p.require, { ext: ['js', 'cjs'], compile: [] });
   });
 
   it('scanExt is the ordered union fs → require → import', () => {
@@ -289,6 +292,142 @@ describe('VfsConfig: domains', () => {
   });
 });
 
+// `require` and `fs.script` list the extensions that get V8 cached data in
+// `compile`, the rest in `ext`; a domain lists an extension once.
+describe('VfsConfig: compile lists', () => {
+  const placeOf = (spec) => make({ a: spec }).places[0];
+  const SCRIPT = { ext: ['js', 'cjs'], compile: ['js', 'cjs'] };
+  const REQUIRE = { ext: ['js', 'cjs', 'json'], compile: ['js', 'cjs'] };
+
+  it('script: true compiles js and cjs', () => {
+    const p = placeOf({ fs: { script: true } });
+    assert.deepEqual(p.fs.script, SCRIPT);
+    assert.deepEqual(p.fs.ext, ['js', 'cjs']);
+    assert.deepEqual(p.scanExt, ['js', 'cjs']);
+  });
+
+  it('the defaults apply when a domain gives neither list', () => {
+    for (const domain of [true, {}, { prepare: 'm' }]) {
+      assert.deepEqual(placeOf({ require: domain }).require, REQUIRE);
+    }
+    for (const script of [true, {}]) {
+      assert.deepEqual(placeOf({ fs: { script } }).fs.script, SCRIPT);
+    }
+  });
+
+  it('a list given replaces both defaults', () => {
+    assert.deepEqual(placeOf({ require: { ext: ['json'] } }).require, {
+      ext: ['json'],
+      compile: [],
+    });
+    assert.deepEqual(placeOf({ require: { compile: ['js'] } }).require, {
+      ext: ['js'],
+      compile: ['js'],
+    });
+    const mjs = placeOf({ fs: { script: { ext: ['mjs'] } } });
+    assert.deepEqual(mjs.fs.script, { ext: ['mjs'], compile: [] });
+    assert.deepEqual(mjs.fs.ext, ['mjs']);
+    const tmpl = placeOf({ fs: { script: { compile: ['tmpl'] } } });
+    assert.deepEqual(tmpl.fs.script, { ext: ['tmpl'], compile: ['tmpl'] });
+  });
+
+  it('compile adds its extensions to the domain, before those of ext', () => {
+    const p = placeOf({
+      fs: {
+        ext: ['json'],
+        script: { ext: ['mjs'], compile: ['js', 'cjs', 'dhtml'] },
+      },
+      require: { ext: ['json'], compile: ['js', 'cjs', 'dhtml'] },
+    });
+    assert.deepEqual(p.fs.script, {
+      ext: ['js', 'cjs', 'dhtml', 'mjs'],
+      compile: ['js', 'cjs', 'dhtml'],
+    });
+    assert.deepEqual(p.fs.ext, ['json', 'js', 'cjs', 'dhtml', 'mjs']);
+    assert.deepEqual(p.require, {
+      ext: ['js', 'cjs', 'dhtml', 'json'],
+      compile: ['js', 'cjs', 'dhtml'],
+    });
+    assert.deepEqual(p.scanExt, ['json', 'js', 'cjs', 'dhtml', 'mjs']);
+  });
+
+  it('lists are normalized; a repeat within one list collapses', () => {
+    const p = placeOf({
+      fs: { script: { compile: ['Tmpl', 'tmpl'] } },
+      require: { ext: ['JSON', 'json'], compile: ['JS', 'js', 'Cjs'] },
+    });
+    assert.deepEqual(p.fs.script, { ext: ['tmpl'], compile: ['tmpl'] });
+    assert.deepEqual(p.require, REQUIRE);
+  });
+
+  it('compile is a list of extensions: no boolean, no empty list', () => {
+    for (const compile of [true, false, [], 'js', null]) {
+      fails(
+        { places: { a: { require: { compile } } } },
+        /places\.a\.require\.compile must be a non-empty array of extensions$/,
+      );
+      fails(
+        { places: { a: { fs: { script: { compile } } } } },
+        /places\.a\.fs\.script\.compile must be a non-empty array of extensions$/,
+      );
+    }
+    fails(
+      { places: { a: { require: { compile: ['.dhtml'] } } } },
+      /places\.a\.require\.compile items must be alphanumeric/,
+    );
+  });
+
+  it('a domain lists an extension once', () => {
+    fails(
+      { places: { a: { require: { ext: ['json', 'js'], compile: ['JS'] } } } },
+      /places\.a\.require: extension "js" is listed in both ext and compile$/,
+    );
+    fails(
+      { places: { a: { fs: { script: { ext: ['js'], compile: ['js'] } } } } },
+      /places\.a\.fs\.script: extension "js" is listed in both ext and compile$/,
+    );
+    fails(
+      { places: { a: { fs: { ext: ['js'], script: { compile: ['js'] } } } } },
+      /places\.a\.fs: extension "js" is listed in both ext and script\.compile$/,
+    );
+    fails(
+      { places: { a: { fs: { ext: ['mjs'], script: { ext: ['MJS'] } } } } },
+      /places\.a\.fs: extension "mjs" is listed in both ext and script\.ext$/,
+    );
+    // The defaults of `script: true` are lists of the domain too.
+    fails(
+      { places: { a: { fs: { ext: ['css', 'cjs'], script: true } } } },
+      /places\.a\.fs: extension "cjs" is listed in both ext and script\.compile$/,
+    );
+  });
+
+  it('json and mjs get no cached data: they belong in ext', () => {
+    for (const ext of ['json', 'mjs', 'JSON']) {
+      const name = ext.toLowerCase();
+      fails(
+        { places: { a: { require: { compile: ['js', ext] } } } },
+        new RegExp(
+          `places\\.a\\.require\\.compile: extension "${name}" gets no ` +
+            'cached data — list it in places\\.a\\.require\\.ext$',
+        ),
+      );
+      fails(
+        { places: { a: { fs: { script: { compile: [ext] } } } } },
+        new RegExp(
+          `places\\.a\\.fs\\.script\\.compile: extension "${name}" gets ` +
+            'no cached data — list it in places\\.a\\.fs\\.script\\.ext$',
+        ),
+      );
+    }
+    const p = placeOf({
+      fs: { script: { ext: ['mjs'] } },
+      require: { ext: ['json', 'mjs'] },
+    });
+    assert.deepEqual(p.fs.script, { ext: ['mjs'], compile: [] });
+    assert.deepEqual(p.require, { ext: ['json', 'mjs'], compile: [] });
+  });
+});
+
 describe('VfsConfig: providers', () => {
   it('defaults to sab and validates provider names', () => {
     assert.equal(make({ a: { fs: true } }).places[0].provider, 'sab');
@@ -307,18 +446,19 @@ describe('VfsConfig: providers', () => {
   });
 
   it('disk and node-default cannot compile', () => {
+    const hint = /cannot store bytecode; list its extensions in require\.ext$/;
+    fails({ places: { a: { provider: 'disk', require: true } } }, hint);
+    fails({ places: { a: { provider: 'node-default', require: true } } }, hint);
     fails(
-      { places: { a: { provider: 'disk', require: true } } },
-      /compile: false/,
-    );
-    fails(
-      { places: { a: { provider: 'node-default', require: true } } },
-      /compile: false/,
+      {
+        places: { a: { provider: 'disk', require: { compile: ['dhtml'] } } },
+      },
+      hint,
     );
     const [p] = make({
-      a: { provider: 'disk', require: { compile: false } },
+      a: { provider: 'disk', require: { ext: ['js', 'cjs', 'json'] } },
     }).places;
-    assert.equal(p.require.compile, false);
+    assert.deepEqual(p.require, { ext: ['js', 'cjs', 'json'], compile: [] });
   });
 
   it('zeroCopy and compress need in-memory providers', () => {
@@ -491,21 +631,23 @@ describe('VfsConfig: compress', () => {
       },
       /retainRaw/,
     );
-    fails(
-      {
-        places: {
-          a: {
-            fs: { compress: { encodings: ['gzip'], retainRaw: false } },
-            require: true,
+    for (const domain of [true, { compile: ['dhtml'] }]) {
+      fails(
+        {
+          places: {
+            a: {
+              fs: { compress: { encodings: ['gzip'], retainRaw: false } },
+              require: domain,
+            },
           },
         },
-      },
-      /retainRaw/,
-    );
+        /retainRaw: false is incompatible with require\.compile/,
+      );
+    }
     make({
       a: {
         fs: { compress: { encodings: ['gzip'], retainRaw: false } },
-        require: { compile: false },
+        require: { ext: ['js', 'cjs', 'json'] },
       },
     });
   });

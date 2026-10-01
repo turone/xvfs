@@ -110,10 +110,12 @@ export interface MkdirOptions {
 
 /**
  * Everything needed to build a local `vm.Script` for a source `fs.script`
- * covers: `new vm.Script(source, { ...scriptOptions, cachedData })`.
+ * covers:
+ * `new vm.Script(source, { ...scriptOptions, cachedData: cachedData ?? undefined })`.
  * `source` and `cachedData` are owned copies; `scriptOptions` and `meta`
  * are the frozen objects the entry holds, shared by every call.
- * `cachedData` is null when `fs.script.compile` is off. `version` is the
+ * `cachedData` is null when the key's extension is not in
+ * `fs.script.compile`; `vm.Script` refuses a null one. `version` is the
  * file's (`PlaceFs.version()`): a script built from the bundle serves until
  * it changes.
  */

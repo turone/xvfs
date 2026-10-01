@@ -155,7 +155,7 @@ describe('script domain: live reload in a linked worker', () => {
     root = writeTree(tmpDir('script-live'), { 'api/h.js': V1 });
     k = await kernel(
       root,
-      { api: { fs: { ext: ['js', 'cjs'], prepare: 'wrap', script: true } } },
+      { api: { fs: { prepare: 'wrap', script: { compile: ['js', 'cjs'] } } } },
       { watch: true, watchTimeout: 60 },
       {
         preparers: {

@@ -26,8 +26,10 @@ export type Links = 'deny' | 'verify';
 
 /**
  * `prepare` of a domain: a preparer name for every extension of the
- * domain's own finite `ext`, or `{ name: [ext, …] }`. Names are registered
- * as functions in the kernel option `preparers`.
+ * domain's own finite `ext` — in fs, those `ext`, `script.ext` and
+ * `script.compile` list, never the defaults of `script: true` — or
+ * `{ name: [ext, …] }`. Names are registered as functions in the kernel
+ * option `preparers`.
  */
 export type PrepareConfig =
   string | { readonly [preparer: string]: readonly string[] };
@@ -81,15 +83,26 @@ export interface CompressConfig {
   retainRaw?: boolean;
 }
 
+/**
+ * Sources for `PlaceFs.script()`. With neither `ext` nor `compile`:
+ * `compile: ['js', 'cjs']`; a list given replaces that default. Every
+ * extension is listed once in fs: in `fs.ext`, `ext` or `compile`.
+ */
 export interface ScriptConfig {
-  /** Sources compiled for `PlaceFs.script()`. Default `['js', 'cjs']`. */
+  /** Sources without cached data: their bundle's `cachedData` is null. */
   ext?: readonly string[];
-  /** Build the `\0script:bytecode` companion. Default true. */
-  compile?: boolean;
+  /**
+   * Sources with cached data (the `\0script:bytecode` companion); each is
+   * a source of the domain too. Never `json` or `mjs`.
+   */
+  compile?: readonly string[];
 }
 
 export interface FsDomainConfig {
-  /** Visible extensions; absent = every file. */
+  /**
+   * Visible extensions besides those of `script`; absent = every file,
+   * unless `script` is on.
+   */
   ext?: readonly string[];
   writable?: boolean;
   zeroCopy?: boolean;
@@ -100,11 +113,19 @@ export interface FsDomainConfig {
   fallback?: Fallback;
 }
 
+/**
+ * With neither `ext` nor `compile`: `ext: ['json']`,
+ * `compile: ['js', 'cjs']`; a list given replaces both defaults. Every
+ * extension is listed once: in `ext` or `compile`.
+ */
 export interface RequireDomainConfig {
-  /** Default `['js', 'cjs', 'json']`. */
+  /** Extensions without cached data. */
   ext?: readonly string[];
-  /** Build the `\0require:bytecode` companion. Default true. */
-  compile?: boolean;
+  /**
+   * Extensions with cached data (the `\0require:bytecode` companion); each
+   * is an extension of the domain too. Never `json` or `mjs`.
+   */
+  compile?: readonly string[];
   prepare?: PrepareConfig;
 }
 
@@ -183,8 +204,10 @@ export interface ResolvedCompress {
 }
 
 export interface ResolvedScript {
+  /** Every script source: `compile`, then the extensions of `ext`. */
   readonly ext: readonly string[];
-  readonly compile: boolean;
+  /** Sources with cached data; empty when none. */
+  readonly compile: readonly string[];
 }
 
 export interface ResolvedFsDomain {
@@ -199,8 +222,10 @@ export interface ResolvedFsDomain {
 }
 
 export interface ResolvedRequireDomain {
+  /** Every extension of the domain: `compile`, then those of `ext`. */
   readonly ext: readonly string[];
-  readonly compile: boolean;
+  /** Extensions with cached data; empty when none. */
+  readonly compile: readonly string[];
 }
 
 export interface ResolvedImportDomain {

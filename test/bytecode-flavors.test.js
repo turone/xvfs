@@ -48,9 +48,8 @@ describe('bytecode flavors: coexistence', () => {
           origin: 'virtual',
           fs: {
             writable: true,
-            ext: ['js', 'cjs'],
             prepare: 'id',
-            script: { compile: true },
+            script: { compile: ['js', 'cjs'] },
           },
         },
       },
@@ -75,7 +74,7 @@ describe('bytecode flavors: coexistence', () => {
       v: {
         origin: 'virtual',
         fs: { writable: true },
-        require: { compile: true },
+        require: true,
       },
     });
     try {
@@ -99,11 +98,10 @@ describe('bytecode flavors: coexistence', () => {
           origin: 'virtual',
           fs: {
             writable: true,
-            ext: ['js', 'cjs'],
             prepare: 'id',
-            script: { compile: true },
+            script: { compile: ['js', 'cjs'] },
           },
-          require: { compile: true },
+          require: true,
         },
       },
       {},
@@ -183,6 +181,82 @@ describe('bytecode flavors: coexistence', () => {
   // proven above ("only … exists", "both flags").
 });
 
+// `compile` lists the extensions that get a flavor, `ext` the ones that do
+// not: a template extension gets both flavors as js and cjs do, prepared
+// once; mjs is a script source without cached data; json gets none.
+describe('bytecode flavors: compile lists', () => {
+  const lists = {
+    writable: true,
+    ext: ['json'],
+    prepare: { view: ['dhtml'] },
+    script: { ext: ['mjs'], compile: ['js', 'cjs', 'dhtml'] },
+  };
+  const places = {
+    v: {
+      origin: 'virtual',
+      fs: lists,
+      require: { ext: ['json'], compile: ['js', 'cjs', 'dhtml'] },
+    },
+    m: {
+      provider: 'map',
+      origin: 'virtual',
+      fs: lists,
+      require: { ext: ['json'], compile: ['js', 'cjs', 'dhtml'] },
+    },
+  };
+  const FILES = {
+    '/a.js': 'module.exports = 1;',
+    '/b.cjs': 'module.exports = 2;',
+    '/view.dhtml': '<p>{{name}}</p>',
+    '/m.mjs': 'export default 3;',
+    '/d.json': '{"x": 1}',
+  };
+
+  it('js, cjs and dhtml get both flavors, mjs a bundle without cached data, json none', async () => {
+    const root = tmpDir('bc-lists');
+    const prepared = [];
+    const view = (raw, file) => {
+      prepared.push(`${file.place}:${file.key}`);
+      const html = JSON.stringify(raw.toString());
+      return `module.exports = (data) => ${html}.replace('{{name}}', data.name);`;
+    };
+    const k = await kernel(root, places, {}, { preparers: { view } });
+    try {
+      for (const name of ['v', 'm']) {
+        const files = k.fs(name);
+        await files.writeFiles(FILES);
+        assert.deepEqual(prepared, [`${name}:/view.dhtml`], 'prepared once');
+        prepared.length = 0;
+        const place = k.registry.get(name);
+        const companions = [...place.files.keys()].filter((key) =>
+          key.includes('\0'),
+        );
+        const compiled = ['/a.js', '/b.cjs', '/view.dhtml'];
+        assert.deepEqual(
+          companions.sort(),
+          compiled
+            .flatMap((key) => [
+              bytecodeKey(key, 'require'),
+              bytecodeKey(key, 'script'),
+            ])
+            .sort(),
+        );
+        for (const key of compiled) {
+          assert.ok(files.script(key).cachedData, `${name} ${key}`);
+        }
+        const mjs = files.script('/m.mjs');
+        assert.equal(mjs.source, FILES['/m.mjs']);
+        assert.equal(mjs.cachedData, null);
+        assert.equal(files.script('/d.json'), null, 'json is no script');
+        assert.equal(files.readFile('/d.json', 'utf8'), FILES['/d.json']);
+      }
+    } finally {
+      k.close();
+      rm(root);
+    }
+  });
+});
+
 describe('bytecode flavors: failure and rollback', () => {
   it('require.compile failure leaves a valid fs.script bundle published', async () => {
     const root = tmpDir('bc-require-fail');
@@ -193,11 +267,10 @@ describe('bytecode flavors: failure and rollback', () => {
           origin: 'virtual',
           fs: {
             writable: true,
-            ext: ['js', 'cjs'],
             prepare: 'id',
-            script: { compile: true },
+            script: { compile: ['js', 'cjs'] },
           },
-          require: { compile: true },
+          require: true,
         },
       },
       {},
@@ -233,9 +306,8 @@ describe('bytecode flavors: failure and rollback', () => {
           origin: 'virtual',
           fs: {
             writable: true,
-            ext: ['js', 'cjs'],
             prepare: 'id',
-            script: { compile: true },
+            script: { compile: ['js', 'cjs'] },
           },
         },
       },
@@ -300,9 +372,8 @@ describe('bytecode flavors: failure and rollback', () => {
     let broken = false;
     const scripts = {
       writable: true,
-      ext: ['js'],
       prepare: 'id',
-      script: { compile: true },
+      script: { compile: ['js'] },
     };
     const k = await kernel(
       root,
@@ -380,10 +451,10 @@ describe('bytecode flavors: failure and rollback', () => {
         origin: 'virtual',
         fs: {
           writable: true,
-          ext: ['txt', 'js'],
-          script: { ext: ['js'], compile: true },
+          ext: ['txt'],
+          script: { compile: ['js'] },
         },
-        require: { compile: true },
+        require: true,
       },
     });
     const w = worker(k);
@@ -473,8 +544,8 @@ describe('bytecode flavors: failure and rollback', () => {
           origin: 'virtual',
           fs: {
             writable: true,
-            ext: ['txt', 'js'],
-            script: { ext: ['js'], compile: true },
+            ext: ['txt'],
+            script: { compile: ['js'] },
           },
         },
       },
@@ -545,8 +616,8 @@ describe('bytecode flavors: failure and rollback', () => {
     const root = tmpDir('bc-script-rename');
     const scripts = {
       writable: true,
-      ext: ['txt', 'js'],
-      script: { ext: ['js'], compile: true },
+      ext: ['txt'],
+      script: { compile: ['js'] },
     };
     const k = await kernel(root, {
       v: { origin: 'virtual', fs: scripts },
@@ -610,7 +681,7 @@ describe('bytecode flavors: failure and rollback', () => {
     });
     try {
       const init = kernel(root, {
-        app: { fs: { ext: ['js'], script: { compile: true } } },
+        app: { fs: { script: true } },
       });
       await assert.rejects(init, (err) => {
         const file = path.join(root, 'app', 'bad.js');
@@ -633,9 +704,8 @@ describe('bytecode flavors: failure and rollback', () => {
           origin: 'virtual',
           fs: {
             writable: true,
-            ext: ['js'],
             prepare: 'id',
-            script: { compile: true },
+            script: { compile: ['js'] },
           },
         },
       },
