@@ -481,9 +481,10 @@ leak; a long pin (a slow download) is normal, not an error.
 bytes — a worker's streams would otherwise read memory the main thread reuses
 once the link is gone.
 
-**A closed link port is the worker's exit: its pending ACKs and its holds
-are dropped.** _Why:_ a thread that is gone reads nothing; waiting for it
-would keep its retired versions forever.
+**A closed link — the `MessagePort` created by `kernel.link()` and
+attached with `attach({ link })` — is the worker's exit: its pending ACKs
+and its holds are dropped.** _Why:_ a thread that is gone reads nothing;
+waiting for it would keep its retired versions forever.
 
 **`map` places take no part in retirement; their leases and releases are
 no-ops.** _Why:_ a Map entry is an owned Buffer the GC keeps alive; an
@@ -614,8 +615,10 @@ that.
 
 **The main kernel alone owns the allocator, preparation, publication,
 retirement and compaction; workers mutate `sab + virtual` places through an
-RPC over their link port.** The response follows publication — the update is
-posted first on the same port — and the payload travels as a detached copy.
+RPC over the `MessagePort` created by `kernel.link()` and attached with
+`attach({ link })`, an in-process channel between the main thread and the
+worker.** The response follows publication — the update is posted first on
+the same port — and the payload travels as a detached copy.
 _Why:_ one writer keeps allocation single-threaded without locks inside SAB;
 a worker sees its own write before its Promise settles.
 

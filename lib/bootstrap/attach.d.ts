@@ -15,8 +15,10 @@ export interface AttachOptions {
 
 /**
  * Rebuilds a read-only projection over the shared segments, installs the
- * hooks the config asks for, applies and ACKs the deltas of the link port
- * and publishes the kernel as `VfsKernel.current`. Idempotent: an attached
- * kernel is returned again. Throws without a link.
+ * hooks the config asks for, applies and ACKs the deltas (`vfs-update`)
+ * arriving through the `MessagePort` created by `kernel.link()` (`link.port`,
+ * an in-process channel to the main thread) and publishes the kernel as
+ * `VfsKernel.current`. Idempotent: an attached kernel is returned again.
+ * Throws without a link.
  */
 export function attach(options?: AttachOptions): VfsKernel;

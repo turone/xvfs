@@ -71,8 +71,10 @@ Storage and origins:
   what is written, compiled on write, invisible to every other thread.
 - **Two content origins** — `origin: 'disk'` (scanner + watcher fill the
   place) or `origin: 'virtual'` (the application writes the content —
-  from the main thread or, for `sab`, from a worker over the link port):
-  generated code, fetched data, fixtures, with no file on disk.
+  from the main thread or, for `sab`, from a worker through the
+  `MessagePort` created by `kernel.link()` and attached with
+  `attach({ link })`): generated code, fetched data, fixtures, with no
+  file on disk.
 
 Publication:
 
@@ -168,6 +170,16 @@ Workers do **not** run `--import` / `--require` preloads. Pass
 const { attach } = require('xvfs');
 const kernel = attach(); // reads workerData.vfs
 ```
+
+`kernel.link()` creates a `MessageChannel`: one end stays with the main
+kernel, the other — `vfs.port`, in `transferList` — goes to the worker,
+and `attach({ link })` takes it (`link` defaults to `workerData.vfs`).
+This `MessagePort` is an in-process channel between the main thread and
+that worker — neither a file-system link nor a network port. Through it
+the worker sends its mutations of `sab + virtual` places as RPC; the main
+kernel publishes the result into SAB and, as for every publication,
+sends each linked worker a `vfs-update`, which the worker applies and
+acknowledges.
 
 ### Manual wiring
 
@@ -1351,8 +1363,9 @@ Application code should use `kernel.fs(name)`.
 
 `attach({ link = workerData.vfs, preparers } = {})` projects the
 snapshot — at its `version`, with the main kernel's `instance` — installs
-hooks the config asks for, applies `vfs-update` from the link port, each
-with its version, announcing each publication to its own `'publish'`
+hooks the config asks for, applies each `vfs-update` arriving through
+the `MessagePort` created by `kernel.link()` (`link.port`), each with
+its version, announcing each publication to its own `'publish'`
 listeners, and ACKs **those — and only those** — back, with the
 retired versions its streams and leases still read. Publishes
 `VfsKernel.current` (also the `kernel` getter of the package's CommonJS
