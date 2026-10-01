@@ -3,6 +3,7 @@
 const { describe, it, before, after } = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
+const Module = require('node:module');
 const path = require('node:path');
 const vm = require('node:vm');
 const { pathToFileURL } = require('node:url');
@@ -252,6 +253,106 @@ describe('module-hook: an extension of require.compile', () => {
   });
 });
 
+// require.resolve() names the file require() loads, on every Node version
+// — Node's own asks the resolve hooks only from 24.20 on — for files that
+// exist in memory alone: from a module compiled with cached data (the
+// hook's require), from one Node compiled, and from outside the places.
+// Install touches no `require.extensions`; uninstall puts back what it
+// replaced.
+describe('module-hook: require.resolve names what require() loads', () => {
+  let root;
+  let k;
+  let native;
+  const at = (...p) => path.join(root, ...p);
+  const PROBE =
+    'const named = (id) => { try { return require.resolve(id); } ' +
+    'catch (err) { return err.code; } };\n' +
+    "module.exports = { view: named('./view.dhtml'), " +
+    "data: named('./data.json'), bare: named('./view'), " +
+    "loaded: require('./view.dhtml') };";
+
+  before(async () => {
+    native = {
+      compile: Module.prototype._compile,
+      resolveFilename: Module._resolveFilename,
+      extensions: Object.keys(require.extensions),
+    };
+    root = tmpDir('modhook-resolve');
+    k = await kernel(root, {
+      mem: {
+        provider: 'map',
+        origin: 'virtual',
+        fs: { writable: true },
+        require: { ext: ['json', 'cjs'], compile: ['js', 'dhtml'] },
+      },
+    });
+    const mem = k.fs('mem');
+    mem.writeFile('/compiled.js', PROBE);
+    mem.writeFile('/plain.cjs', PROBE);
+    mem.writeFile('/view.dhtml', "module.exports = 'view';");
+    mem.writeFile('/data.json', '{"a": 1}');
+    moduleHook.install(k);
+    spyScripts();
+  });
+
+  after(() => {
+    unspy();
+    moduleHook.uninstall();
+    k.close();
+    rm(root);
+  });
+
+  it('from a module compiled with cached data and from one Node compiled', () => {
+    const expected = {
+      view: at('mem', 'view.dhtml'),
+      data: at('mem', 'data.json'),
+      bare: 'MODULE_NOT_FOUND',
+      loaded: 'view',
+    };
+    assert.deepEqual(require(at('mem', 'compiled.js')), expected);
+    assert.deepEqual(require(at('mem', 'plain.cjs')), expected);
+    const compiled = at('mem', 'compiled.js');
+    assert.ok(k.bytecode(compiled));
+    assert.equal(scripts.filter((s) => s.filename === compiled).length, 1);
+    assert.equal(k.bytecode(at('mem', 'plain.cjs')), null);
+  });
+
+  it('from outside the places', () => {
+    assert.equal(
+      require.resolve(at('mem', 'view.dhtml')),
+      at('mem', 'view.dhtml'),
+    );
+    assert.throws(() => require.resolve(at('mem', 'view')), {
+      code: 'MODULE_NOT_FOUND',
+    });
+  });
+
+  it('install adds no require.extensions entry', () => {
+    assert.deepEqual(Object.keys(require.extensions), native.extensions);
+    assert.equal(require.extensions['.dhtml'], undefined);
+  });
+
+  it('uninstall restores _compile and _resolveFilename', () => {
+    assert.notEqual(Module.prototype._compile, native.compile);
+    assert.notEqual(Module._resolveFilename, native.resolveFilename);
+    moduleHook.uninstall();
+    try {
+      assert.equal(Module.prototype._compile, native.compile);
+      assert.equal(Module._resolveFilename, native.resolveFilename);
+      assert.deepEqual(Object.keys(require.extensions), native.extensions);
+      assert.throws(() => require.resolve(at('mem', 'view.dhtml')), {
+        code: 'MODULE_NOT_FOUND',
+      });
+    } finally {
+      moduleHook.install(k);
+    }
+    assert.equal(
+      require.resolve(at('mem', 'view.dhtml')),
+      at('mem', 'view.dhtml'),
+    );
+  });
+});
+
 describe('module-hook: bytecode accepted across isolates', () => {
   it('a worker attached to the snapshot compiles with cached data V8 does not reject', async () => {
     const { Worker } = require('node:worker_threads');
@@ -318,6 +419,15 @@ describe('module-hook: strict', () => {
       );
       assert.equal(require(path.join(root, 'lib', 'a.js')), 'a');
       assert.throws(() => require(path.join(root, 'lib', 'late.js')), {
+        code: 'MODULE_NOT_FOUND',
+      });
+      // require.resolve() refuses what require() refuses, on every Node
+      // version, though Node's own resolver would find the file on disk.
+      assert.equal(
+        require.resolve(path.join(root, 'lib', 'a.js')),
+        path.join(root, 'lib', 'a.js'),
+      );
+      assert.throws(() => require.resolve(path.join(root, 'lib', 'late.js')), {
         code: 'MODULE_NOT_FOUND',
       });
       assert.throws(() => require(path.join(root, 'lib', 'nope')), {
