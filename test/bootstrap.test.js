@@ -6,7 +6,7 @@ const { spawnSync } = require('node:child_process');
 const fs = require('node:fs');
 const path = require('node:path');
 const { pathToFileURL } = require('node:url');
-const { tmpDir, rm } = require('./helpers.js');
+const { tmpDir, writeTree, rm } = require('./helpers.js');
 
 // The bootstrap installs process-wide hooks, so it runs in child processes.
 
@@ -54,6 +54,89 @@ describe('bootstrap: --import xvfs/register', () => {
       '--vfs.defaults.watchTimeout=25',
     );
     assert.equal(r.code, 0, r.stderr);
+  });
+
+  // One config three ways — a JS file, a JSON file, the CLI alone — is one
+  // resolved config, and the place serves alike: a template a module
+  // requires by its full name, through its cached data; json without; no
+  // extension added to a name without one.
+  it('a JS file, a JSON file and the CLI alone give one config', () => {
+    const raw = {
+      places: {
+        views: {
+          fs: {
+            ext: ['json'],
+            script: { ext: ['mjs'], compile: ['js', 'cjs', 'dhtml'] },
+          },
+          require: { ext: ['json'], compile: ['js', 'cjs', 'dhtml'] },
+        },
+      },
+    };
+    const flags = [
+      '--vfs.places.views.fs.ext=json',
+      '--vfs.places.views.fs.script.ext=mjs',
+      '--vfs.places.views.fs.script.compile=js,cjs,dhtml',
+      '--vfs.places.views.require.ext=json',
+      '--vfs.places.views.require.compile=js,cjs,dhtml',
+    ];
+    const index = JSON.stringify(path.join(REPO, 'index.js'));
+    const dir = writeTree(tmpDir('xvfs-bootstrap-lists'), {
+      'views/main.js': [
+        "exports.view = require('./view.dhtml');",
+        "exports.resolved = require.resolve('./view.dhtml');",
+        "exports.data = require('./data.json');",
+        "try { require('./view'); } catch (err) { exports.bare = err.code; }",
+      ].join('\n'),
+      'views/view.dhtml':
+        "module.exports = (data) => '<p>' + data.name + '</p>';",
+      'views/data.json': '{"name": "ann"}',
+      'views/m.mjs': 'export default 1;',
+      'configs/vfs.config.cjs': `module.exports = ${JSON.stringify(raw)};`,
+      'configs/vfs.config.json': JSON.stringify(raw),
+      'entry.cjs': [
+        "const path = require('node:path');",
+        `const { kernel } = require(${index});`,
+        "const main = require('./views/main.js');",
+        "const at = (key) => Boolean(kernel.bytecode(path.resolve('views', key)));",
+        'console.log(JSON.stringify({',
+        '  raw: kernel.config.raw,',
+        '  global: kernel.config.global,',
+        '  places: kernel.config.allPlaces,',
+        "  view: main.view({ name: 'ann' }),",
+        '  resolved: path.relative(process.cwd(), main.resolved),',
+        '  data: main.data,',
+        '  bare: main.bare,',
+        "  bytecode: ['main.js', 'view.dhtml', 'data.json'].map(at),",
+        "  mjs: kernel.fs('views').script('/m.mjs').cachedData == null,",
+        '}));',
+      ].join('\n'),
+    });
+    try {
+      const outputs = [
+        runIn(dir, 'entry.cjs', '--vfs.config=configs/vfs.config.cjs'),
+        runIn(dir, 'entry.cjs', '--vfs.config=configs/vfs.config.json'),
+        runIn(dir, 'entry.cjs', ...flags),
+      ].map((r) => {
+        assert.equal(r.code, 0, r.stderr);
+        return JSON.parse(r.stdout);
+      });
+      const [js, json, cli] = outputs;
+      assert.deepEqual(json, js);
+      assert.deepEqual(cli, js);
+      assert.deepEqual(js.raw, raw);
+      assert.deepEqual(js.places[0].require, {
+        ext: ['js', 'cjs', 'dhtml', 'json'],
+        compile: ['js', 'cjs', 'dhtml'],
+      });
+      assert.equal(js.view, '<p>ann</p>');
+      assert.equal(js.resolved, path.join('views', 'view.dhtml'));
+      assert.deepEqual(js.data, { name: 'ann' });
+      assert.equal(js.bare, 'MODULE_NOT_FOUND');
+      assert.deepEqual(js.bytecode, [true, true, false]);
+      assert.equal(js.mjs, true);
+    } finally {
+      rm(dir);
+    }
   });
 
   // With strict: true appRoot is the routing boundary, so the entry point and

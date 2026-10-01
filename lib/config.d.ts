@@ -278,7 +278,12 @@ export class VfsConfig {
   /**
    * `appConfig` with the `--vfs.*` overrides of `argv` (after `--`)
    * applied: `--vfs.defaults.*`, `--vfs.places.<name>.*`, `--vfs.enable`
-   * and `--vfs.disable`.
+   * and `--vfs.disable`, then validated as a JS or JSON config is.
+   * `"true"` / `"false"` are booleans, a decimal a number; a setting that
+   * takes a list takes a comma-separated one —
+   * `--vfs.places.lib.require.compile=js,cjs`, one item included — which
+   * replaces the list of `appConfig`. A place name with dots is read as
+   * the longest name `appConfig.places` has.
    */
   static fromArgv(argv: readonly string[], appConfig?: VfsRawConfig): VfsConfig;
 }

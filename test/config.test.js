@@ -935,3 +935,187 @@ describe('VfsConfig.fromArgv', () => {
     );
   });
 });
+
+// A setting that takes a list takes a comma-separated one on the CLI, so the
+// CLI says what a JS or JSON config says, and is validated the same way.
+describe('VfsConfig.fromArgv: lists', () => {
+  const argv = (...args) => ['node', 'app.js', '--', ...args];
+  const cli = (args, app) => VfsConfig.fromArgv(argv(...args), app);
+  const isPlain = (value) =>
+    value !== null && typeof value === 'object' && !Array.isArray(value);
+  // A raw config as CLI flags: a leaf per flag, a list as its items.
+  const flagsOf = (raw, at = 'vfs') =>
+    Object.entries(raw).flatMap(([key, value]) => {
+      const path = `${at}.${key}`;
+      if (isPlain(value)) return flagsOf(value, path);
+      const text = Array.isArray(value) ? value.join(',') : String(value);
+      return [`--${path}=${text}`];
+    });
+  const same = (actual, expected) => {
+    assert.deepEqual(actual.raw, expected.raw);
+    assert.deepEqual(actual.global, expected.global);
+    assert.deepEqual(actual.allPlaces, expected.allPlaces);
+  };
+
+  const ACCEPTED = {
+    places: {
+      views: {
+        fs: {
+          ext: ['json'],
+          script: { ext: ['mjs'], compile: ['js', 'cjs', 'dhtml'] },
+        },
+        require: { ext: ['json'], compile: ['js', 'cjs', 'dhtml'] },
+      },
+    },
+  };
+
+  it('the accepted form: the CLI alone, a JS object and JSON resolve alike', () => {
+    const js = new VfsConfig(ACCEPTED);
+    same(new VfsConfig(JSON.parse(JSON.stringify(ACCEPTED))), js);
+    const flags = [
+      '--vfs.places.views.fs.ext=json',
+      '--vfs.places.views.fs.script.ext=mjs',
+      '--vfs.places.views.fs.script.compile=js,cjs,dhtml',
+      '--vfs.places.views.require.ext=json',
+      '--vfs.places.views.require.compile=js,cjs,dhtml',
+    ];
+    assert.deepEqual(flagsOf(ACCEPTED), flags);
+    same(cli(flags), js);
+    assert.deepEqual(js.place('views').require, {
+      ext: ['js', 'cjs', 'dhtml', 'json'],
+      compile: ['js', 'cjs', 'dhtml'],
+    });
+  });
+
+  it('every list setting, its keyword and the scalars round-trip', () => {
+    const raw = {
+      defaults: {
+        memory: { limit: '2 mib', segmentSize: '1 mib', maxFileSize: 65536 },
+        strict: true,
+      },
+      places: {
+        site: {
+          fs: {
+            ext: ['html', 'css', 'mp3'],
+            compress: {
+              encodings: ['br', 'gzip'],
+              options: { br: { level: 5 } },
+              ext: ['css', 'html'],
+            },
+            prepare: { styles: ['css'], markup: ['html'] },
+            fallback: 'deny',
+          },
+          links: 'verify',
+        },
+        zip: {
+          fs: {
+            ext: ['txt'],
+            compress: { encodings: ['gzip'], ext: 'compressible' },
+          },
+        },
+        views: ACCEPTED.places.views,
+        lib: {
+          require: { ext: ['json'], compile: ['js'], prepare: 'mod' },
+          import: { ext: ['mjs'], prepare: { esm: ['mjs'] } },
+        },
+        mem: {
+          provider: 'map',
+          origin: 'virtual',
+          fs: { writable: true, script: { compile: ['tmpl'] } },
+        },
+      },
+    };
+    same(cli(flagsOf(raw)), new VfsConfig(raw));
+  });
+
+  it('a list given replaces the list of the config file', () => {
+    const file = {
+      places: {
+        views: {
+          fs: { script: { ext: ['mjs'] } },
+          require: { ext: ['json'], compile: ['js'] },
+        },
+      },
+    };
+    const c = cli(
+      [
+        '--vfs.places.views.fs.ext=json',
+        '--vfs.places.views.fs.script.compile=js,cjs,dhtml',
+        '--vfs.places.views.require.compile=js,cjs,dhtml',
+      ],
+      file,
+    );
+    same(c, new VfsConfig(ACCEPTED));
+    assert.throws(
+      () => cli(['--vfs.places.views.require.ext=js,json'], file),
+      /places\.views\.require: extension "js" is listed in both ext and compile$/,
+    );
+  });
+
+  it('one item is a list; items stay strings as written, trimmed', () => {
+    const c = cli([
+      '--vfs.places.p.fs.ext=css',
+      '--vfs.places.p.require.ext=3, mp3',
+      '--vfs.places.p.fs.prepare.styles=css',
+    ]);
+    assert.deepEqual(c.raw.places.p, {
+      fs: { ext: ['css'], prepare: { styles: ['css'] } },
+      require: { ext: ['3', 'mp3'] },
+    });
+    assert.deepEqual(c.place('p').prepare, { css: 'styles' });
+    assert.equal(
+      cli(['--vfs.places.p.fs.prepare=up', '--vfs.places.p.fs.ext=txt']).place(
+        'p',
+      ).prepare.txt,
+      'up',
+    );
+    assert.throws(
+      () => cli(['--vfs.places.p.fs.ext=js,,css']),
+      /places\.p\.fs\.ext items must be alphanumeric extensions without dots$/,
+    );
+    assert.throws(
+      () => cli(['--vfs.places.p.fs.ext=css,CSS']),
+      /places\.p\.fs\.ext: extension "css" is listed twice$/,
+    );
+  });
+
+  it('no boolean compile and no script: true here either', () => {
+    for (const [flag, refusal] of [
+      [
+        'places.p.require.compile=true',
+        /require\.compile must be a non-empty array/,
+      ],
+      [
+        'places.p.require.compile=false',
+        /require\.compile must be a non-empty array/,
+      ],
+      [
+        'places.p.fs.script.compile=true',
+        /script\.compile must be a non-empty array/,
+      ],
+      ['places.p.fs.script=true', /fs\.script must be false or an object/],
+    ]) {
+      assert.throws(() => cli([`--vfs.${flag}`]), refusal, flag);
+    }
+    const file = { places: { p: { fs: { script: { compile: ['js'] } } } } };
+    const off = cli(['--vfs.places.p.fs.script=false'], file);
+    assert.equal(off.place('p').fs.script, null, 'false is off, as in a file');
+  });
+
+  it('a place name with dots is the longest one the config file has', () => {
+    const file = { places: { 'my.app': { require: true }, my: { fs: true } } };
+    const c = cli(
+      ['--vfs.places.my.app.require.compile=js', '--vfs.places.my.fs.ext=txt'],
+      file,
+    );
+    assert.deepEqual(c.place('my.app').require, {
+      ext: ['js'],
+      compile: ['js'],
+    });
+    assert.deepEqual(c.place('my').fs.ext, ['txt']);
+    assert.throws(
+      () => cli(['--vfs.places.my.app.__proto__.x=1'], file),
+      /unsafe CLI key "places\.my\.app\.__proto__\.x"/,
+    );
+  });
+});
