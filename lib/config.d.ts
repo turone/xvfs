@@ -282,8 +282,10 @@ export class VfsConfig {
    * `"true"` / `"false"` are booleans, a decimal a number; a setting that
    * takes a list takes a comma-separated one —
    * `--vfs.places.lib.require.compile=js,cjs`, one item included — which
-   * replaces the list of `appConfig`. A place name with dots is read as
-   * the longest name `appConfig.places` has.
+   * replaces the list of `appConfig`. A place whose name holds a dot can
+   * be overridden only when `appConfig.places` declares it — its key is
+   * read with the longest name declared there; flags alone cannot create
+   * such a place.
    */
   static fromArgv(argv: readonly string[], appConfig?: VfsRawConfig): VfsConfig;
 }

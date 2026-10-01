@@ -1062,9 +1062,14 @@ validates a file: `--vfs.defaults.*`, `--vfs.places.<name>.*`, and
   booleans there too, so `compile=true` is refused as `compile: true` is.
 - A flag replaces what the file has at its path — a list replaces the
   file's list, it does not add to it — and leaves the rest.
-- A place name with dots (`my.app`) is read as the longest name the file
-  defines. `__proto__`, `prototype` and `constructor` are refused
-  anywhere in a key.
+- **Limit:** a place whose name holds a dot (`my.app`) can be overridden
+  on the CLI only when the JS or JSON config already declares it — the
+  key is read with the longest place name the file defines. Flags alone
+  cannot create such a place: without the file,
+  `--vfs.places.my.app.fs.ext=css` names a place `my` with an option
+  `app`, and is refused.
+- `__proto__`, `prototype` and `constructor` are refused anywhere in a
+  key.
 
 The accepted form of [`fs.script`](#fsscript), as flags alone:
 

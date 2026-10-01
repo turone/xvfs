@@ -136,9 +136,11 @@ describes itself.
 same raw config, merged over the file's and validated as one. A setting
 that takes a list takes a comma-separated one, by one table of the list
 settings; its items stay strings, and `true` / `false` stay booleans
-everywhere. A place name with dots is the longest one the file defines.**
-_Why:_ a JS file, a JSON file and flags are three spellings of one input:
-one validation, one resolved config. Comma lists are what `--vfs.enable`
+everywhere. A place name with dots is the longest one the file defines;
+flags alone cannot create such a place.** _Why:_ a JS file, a JSON file
+and flags are three spellings of one input: one validation, one resolved
+config. A key cannot say where a dotted name it alone gives ends, so the
+file has to declare it. Comma lists are what `--vfs.enable`
 already takes, and they pass unquoted through bash, zsh, PowerShell and
 cmd — PowerShell 5.1 drops the quotes of a JSON value, zsh globs `[a,b]`.
 Typing by the setting, not by the value, makes one item a list and keeps

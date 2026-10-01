@@ -529,7 +529,9 @@ takes a comma-separated one, one item included, and replaces the list of
 the config file; `true` / `false` are booleans and a decimal a number,
 and the result is validated as a JS or JSON config is. The flags can say
 a whole config — README, [CLI overrides](../README.md#cli-overrides) —
-but a config of many places reads better as `vfs.config.json`.
+but a config of many places reads better as `vfs.config.json`. A place
+whose name holds a dot can be overridden on the CLI only when the config
+file declares it; flags alone cannot create one.
 
 ## Alternatives and decisions
 

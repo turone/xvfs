@@ -1124,5 +1124,10 @@ describe('VfsConfig.fromArgv: lists', () => {
       () => cli(['--vfs.places.my.app.__proto__.x=1'], file),
       /unsafe CLI key "places\.my\.app\.__proto__\.x"/,
     );
+    // Flags alone cannot create one: the key splits at its first dot.
+    assert.throws(
+      () => cli(['--vfs.places.my.app.fs.ext=css']),
+      /places\.my: unknown option "app"/,
+    );
   });
 });
