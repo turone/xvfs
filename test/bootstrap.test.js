@@ -107,7 +107,7 @@ describe('bootstrap: --import xvfs/register', () => {
         '  data: main.data,',
         '  bare: main.bare,',
         "  bytecode: ['main.js', 'view.dhtml', 'data.json'].map(at),",
-        "  mjs: kernel.fs('views').script('/m.mjs').cachedData == null,",
+        "  mjs: kernel.fs('views').script('/m.mjs').cachedData === undefined,",
         '}));',
       ].join('\n'),
     });

@@ -83,7 +83,7 @@ export interface CompressConfig {
 }
 
 interface ScriptLists {
-  /** Sources without cached data: their bundle's `cachedData` is null. */
+  /** Sources without cached data: their bundle's `cachedData` is undefined. */
   ext?: readonly string[];
   /**
    * Sources with cached data (the `\0script:bytecode` companion); each is

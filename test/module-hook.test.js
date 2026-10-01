@@ -353,7 +353,7 @@ describe('module-hook: require.resolve names what require() loads', () => {
   });
 });
 
-describe('module-hook: bytecode accepted across isolates', () => {
+describe('module-hook: cached data across isolates', () => {
   it('a worker attached to the snapshot compiles with cached data V8 does not reject', async () => {
     const { Worker } = require('node:worker_threads');
     const { until, within } = require('./helpers.js');
@@ -397,6 +397,89 @@ describe('module-hook: bytecode accepted across isolates', () => {
       await within(exited, 'the exit of the worker');
     } finally {
       await worker?.terminate();
+      k.close();
+      rm(root);
+    }
+  });
+
+  // Cached data one thread's V8 rejects is that thread's alone: the module
+  // compiles from its source there, once, with nothing published again;
+  // the file, its companion and the version stay, and another thread still
+  // runs the cached data.
+  it('cached data a worker rejects: the source runs there, once; the file and the version stay', async () => {
+    const { Worker } = require('node:worker_threads');
+    const { within } = require('./helpers.js');
+    const root = writeTree(tmpDir('modhook-reject'), {
+      'lib/m.js':
+        'globalThis.__vfsRuns = (globalThis.__vfsRuns || 0) + 1;\n' +
+        'module.exports = [1, 2, 3].map((x) => x * 2);',
+    });
+    const k = await kernel(root, { lib: { require: { compile: ['js'] } } });
+    const run = async (damage) => {
+      const { vfs, transferList } = k.link();
+      const worker = new Worker(
+        `
+        const vm = require('node:vm');
+        const { parentPort, workerData } = require('node:worker_threads');
+        const { bytecodeKey } = require(${JSON.stringify(path.resolve(__dirname, '../lib/companion.js'))});
+        const seen = [];
+        const Real = vm.Script;
+        vm.Script = class extends Real {
+          constructor(code, options) {
+            super(code, options);
+            if (options?.cachedData) seen.push(this.cachedDataRejected);
+          }
+        };
+        const kernel = require(${JSON.stringify(path.resolve(__dirname, '..'))}).attach();
+        if (workerData.damage) {
+          // This thread's own projection of the companion, nothing shared.
+          const { files } = kernel.registry.get('lib');
+          const key = bytecodeKey('/m.js');
+          files.set(key, { ...files.get(key), data: Buffer.from('not cached data') });
+        }
+        const result = require(workerData.file);
+        parentPort.postMessage({ result, seen, runs: globalThis.__vfsRuns });
+        `,
+        {
+          eval: true,
+          workerData: { vfs, damage, file: path.join(root, 'lib', 'm.js') },
+          transferList,
+        },
+      );
+      try {
+        return await within(
+          new Promise((resolve, reject) => {
+            worker.once('message', resolve);
+            worker.once('error', reject);
+          }),
+          'the answer of the worker',
+        );
+      } finally {
+        await worker.terminate();
+      }
+    };
+    try {
+      const place = k.registry.get('lib');
+      const source = place.files.get('/m.js');
+      const companion = place.files.get(bytecodeKey('/m.js'));
+      const version = k.version;
+      let published = 0;
+      k.on('publish', () => published++);
+      assert.deepEqual(await run(true), {
+        result: [2, 4, 6],
+        seen: [true],
+        runs: 1,
+      });
+      assert.deepEqual(await run(false), {
+        result: [2, 4, 6],
+        seen: [false],
+        runs: 1,
+      });
+      assert.equal(k.version, version);
+      assert.equal(published, 0, 'nothing published again');
+      assert.equal(place.files.get('/m.js'), source);
+      assert.equal(place.files.get(bytecodeKey('/m.js')), companion);
+    } finally {
       k.close();
       rm(root);
     }

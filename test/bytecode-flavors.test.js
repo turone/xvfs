@@ -246,7 +246,7 @@ describe('bytecode flavors: compile lists', () => {
         }
         const mjs = files.script('/m.mjs');
         assert.equal(mjs.source, FILES['/m.mjs']);
-        assert.equal(mjs.cachedData, null);
+        assert.equal(mjs.cachedData, undefined);
         assert.equal(files.script('/d.json'), null, 'json is no script');
         assert.equal(files.readFile('/d.json', 'utf8'), FILES['/d.json']);
       }
@@ -282,7 +282,7 @@ describe('bytecode flavors: compile lists', () => {
       }
       assert.equal(k.bytecode(path.join(root, 'lib', 'a.js')), null);
       assert.equal(k.fs('app').script('/s.js').source, '1 + 1');
-      assert.equal(k.fs('app').script('/s.js').cachedData, null);
+      assert.equal(k.fs('app').script('/s.js').cachedData, undefined);
     } finally {
       k.close();
       rm(root);

@@ -110,18 +110,18 @@ export interface MkdirOptions {
 
 /**
  * Everything needed to build a local `vm.Script` for a source `fs.script`
- * covers:
- * `new vm.Script(source, { ...scriptOptions, cachedData: cachedData ?? undefined })`.
+ * covers: `new vm.Script(source, { ...scriptOptions, cachedData })`.
  * `source` and `cachedData` are owned copies; `scriptOptions` and `meta`
  * are the frozen objects the entry holds, shared by every call.
- * `cachedData` is null when the key's extension is not in
- * `fs.script.compile`; `vm.Script` refuses a null one. `version` is the
- * file's (`PlaceFs.version()`): a script built from the bundle serves until
- * it changes.
+ * `cachedData` is undefined — never null, which `vm.Script` refuses — when
+ * the key's extension is not in `fs.script.compile`. Cached data V8
+ * rejects (`cachedDataRejected`) leaves the script compiled from `source`.
+ * `version` is the file's (`PlaceFs.version()`): a script built from the
+ * bundle serves until it changes.
  */
 export interface ScriptBundle<M extends object = Record<string, unknown>> {
   source: string;
-  cachedData: Buffer | null;
+  cachedData: Buffer | undefined;
   scriptOptions: Readonly<ScriptOptions> | null;
   meta: DeepReadonly<M> | null;
   version: number | null;
