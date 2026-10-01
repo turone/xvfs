@@ -33,4 +33,4 @@ curl http://localhost:3000/hello   # /hello replaced with new body at +6 s
 - Hot reload = `delete require.cache[absPath]` after each write. The next
   `require()` recompiles from the updated buffer.
 - `require: true` already compiles V8 bytecode (`require.compile` defaults
-  to `true`); it is rebuilt on every write automatically.
+  to `['js', 'cjs']`); it is rebuilt on every write automatically.

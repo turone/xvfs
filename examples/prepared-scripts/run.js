@@ -27,7 +27,7 @@ const handler = (raw, file) => ({
   meta: { handler: path.basename(file.key, '.handler') },
 });
 
-const script = { ext: ['handler'], compile: true };
+const script = { compile: ['handler'] };
 
 const config = new VfsConfig({
   defaults: {
@@ -35,11 +35,11 @@ const config = new VfsConfig({
   },
   places: {
     // Read from disk at start.
-    handlers: { fs: { ext: ['handler'], prepare: 'handler', script } },
+    handlers: { fs: { prepare: 'handler', script } },
     // Written by the application — here, by the worker.
     rules: {
       origin: 'virtual',
-      fs: { writable: true, ext: ['handler'], prepare: 'handler', script },
+      fs: { writable: true, prepare: 'handler', script },
     },
   },
 });

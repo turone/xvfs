@@ -55,8 +55,8 @@ const config = new VfsConfig({
       origin: 'virtual',
       fs: {
         writable: true,
-        ext: ['html', 'json', 'js'],
-        script: { ext: ['js'], compile: true },
+        ext: ['html', 'json'],
+        script: { compile: ['js'] },
       },
     },
   },

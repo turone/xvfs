@@ -57,10 +57,11 @@ main thread reports.version: html=2 json=2 render.js=2
   pool and publishes (see
   [writeFiles](../../README.md#several-files-as-one-writefiles)).
 - `fs.script.compile` building V8 cached data for one file of the set
-  (`render.js`) while its companions are plain data — and, when that one
-  file cannot compile, refusing the whole batch, `report.html` and
-  `report.json` included, even though both were perfectly valid on their
-  own (see [`fs.script`](../../README.md#fsscript)).
+  (`render.js`, `compile: ['js']`) while its companions are plain data
+  (`ext: ['html', 'json']`) — and, when that one file cannot compile,
+  refusing the whole batch, `report.html` and `report.json` included, even
+  though both were perfectly valid on their own (see
+  [`fs.script`](../../README.md#fsscript)).
 - `kernel.on('publish')` in a worker (`attach()`'s kernel): the reader
   workers never poll and never touch raw disk or SAB events, only the
   library's own publication events (see

@@ -489,10 +489,14 @@ would be ambiguous, and silent priority rules hide configuration mistakes.
 An error that named the first two sent the user back once per extra
 declaration.
 
-**The short form `prepare: 'name'` covers the domain's own finite `ext`; an
-unrestricted fs takes only the object form; `fs.script.ext` is never its
-scope.** _Why:_ "every file" is not a meaningful preparation target, and the
-script extensions are a consumer filter, not a declaration.
+**The short form `prepare: 'name'` covers the domain's own finite `ext` —
+in fs, the extensions it lists itself in `fs.ext`, `fs.script.ext` and
+`fs.script.compile`, never the defaults of `script: true`; an fs that
+lists none takes only the object form.** _Why:_ "every file" is not a
+meaningful preparation target. fs names an extension once, in one of its
+lists, so the short form covers them all — a script extension is no
+longer repeated in `fs.ext`; defaults the user never wrote would hand the
+preparer files nobody named.
 
 **`prepare` routes, it never selects: neither form adds or removes
 extensions of a domain or of the scan, and every declaration resolves into
@@ -550,6 +554,24 @@ from the same canonical source.** _Why:_ different consumers, wrappers and
 options — the bare source under the preparer's `scriptOptions` for
 `vm.Script`, `Module.wrap(source)` under the module filename for Node's
 loader. The library invents no `scriptOptions`.
+
+**`compile` is a list: the extensions of a domain that get cached data;
+`ext` lists those that get none, and `compile` adds its own to the
+domain. A domain lists an extension once — require in `ext` or
+`compile`, fs in `fs.ext`, `fs.script.ext` or `fs.script.compile` — and
+`json` or `mjs` in a `compile` is an error. The defaults — `js` and `cjs`
+compiled, `json` as it is for require — apply only when a domain gives
+neither list; `Place.compiles()` decides both flavors and the companions
+a source may hold.** _Why:_ a boolean compiled a fixed set — js and cjs
+for require — so a template a module requires by its full name
+(`require('./view.dhtml')`, served as CommonJS already) never got cached
+data, and a script extension had to be written in `fs.ext` and in
+`fs.script.ext`. One list per meaning says of each extension whether it
+gets cached data; an extension in two lists would say both. Node loads
+JSON and ES modules without `_compile`, and neither is a `vm.Script`
+source: their cached data would never be used. A specifier without its
+extension still finds js, cjs and json only (`require('./view')`), as
+before.
 
 ## Virtual places and worker mutations
 
@@ -1588,6 +1610,7 @@ workers call `attach()`.** _Why:_ preloads do not run in worker threads.
 | Async preparers                                                                                                 | they run inside synchronous Map writes and one atomic publication |
 | Domain priority or merging of `prepare` declarations                                                            | hides mistakes; one extension, one declaration                    |
 | `fs.script.prepare`                                                                                             | preparation belongs to the file, not to the script consumer       |
+| `compile: boolean`, or an alias for it                                                                          | a fixed set of extensions; `fs.ext` repeated the script ones      |
 | Synchronous worker mutations via `Atomics.wait()`                                                               | deadlock- and stall-prone                                         |
 | Workers allocating in SAB                                                                                       | one writer keeps the allocator lock-free                          |
 | Echoing file bytes in mutation responses                                                                        | the bytes are already in SAB; the update carries metadata         |

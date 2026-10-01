@@ -53,15 +53,15 @@ Invariants:
 
 ## Provider matrix
 
-|                       | `sab` + `disk`                       | `sab` + `virtual`             | `map` + `disk`       | `map` + `virtual`    | `sea`             | `node-default` | `disk`                |
-| --------------------- | ------------------------------------ | ----------------------------- | -------------------- | -------------------- | ----------------- | -------------- | --------------------- |
-| Source                | scanned dir                          | application writes            | scanned dir          | application writes   | `node:sea` assets | OS fs          | OS path entries       |
-| Storage               | SAB pool                             | SAB pool                      | per-thread `Map`     | per-thread `Map`     | SAB pool          | OS fs          | OS fs                 |
-| Writable              | disk + watch                         | main or worker RPC            | disk + watch         | local `Map`, sync    | no                | passthrough    | `fs.writable`         |
-| Shared across workers | yes                                  | yes                           | no                   | no                   | yes               | n/a            | metadata only         |
-| In `snapshot()`       | yes                                  | yes (empty until first write) | no (recreated empty) | no (recreated empty) | yes               | n/a            | no                    |
-| Watched               | yes                                  | no                            | yes                  | no                   | no                | n/a            | no                    |
-| Bytecode              | `kernel.bytecode` / `PlaceFs.script` | same, on publish              | auto on write        | auto on write        | `kernel.bytecode` | n/a            | no (`compile: false`) |
+|                       | `sab` + `disk`                       | `sab` + `virtual`             | `map` + `disk`       | `map` + `virtual`    | `sea`             | `node-default` | `disk`                  |
+| --------------------- | ------------------------------------ | ----------------------------- | -------------------- | -------------------- | ----------------- | -------------- | ----------------------- |
+| Source                | scanned dir                          | application writes            | scanned dir          | application writes   | `node:sea` assets | OS fs          | OS path entries         |
+| Storage               | SAB pool                             | SAB pool                      | per-thread `Map`     | per-thread `Map`     | SAB pool          | OS fs          | OS fs                   |
+| Writable              | disk + watch                         | main or worker RPC            | disk + watch         | local `Map`, sync    | no                | passthrough    | `fs.writable`           |
+| Shared across workers | yes                                  | yes                           | no                   | no                   | yes               | n/a            | metadata only           |
+| In `snapshot()`       | yes                                  | yes (empty until first write) | no (recreated empty) | no (recreated empty) | yes               | n/a            | no                      |
+| Watched               | yes                                  | no                            | yes                  | no                   | no                | n/a            | no                      |
+| Bytecode              | `kernel.bytecode` / `PlaceFs.script` | same, on publish              | auto on write        | auto on write        | `kernel.bytecode` | n/a            | no (`require.ext` only) |
 
 Disk-origin writable places (`sab + disk`, `map + disk`) are **eventual
 consistency**: mutations go to disk — copies and renames through the
@@ -222,15 +222,16 @@ not run in worker threads.
 places: {
   domain: {
     fs: { ext: ['js'] },
-    require: { ext: ['js'], compile: true },
+    require: { compile: ['js'] },
   },
 }
 ```
 
-`initialize()` compiles every matching `.js` once, stores bytecode as an
-internal companion (`<source>\0require:bytecode`) in the same SAB
-segments, and projects both source and bytecode to workers via
-`snapshot()`. Workers `require('/abs/domain/x.js')` and the patched
+`initialize()` compiles every source of an extension of `require.compile`
+(here `.js`) once, stores bytecode as an internal companion
+(`<source>\0require:bytecode`) in the same SAB segments, and projects
+both source and bytecode to workers via `snapshot()`. Workers
+`require('/abs/domain/x.js')` and the patched
 `_compile` calls `new vm.Script(wrapped, { cachedData })`. V8 skips
 parse + compile for all functions, including lazy ones. There is no ESM
 bytecode cache.
@@ -257,10 +258,10 @@ const handler = script.exports;
 ```
 
 This works in any thread that holds the snapshot — the bytecode lives in
-SAB and is shared zero-copy. If `cachedData` is `null` (place has no
-compile, or the file is non-JS), `metavm` creates cached data on first
-run as usual. Prove `cachedDataRejected === false` in a worker, not in
-the compiling thread: V8's per-isolate cache masks rejection there.
+SAB and is shared zero-copy. If `cachedData` is `null` (the file's
+extension is not in `require.compile`), `metavm` creates cached data on
+first run as usual. Prove `cachedDataRejected === false` in a worker, not
+in the compiling thread: V8's per-isolate cache masks rejection there.
 
 ### AI agent / plugin workspace
 
@@ -274,7 +275,7 @@ const config = new VfsConfig({
   places: {
     tools: {
       fs: { ext: ['js'] },
-      require: { ext: ['js'], compile: true },
+      require: { compile: ['js'] },
     },
     workspace: {
       provider: 'map',
@@ -408,9 +409,8 @@ bundles compiled from the prepared source:
 
 ```js
 fs: {
-  ext: ['js'],
   prepare: 'api',
-  script: { ext: ['js'], compile: true },
+  script: { compile: ['js'] },
 }
 ```
 
@@ -432,11 +432,11 @@ even with the same name:
 
 ```js
 fs: {
-  ext: ['js', 'css'],
+  ext: ['css'],
   prepare: { api: ['js'], styles: ['css'] },
-  script: { ext: ['js'], compile: true },
+  script: { compile: ['js'] },
 },
-require: { ext: ['js'], compile: true },
+require: { compile: ['js'] },
 ```
 
 ```js
@@ -455,15 +455,17 @@ const kernel = new VfsKernel(config, {
 const bundle = kernel.fs('application').script('/handler.js');
 const script = new vm.Script(bundle.source, {
   ...bundle.scriptOptions,
-  cachedData: bundle.cachedData,
+  // Null for an extension outside fs.script.compile: vm.Script refuses it.
+  cachedData: bundle.cachedData ?? undefined,
 });
 const handler = script.runInThisContext();
 ```
 
-- The short form covers the domain's own finite `ext` (an unrestricted
-  `fs` must use the object form; `fs.script.ext` is never its scope); the
-  object form must stay inside a finite domain `ext`. Neither adds
-  extensions to a domain.
+- The short form covers the domain's own finite `ext` — in `fs` the
+  extensions it lists itself in `fs.ext`, `fs.script.ext` and
+  `fs.script.compile`, never the defaults of `script: true`; an `fs`
+  that lists none must use the object form. The object form must stay
+  inside a finite domain `ext`. Neither adds extensions to a domain.
 - Key, path, extension and type of the file do not change. The raw disk
   file stays the source of truth; the raw input is not kept next to the
   prepared content in SAB.
@@ -580,6 +582,6 @@ other means is not contained.
 - [ ] Main: `kernel.close()` on shutdown.
 - [ ] Optional: `defaults.strict` — entry + `package.json` outside
       `appRoot`.
-- [ ] Optional: `require: { compile: true }` for CJS bytecode (default
-      when the require domain is on).
+- [ ] Optional: `require.compile` — the extensions that get CJS bytecode
+      (`js` and `cjs` when the require domain gives no list).
 - [ ] Optional: `fs.compress` for pre-compressed SAB representations.

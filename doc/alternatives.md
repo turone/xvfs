@@ -58,7 +58,8 @@ stored frozen with the entry and read in every thread with `meta(key)`. The
 library ships the mechanism and no preparers. → README
 [Preparation](../README.md#preparation-prepare).
 
-**V8 cached data, built once.** `require: { compile: true }` compiles
+**V8 cached data, built once.** `require.compile` — `js` and `cjs` by
+default, or any extension a module requires by its full name — compiles
 CommonJS sources on the main thread and stores the bytecode next to the
 source; a worker's `require()` gets it as `cachedData` and skips parsing
 and compilation. `fs.script.compile` does the same for the bare source, for
@@ -343,10 +344,11 @@ debounce. → [integration.md → Generated code with hot reload](integration.md
 
 ### Shared module bytecode
 
-`require: { compile: true }` on the places that hold the application's
-CommonJS modules. `initialize()` compiles each source once; the module
-hook's `_compile` hands the bytecode to `vm.Script` as `cachedData` in
-every worker, so V8 skips parsing and compilation, lazy functions included.
+`require: true` — or `require.compile` listing their extensions — on
+the places that hold the application's CommonJS modules. `initialize()`
+compiles each source once; the module hook's `_compile` hands the
+bytecode to `vm.Script` as `cachedData` in every worker, so V8 skips
+parsing and compilation, lazy functions included.
 `fs.script.compile` gives the same to code that runs sources through
 `vm.Script` itself ([integration.md → Sharing bytecode with `metavm`](integration.md#sharing-bytecode-with-metavm)).
 
@@ -448,7 +450,7 @@ other processes write into.
 ```js
 defaults: { strict: true },
 places: {
-  tools: { fs: { ext: ['js'] }, require: { ext: ['js'], compile: true } },
+  tools: { fs: { ext: ['js'] }, require: { compile: ['js'] } },
   workspace: {
     provider: 'map',
     origin: 'virtual',

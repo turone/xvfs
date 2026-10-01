@@ -26,7 +26,7 @@ const place = (provider, prepared) => ({
   fs: prepared
     ? { writable: true, prepare: { wrap: ['js'] } }
     : { writable: true },
-  require: prepared ? { ext: ['js'], compile: true } : false,
+  require: prepared ? { compile: ['js'] } : false,
 });
 
 module.exports = async (b) => {
