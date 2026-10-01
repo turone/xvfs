@@ -353,6 +353,131 @@ describe('module-hook: require.resolve names what require() loads', () => {
   });
 });
 
+// The Module._resolveFilename patch over its life, against kernels that
+// note what they are asked: install() twice wraps once; uninstall() puts
+// back what was there; a patch kept past uninstall() — or past a later
+// install() — goes to the function it replaced, never to a kernel; what no
+// place serves is Node's own answer.
+describe('module-hook: the _resolveFilename patch over its life', () => {
+  let native;
+  const noting = (name) => {
+    const own = path.join(__dirname, 'xvfs-unmounted', name, 'view.dhtml');
+    const asked = [];
+    return {
+      own,
+      asked,
+      resolveModule: (candidate) => {
+        asked.push(candidate);
+        return candidate === own ? { file: { data: Buffer.from('') } } : null;
+      },
+      bytecode: () => null,
+    };
+  };
+  // What `resolve` answers for `request` from this file: a path, or the
+  // code of its error.
+  const answer = (resolve, request, options) => {
+    try {
+      return resolve.call(Module, request, module, false, options);
+    } catch (err) {
+      return err.code;
+    }
+  };
+
+  before(() => {
+    native = Module._resolveFilename;
+  });
+
+  it('install() twice wraps once; uninstall() puts back what was there', () => {
+    const a = noting('a');
+    moduleHook.install(a);
+    const patch = Module._resolveFilename;
+    try {
+      moduleHook.install(noting('b'));
+      assert.equal(Module._resolveFilename, patch, 'no second wrapper');
+      assert.equal(answer(Module._resolveFilename, a.own), a.own);
+    } finally {
+      moduleHook.uninstall();
+    }
+    assert.equal(Module._resolveFilename, native);
+    // Another patch found there is what comes back.
+    const theirs = (...args) => native.apply(Module, args);
+    Module._resolveFilename = theirs;
+    try {
+      moduleHook.install(a);
+      assert.notEqual(Module._resolveFilename, theirs);
+      moduleHook.uninstall();
+      assert.equal(Module._resolveFilename, theirs);
+    } finally {
+      Module._resolveFilename = native;
+    }
+  });
+
+  it('a patch kept past uninstall() goes to what it replaced, never to a kernel', () => {
+    const a = noting('a');
+    moduleHook.install(a);
+    const kept = Module._resolveFilename;
+    moduleHook.uninstall();
+    a.asked.length = 0;
+    for (const request of [a.own, './nope', 'node:fs', 'metautil']) {
+      assert.equal(answer(kept, request), answer(native, request), request);
+    }
+    assert.deepEqual(a.asked, [], 'the kernel is never asked');
+  });
+
+  it('kernels one after another: only the current install looks, in its own kernel', () => {
+    const a = noting('a');
+    const b = noting('b');
+    moduleHook.install(a);
+    const first = Module._resolveFilename;
+    moduleHook.uninstall();
+    moduleHook.install(b);
+    try {
+      a.asked.length = 0;
+      assert.equal(answer(Module._resolveFilename, b.own), b.own);
+      assert.equal(answer(Module._resolveFilename, a.own), 'MODULE_NOT_FOUND');
+      assert.deepEqual(a.asked, [], 'the earlier kernel is never asked');
+      b.asked.length = 0;
+      assert.equal(answer(first, b.own), 'MODULE_NOT_FOUND');
+      assert.deepEqual(b.asked, [], 'the earlier patch asks no kernel');
+    } finally {
+      moduleHook.uninstall();
+    }
+    assert.equal(Module._resolveFilename, native);
+  });
+
+  it("what no place serves is Node's own answer", () => {
+    moduleHook.install(noting('a'));
+    try {
+      for (const request of [
+        'node:fs',
+        'fs',
+        'metautil',
+        './helpers.js',
+        '../package.json',
+        './nope',
+        'xvfs-no-such-package',
+      ]) {
+        assert.equal(
+          answer(Module._resolveFilename, request),
+          answer(native, request),
+          request,
+        );
+      }
+      const paths = { paths: [__dirname] };
+      assert.equal(
+        answer(Module._resolveFilename, './helpers.js', paths),
+        answer(native, './helpers.js', paths),
+      );
+      assert.equal(
+        require.resolve('./helpers.js'),
+        path.join(__dirname, 'helpers.js'),
+      );
+    } finally {
+      moduleHook.uninstall();
+    }
+  });
+});
+
 describe('module-hook: cached data across isolates', () => {
   it('a worker attached to the snapshot compiles with cached data V8 does not reject', async () => {
     const { Worker } = require('node:worker_threads');
