@@ -296,6 +296,9 @@ const compare = (ctx, thread) => {
         what(`subtreeVersionOf ${key}`),
       );
   }
+  // An FS tree's ids are the engine's: the model takes them, so that the
+  // ops by id the generators make name the same nodes in both.
+  if (model.fs && thread.main) model.rekey(ctx.ids);
   // The order of children and the trails, once every node is bound.
   for (const n of model.nodes()) {
     const node = thread.nodes.get(n.uid);
@@ -780,8 +783,13 @@ const fsOp = (ctx, m) => {
       return empty.length > 0 ? ['rmdir', keyOf(random.pick(empty))] : null;
     }
     case 12: {
+      // only a node that existed before this commit: its id is the engine's
+      // (a node this commit made has a provisional id in the model)
       const withReps = files.filter(
-        (f) => f.payload !== null && f.payload.reps.size > 0,
+        (f) =>
+          f.payload !== null &&
+          f.payload.reps.size > 0 &&
+          ctx.ids.get(f.uid) === f.id,
       );
       if (withReps.length === 0) return null;
       const f = random.pick(withReps);
@@ -820,6 +828,10 @@ const fsOp = (ctx, m) => {
         ],
         ['relocate', 999999, 0, extents.next(8)],
         ['relocate', dirs[0].id, 0, extents.next(8)],
+        ['relocate', 'not-an-id', 0, extents.next(8)],
+        ['relocate', -1, 0, extents.next(8)],
+        ['unlink', ''],
+        ['unlink', `/missing-${random.int(9)}`],
         [
           'write',
           `/x-${random.int(9)}`,
@@ -843,6 +855,28 @@ const fsOp = (ctx, m) => {
 const fsOps = (ctx) => {
   const { random } = ctx;
   const scratch = ctx.model.clone();
+  // Now and then a refusal after removals and moves from one parent: the
+  // rollback must restore the order of its children too.
+  if (random.chance(0.08)) {
+    const crowded = [...scratch.nodes()].filter(
+      (n) => n.cls === 0 && n.kids.length >= 3,
+    );
+    if (crowded.length > 0) {
+      const d = random.pick(crowded);
+      const key = (n) => scratch.pathOf(n);
+      const [a, b, c] = d.kids;
+      const target = [...scratch.nodes()].find(
+        (n) =>
+          n.cls === 0 && n !== d && !key(n).startsWith(key(d) + '/') && n !== b,
+      );
+      const ops = [['remove', key(a)]];
+      if (target)
+        ops.push(['move', key(b), `${key(target)}/moved-${ctx.counter++}`]);
+      ops.push(['move', key(c), `${key(d)}/renamed-${ctx.counter++}`]);
+      ops.push(['rmdir', `/missing-${ctx.counter++}`]);
+      return ops;
+    }
+  }
   const ops = [];
   const count = 1 + random.int(6);
   for (let i = 0; i < count; i++) {
@@ -1139,6 +1173,25 @@ const runSeed = (seed) => {
       before,
       where(ctx, early, 'a refused delta changed the replica'),
     );
+    // The tree's role: a replica takes no commit or load, a main tree no
+    // delta — EINVAL, index -1.
+    assert.throws(
+      () => early.tree.commit([], 1, 1001),
+      (e) => e.code === 'EINVAL' && e.index === -1,
+      where(ctx, early, 'commit on a replica'),
+    );
+    if (!fs) {
+      assert.throws(
+        () => early.tree.load([], 1, 1001),
+        (e) => e.code === 'EINVAL' && e.index === -1,
+        where(ctx, early, 'load on a replica'),
+      );
+    }
+    assert.throws(
+      () => main.tree.apply(structuredClone(od.delta), { retain: () => false }),
+      { code: 'EINVAL' },
+      where(ctx, main, 'apply on a main tree'),
+    );
     threads.push(early);
   }
   compare(ctx, main);
@@ -1204,6 +1257,24 @@ const runSeed = (seed) => {
         done: first.done,
         sv: th.tree.structureVersion,
       });
+      // A walk's iterator too: its pairs are [node, depth].
+      const walker = th.tree.walk(root)[Symbol.iterator]();
+      const step = walker.next();
+      const all = model
+        .walk([model.root], {}, containersOf(ctx, th))
+        .map(([n]) => n.uid);
+      iters.push({
+        th,
+        it: {
+          next: () => {
+            const r = walker.next();
+            return r.done ? r : { done: false, value: r.value[0] };
+          },
+        },
+        rest: all.slice(step.done ? 0 : 1),
+        done: step.done,
+        sv: th.tree.structureVersion,
+      });
     }
     const saved = model.save();
     let mres = null;
@@ -1219,7 +1290,7 @@ const runSeed = (seed) => {
       merr !== null || retire.failAt !== 0 ? fingerprint(ctx, main) : null;
     let eres = null;
     let eerr = null;
-    const callsBefore = retire.calls;
+    const lastBefore = retire.last;
     try {
       eres = isLoad
         ? main.tree.load(ops, next, ctx.now)
@@ -1302,10 +1373,12 @@ const runSeed = (seed) => {
       const ids = new Set();
       for (const r of eres.retired) {
         assert.ok(
-          r.retireId > callsBefore - (retire.calls - retire.last) &&
+          r.retireId > lastBefore &&
             r.retireId <= retire.last &&
             !ids.has(r.retireId),
-          what(`retireId ${r.retireId}`),
+          what(
+            `retireId ${r.retireId} is not one the counter gave this commit`,
+          ),
         );
         ids.add(r.retireId);
         const m = mres.retired.find((x) => x.id === r.id && x.kind === r.kind);
@@ -1314,6 +1387,25 @@ const runSeed = (seed) => {
           main.reps.get(m.uid),
           what("retired rep is not the main tree's object"),
         );
+        // The former representation, while it is held, views its own extent.
+        const view = r.rep.data;
+        assert.equal(
+          view.length,
+          r.rep.length,
+          what('a retired representation: data length'),
+        );
+        if (r.rep.length > 0) {
+          assert.equal(
+            view.buffer,
+            segments.get(r.rep.segmentId),
+            what('a retired representation: data over another segment'),
+          );
+          assert.equal(
+            view.byteOffset,
+            r.rep.offset,
+            what('a retired representation: data offset'),
+          );
+        }
       }
       if (eres.delta !== null) {
         noSab(eres.delta, what('delta'));

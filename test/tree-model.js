@@ -340,6 +340,24 @@ class ModelTree {
     Object.assign(this, saved);
   }
 
+  // An FS tree's ids are the engine's: the test learns them after a commit
+  // and gives them to the model (uid → id), so that ops by id — relocate —
+  // name the same node in both. A new node's id in the model is provisional
+  // until then.
+  rekey(ids) {
+    let changed = false;
+    for (const n of this.nodes()) {
+      const id = ids.get(n.uid);
+      if (id !== undefined && id !== n.id) {
+        n.id = id;
+        changed = true;
+      }
+    }
+    if (!changed) return;
+    this.byId = new Map();
+    for (const n of this.nodes()) this.byId.set(n.id, n);
+  }
+
   // A copy of the whole model, for a generator to try ops on.
   clone() {
     const c = Object.create(ModelTree.prototype);
