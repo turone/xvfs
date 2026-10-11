@@ -3,9 +3,11 @@
 const { describe, it, before, after } = require('node:test');
 const assert = require('node:assert/strict');
 const path = require('node:path');
+const v8 = require('node:v8');
+const vm = require('node:vm');
 const { availableParallelism, constants } = require('node:os');
 const { Worker } = require('node:worker_threads');
-const { VfsKernel } = require('../lib/kernel.js');
+const { VfsKernel, takeSnapshot } = require('../lib/kernel.js');
 const { bytecodeKey } = require('../lib/companion.js');
 const {
   tmpDir,
@@ -21,6 +23,7 @@ const {
   diskCalls,
   leakedBytes,
   within,
+  turn,
 } = require('./helpers.js');
 
 describe('VfsKernel: lifecycle', () => {
@@ -691,6 +694,40 @@ describe('VfsKernel: snapshot, workers, ACK', () => {
       k.close();
       w?.close();
       empty?.close();
+    }
+  });
+
+  it('link() puts the snapshot first on its port, not in vfs; attach() drops it', async () => {
+    const k = await kernel(root, places);
+    let w = null;
+    try {
+      const { vfs } = k.link();
+      assert.deepEqual(Object.keys(vfs).sort(), ['appRoot', 'config', 'port']);
+      v8.setFlagsFromString('--expose-gc');
+      const gc = vm.runInNewContext('gc');
+      let snapshot = takeSnapshot(vfs.port);
+      const weak = new WeakRef(snapshot);
+      w = VfsKernel.fromSnapshot(snapshot, config(places), {
+        appRoot: root,
+        console: quiet,
+        port: vfs.port,
+      });
+      snapshot = null;
+      assert.equal(w.fs('site').readFile('/a.txt', 'utf8'), 'aaa');
+      let collected = false;
+      for (let i = 0; i < 10 && !collected; i++) {
+        await turn();
+        gc();
+        collected = weak.deref() === undefined;
+      }
+      assert.ok(
+        collected,
+        'the snapshot is collected once the worker is built',
+      );
+      assert.throws(() => takeSnapshot(vfs.port), /no snapshot/);
+    } finally {
+      k.close();
+      w?.close();
     }
   });
 

@@ -55,9 +55,12 @@ export interface FromSnapshotOptions extends VfsKernelOptions {
   port?: MessagePort | null;
 }
 
-/** The `vfs` object of `kernel.link()`: a worker's `workerData.vfs`. */
+/**
+ * The `vfs` object of `kernel.link()`: a worker's `workerData.vfs`. The
+ * snapshot is not in it: it is the first message of `port`, which
+ * `attach()` takes and drops.
+ */
 export interface VfsLink {
-  snapshot: VfsSnapshot;
   config: DeepReadonly<VfsRawConfig>;
   appRoot: string;
   port: MessagePort;
@@ -275,7 +278,10 @@ export class VfsKernel extends EventEmitter<VfsKernelEvents> {
   fs(name: string): PlaceFs;
   /** Published entries only, with `version` and `instance`; main thread. */
   snapshot(): VfsSnapshot;
-  /** Everything a worker needs: snapshot, config, appRoot, a MessagePort. */
+  /**
+   * Everything a worker needs: config, appRoot and a MessagePort whose first
+   * message is the snapshot.
+   */
   link(): LinkResult;
   /** Main thread, ready kernel: throws otherwise. */
   diagnostics(): VfsDiagnostics;

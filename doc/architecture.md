@@ -681,6 +681,15 @@ a thenable.
 implementation of the protocol — ACKs, retained versions, releases,
 mutations — instead of every integration re-implementing retirement.
 
+**The snapshot is the first message on the link's port, not a field of
+`vfs`: `attach()` takes it (`takeSnapshot`, `receiveMessageOnPort`)
+before anything else and keeps only the projection built from it.**
+_Why:_ `workerData` lives as long as the worker, and a snapshot in it —
+every key of every place, every entry — would too. A message taken off
+the port is the worker's own object, collected once the projection is
+built. A link whose port holds none — taken already, or no port at all —
+is refused at once rather than projected empty.
+
 **`map` places are per-thread and never part of a snapshot.** _Why:_ fast,
 synchronous scratch space without coordination; shared writable state goes
 through `sab + virtual`.
@@ -1895,6 +1904,8 @@ workers call `attach()`.** _Why:_ preloads do not run in worker threads.
 ## Protocol
 
 ```
+vfs-snapshot { name: 'vfs-snapshot', snapshot }                               main → worker
+            the first message of a link
 snapshot    { segments: [{ id, sab }], places: { <name>: { entries: [[key, entry]] } },
               version, instance, links?: { known: [path], generation } }
 vfs-update  { name, updateId, version, places: { <name>: { entries, removals,

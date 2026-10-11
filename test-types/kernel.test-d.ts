@@ -149,21 +149,6 @@ expectType<{
 const { vfs, transferList } = kernel.link();
 expectType<{
   vfs: {
-    snapshot: {
-      readonly segments: {
-        readonly id: number;
-        readonly sab: SharedArrayBuffer;
-      }[];
-      readonly places: {
-        readonly [name: string]: { readonly entries: [string, CacheEntry][] };
-      };
-      readonly version: number;
-      readonly instance: string;
-      readonly links?: {
-        readonly known: readonly string[];
-        readonly generation: number;
-      };
-    };
     config: DeepReadonly<VfsRawConfig>;
     appRoot: string;
     port: MessagePort;
@@ -172,7 +157,7 @@ expectType<{
 }>()(kernel.link());
 new Worker('./worker.js', { workerData: { vfs }, transferList });
 new VfsConfig(vfs.config);
-VfsKernel.fromSnapshot(vfs.snapshot, new VfsConfig(vfs.config), {
+VfsKernel.fromSnapshot(kernel.snapshot(), new VfsConfig(vfs.config), {
   appRoot: vfs.appRoot,
   port: vfs.port,
   preparers: { api },

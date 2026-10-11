@@ -6,7 +6,7 @@ const os = require('node:os');
 const path = require('node:path');
 const { createHook } = require('node:async_hooks');
 const { VfsConfig } = require('../lib/config.js');
-const { VfsKernel } = require('../lib/kernel.js');
+const { VfsKernel, takeSnapshot } = require('../lib/kernel.js');
 const disk = require('../lib/disk.js');
 
 // Shared test helpers: temp trees, quiet kernels, small configs.
@@ -75,12 +75,14 @@ const until = async (predicate, ms = 3000, step = 25) => {
   return predicate();
 };
 
-// A worker stand-in on a real link(), in this thread: records every message
-// the main kernel posts and, unless `ack: false`, ACKs each vfs-update like
-// an attached worker that reads nothing. `id` is its link id on main.
+// A worker stand-in on a real link(), in this thread: takes the snapshot off
+// the port first, as attach() does, then records every message the main
+// kernel posts and, unless `ack: false`, ACKs each vfs-update like an
+// attached worker that reads nothing. `id` is its link id on main.
 const tap = (k, { ack = true } = {}) => {
   const { vfs } = k.link();
   const id = [...k.links.keys()].at(-1);
+  const snapshot = takeSnapshot(vfs.port);
   const messages = [];
   vfs.port.on('message', (msg) => {
     messages.push(msg);
@@ -90,16 +92,17 @@ const tap = (k, { ack = true } = {}) => {
   });
   vfs.port.unref();
   const updates = () => messages.filter((m) => m.name === 'vfs-update');
-  return { id, port: vfs.port, messages, updates };
+  return { id, port: vfs.port, snapshot, messages, updates };
 };
 
-// A worker kernel attached to a real link(), in this thread: it projects the
-// snapshot, applies deltas and ACKs them through the port exactly like
-// attach(), without spawning a thread.
+// A worker kernel attached to a real link(), in this thread: it takes the
+// snapshot off the port, projects it, applies deltas and ACKs them through
+// the port exactly like attach(), without spawning a thread.
 const worker = (k, options = {}) => {
   const { vfs } = k.link();
   const id = [...k.links.keys()].at(-1);
-  const w = VfsKernel.fromSnapshot(vfs.snapshot, new VfsConfig(vfs.config), {
+  const snapshot = takeSnapshot(vfs.port);
+  const w = VfsKernel.fromSnapshot(snapshot, new VfsConfig(vfs.config), {
     appRoot: vfs.appRoot,
     console: quiet,
     port: vfs.port,

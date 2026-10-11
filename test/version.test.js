@@ -3,7 +3,7 @@
 const { describe, it } = require('node:test');
 const assert = require('node:assert/strict');
 const path = require('node:path');
-const { VfsKernel } = require('../lib/kernel.js');
+const { VfsKernel, takeSnapshot } = require('../lib/kernel.js');
 const { bytecodeKey, compressedKey } = require('../lib/companion.js');
 const {
   tmpDir,
@@ -261,8 +261,9 @@ describe('version: threads', () => {
       const v = k.fs('v');
       await v.writeFile('/a.txt', 'a');
       const { vfs } = k.link();
-      assert.equal(vfs.snapshot.version, 2);
-      assert.equal(vfs.snapshot.instance, k.instance);
+      const snapshot = takeSnapshot(vfs.port);
+      assert.equal(snapshot.version, 2);
+      assert.equal(snapshot.instance, k.instance);
       vfs.port.close();
       w = worker(k);
       assert.equal(w.kernel.version, 2, 'from the snapshot');

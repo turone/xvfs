@@ -7,7 +7,7 @@ const path = require('node:path');
 const disk = require('../lib/disk.js');
 const fsPatch = require('../lib/adapters/fs-patch.js');
 const { VfsConfig } = require('../lib/config.js');
-const { VfsKernel } = require('../lib/kernel.js');
+const { VfsKernel, takeSnapshot } = require('../lib/kernel.js');
 const { LINKED } = require('../lib/errors.js');
 const {
   tmpDir,
@@ -817,7 +817,7 @@ describe('strict, links: deny: every thread knows the links', () => {
     const unlinked = () => {
       const { vfs } = k.link();
       const config = new VfsConfig(vfs.config);
-      const alone = VfsKernel.fromSnapshot(vfs.snapshot, config, {
+      const alone = VfsKernel.fromSnapshot(takeSnapshot(vfs.port), config, {
         appRoot: vfs.appRoot,
       });
       vfs.port.close();

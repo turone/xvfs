@@ -35,8 +35,8 @@ const { bytecodeKey, compressedKey } = require('../../lib/companion.js');
 //
 //   memory    a replica built in a fresh worker from a snapshot that came
 //             by its port: the heap per file once the snapshot is dropped,
-//             and while it is still in scope (as today's attach() keeps
-//             it) — plain and with birthtime and directory attributes; the
+//             and while it is still in scope (as workerData kept it
+//             before it came by the port) — plain and with birthtime and directory attributes; the
 //             snapshot's serialized size; boxed numbers (heap numbers of a
 //             heap snapshot) per file and as a share, up to 10⁵
 //   views     in a worker, fromSnapshot and apply with views made on

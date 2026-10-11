@@ -174,6 +174,10 @@ const kernel = attach(); // reads workerData.vfs
 `kernel.link()` creates a `MessageChannel`: one end stays with the main
 kernel, the other — `vfs.port`, in `transferList` — goes to the worker,
 and `attach({ link })` takes it (`link` defaults to `workerData.vfs`).
+The first message on it is the snapshot of what the main kernel has
+published: `attach()` takes it off the port before anything else and
+drops it once the worker's kernel is built — `workerData`, which lives
+as long as the worker, never holds it.
 This `MessagePort` is an in-process channel between the main thread and
 that worker — neither a file-system link nor a network port. Through it
 the worker sends its mutations of `sab + virtual` places as RPC; the main
@@ -1159,8 +1163,9 @@ published.
 | `retirements()`      | Internal diagnostics (debugging, tests; not a stable API): retired versions still held — representation, bytes, age, ACKs or holders |
 | `close()`            | Stop watcher and streams, reject queued and publishing mutations, drop projections, collectable SAB                                  |
 
-`link()` returns `{ vfs: { snapshot, config: raw, appRoot, port },
-transferList }`. The kernel posts every `vfs-update` to the port, reads
+`link()` returns `{ vfs: { config: raw, appRoot, port }, transferList }`.
+The kernel posts its snapshot to the port first — `attach()` takes it
+before anything else — then every `vfs-update`, reads
 `vfs-ack`, `vfs-release` and mutation requests, and treats port `close`
 as worker exit.
 
@@ -1361,8 +1366,10 @@ Application code should use `kernel.fs(name)`.
 
 ### `VfsKernel` (worker)
 
-`attach({ link = workerData.vfs, preparers } = {})` projects the
-snapshot — at its `version`, with the main kernel's `instance` — installs
+`attach({ link = workerData.vfs, preparers } = {})` takes the snapshot
+off the link's port — its first message — and projects it at its
+`version`, with the main kernel's `instance`, keeping nothing of it but
+the projection; installs
 hooks the config asks for, applies each `vfs-update` arriving through
 the `MessagePort` created by `kernel.link()` (`link.port`), each with
 its version, announcing each publication to its own `'publish'`
@@ -1795,6 +1802,8 @@ may have published it before it closed).
 ## Protocol
 
 ```
+vfs-snapshot { name: 'vfs-snapshot', snapshot }                               main → worker
+            the first message of a link
 snapshot    { segments: [{ id, sab }], places: { <name>: { entries: [[key, entry]] } },
               version, instance, links?: { known: [path], generation } }
 vfs-update  { name, updateId, version, places: { <name>: { entries, removals,
@@ -1811,7 +1820,9 @@ entry       shared { kind, segmentId, offset, length, stat, version, scriptOptio
 stat        { size, mtimeMs } (+ sourceSize, encoding for compressed companions)
 ```
 
-One `vfs-update` per watcher epoch or accepted virtual mutation. Source
+A link's first message is `vfs-snapshot`; `attach()` refuses a port
+without it. One `vfs-update` per watcher epoch or accepted virtual
+mutation. Source
 and companions of one file go in the same message. Every shared version
 an update replaces or removes is `retired` under a `retireId` that exists
 only until it is freed. A worker ACKs each update; `retained` lists the

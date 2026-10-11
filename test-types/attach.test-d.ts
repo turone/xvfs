@@ -162,8 +162,8 @@ void refused;
 attach(link);
 // @ts-expect-error a link is the `vfs` object of `kernel.link()`
 attach({ link: 'vfs' });
-// @ts-expect-error a link carries snapshot, config, appRoot and port
-attach({ link: { snapshot: link.snapshot } });
+// @ts-expect-error a link carries config, appRoot and port
+attach({ link: { config: link.config } });
 // @ts-expect-error unknown option
 attach({ hooks: false });
 // @ts-expect-error the cache needs its budget
