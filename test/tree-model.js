@@ -214,8 +214,16 @@ class ModelTree {
     }
   }
 
+  // A string that is not '' and does not start with '/' is no key: EINVAL
+  // (QA В41).
+  static #keyOf(key) {
+    if (typeof key !== 'string' || (key !== '' && key[0] !== '/'))
+      throw refusal('EINVAL', -1);
+    return canonical(key);
+  }
+
   get(key, options) {
-    const r = this.walkNames(namesOf(canonical(key)), options);
+    const r = this.walkNames(namesOf(ModelTree.#keyOf(key)), options);
     if (r.node) return { node: r.node };
     if (r.denied) return { denied: r.denied };
     return { node: null };
@@ -235,7 +243,7 @@ class ModelTree {
   }
 
   match(key, options) {
-    const r = this.walkNames(namesOf(canonical(key)), options);
+    const r = this.walkNames(namesOf(ModelTree.#keyOf(key)), options);
     if (r.node) return { node: r.node };
     if (r.denied) return { denied: r.denied };
     return {
@@ -598,7 +606,6 @@ class ModelTree {
       }
       return n;
     };
-    const parentKey = (key) => key.slice(0, key.lastIndexOf('/'));
     const leafName = (key) => key.slice(key.lastIndexOf('/') + 1);
     const isDir = (n) => n.cls === 0;
     const takeId = () => {
@@ -612,6 +619,20 @@ class ModelTree {
     };
     const ancestorsMark = (n) => {
       for (let a = n; a !== null; a = a.parent) marks.add(a);
+    };
+    // The parent of a key, walking down from the root: the first component
+    // above the key that is not an existing directory decides — missing →
+    // ENOENT, a file → ENOTDIR, as on Linux (QA В41).
+    const parentOf = (key, index) => {
+      const names = namesOf(key);
+      let n = st.root;
+      for (let at = 0; at < names.length - 1; at++) {
+        const kid = n.kids.find((k) => k.name === names[at]) ?? null;
+        if (kid === null) throw refusal('ENOENT', index);
+        if (!isDir(kid)) throw refusal('ENOTDIR', index);
+        n = kid;
+      }
+      return n;
     };
     const create = (parent, name, cls) => {
       const n = new ModelNode(this.nextUid++, takeId(), parent, name, cls);
@@ -655,9 +676,7 @@ class ModelTree {
               throw refusal('EINVAL', index);
             const key = canonical(op[1]);
             if (key === '') throw refusal('EEXIST', index);
-            const parent = findIn(parentKey(key));
-            if (parent === null) throw refusal('ENOENT', index);
-            if (!isDir(parent)) throw refusal('ENOTDIR', index);
+            const parent = parentOf(key, index);
             if (parent.kids.some((k) => k.name === leafName(key)))
               throw refusal('EEXIST', index);
             if (count + 1 > this.maxNodes) throw refusal('ENOSPC', index);
@@ -734,9 +753,7 @@ class ModelTree {
             if (to === key) return;
             if (to === '' || to.startsWith(key + '/'))
               throw refusal('EINVAL', index);
-            const parent = findIn(parentKey(to));
-            if (parent === null) throw refusal('ENOENT', index);
-            if (!isDir(parent)) throw refusal('ENOTDIR', index);
+            const parent = parentOf(to, index);
             if (parent.kids.some((k) => k.name === leafName(to)))
               throw refusal('EEXIST', index);
             detach(node);
@@ -1120,9 +1137,13 @@ class ModelTree {
             : oldParent === null ||
               oldParent.id !== p.parentId ||
               existing.name !== p.name;
-        if (moved && p.parentId !== null) {
-          oldParent.kids.splice(oldParent.kids.indexOf(existing), 1);
-          markUp(oldParent);
+        // A load may change the root: the former root comes under a parent,
+        // another node becomes the root (QA В41).
+        if (moved) {
+          if (oldParent !== null) {
+            oldParent.kids.splice(oldParent.kids.indexOf(existing), 1);
+            markUp(oldParent);
+          }
           existing._pendingParent = p.parentId;
           existing.name = own(p.name);
           changed = true;
@@ -1234,6 +1255,7 @@ class ModelTree {
     if (this.fs) throw refusal('EINVAL', -1);
     const seen = new Set();
     const puts = [];
+    let rootRow = false; // a row without a parent seen already (QA В42)
     rows.forEach((row, index) => {
       if (row === null || typeof row !== 'object')
         throw refusal('EINVAL', index);
@@ -1253,6 +1275,12 @@ class ModelTree {
         throw refusal('EINVAL', index);
       if (seen.has(id)) throw refusal('EINVAL', index);
       seen.add(id);
+      // The row without a parent is the root; a second one is EEXIST. The
+      // former root's row may come under a parent: load states the whole tree.
+      if (parentId === null) {
+        if (rootRow) throw refusal('EEXIST', index);
+        rootRow = true;
+      }
       const exists = this.byId.has(id);
       if (!exists && row.class === undefined) throw refusal('EINVAL', index);
       const fields = {};

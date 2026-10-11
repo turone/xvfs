@@ -613,20 +613,18 @@ const checkLookups = (ctx, thread) => {
     keys.push(model.pathOf(n));
   if (random.chance(0.3)) keys.push('/'); // the root, as ''
   for (const key of keys) checkKey(ctx, thread, key);
-  // A key without its leading '/' is no key: a miss or a refusal — the spec
-  // leaves which — but never a node.
-  for (const key of keys) {
-    if (key.length < 2) continue;
-    let got = null;
-    try {
-      got = thread.tree.get(key.slice(1));
-    } catch {
-      got = null;
-    }
-    assert.ok(
-      got === null || got === undefined,
-      where(ctx, thread, `get(${JSON.stringify(key.slice(1))}) found a node`),
-    );
+  // A key without its leading '/' is no key: EINVAL (QA В41). A sample of
+  // two: a refusal costs a stack trace.
+  for (const key of random
+    .shuffle(keys.filter((k) => k.length > 1))
+    .slice(0, 2)) {
+    const bad = key.slice(1);
+    for (const op of ['get', 'match'])
+      assert.throws(
+        () => thread.tree[op](bad),
+        { code: 'EINVAL' },
+        where(ctx, thread, `${op}(${JSON.stringify(bad)}) is no key`),
+      );
   }
 };
 
@@ -1014,6 +1012,14 @@ const badFsOp = (ctx, m) => {
     bad.push(['mkdir', `${file}/sub`], ['write', `${file}/x`, payload()]);
     if (nonRoot.length > 0)
       bad.push(['move', keyOf(random.pick(nonRoot)), `${file}/x`]);
+    // a file higher up the path than the direct parent: ENOTDIR (QA В41)
+    bad.push(
+      ['mkdir', `${file}/a/b`],
+      ['write', `${file}/a/b`, payload()],
+      ['write', `${file}/a/b`, payload(), { parents: true }],
+    );
+    if (nonRoot.length > 0)
+      bad.push(['move', keyOf(random.pick(nonRoot)), `${file}/a/b`]);
     // a kind the file has not: ENOENT
     const known = files.filter(
       (f) => f.payload !== null && ctx.ids.get(f.uid) === f.id,
@@ -1442,9 +1448,32 @@ const loadRows = (ctx) => {
     if (pol !== null) row.policy = pol;
     rows.push(row);
   }
-  // Now and then a row the format refuses: an id twice, a new row without
-  // a class, a row that is not an object.
-  if (rows.length > 0 && random.chance(0.12)) {
+  const newId = () =>
+    model.mode === 'number' ? numberId(ctx) : `id-${ctx.counter++}`;
+  const rootRow = rows.find((r) => r.parentId === null);
+  // At most one case of these per load, so that no refusal hides another.
+  const special = random.int(100);
+  if (rootRow !== undefined && special < 12) {
+    // The root changes: a new row without a parent, the former root's row
+    // under it (QA В41) — the keys of the whole tree change.
+    const id = newId();
+    rows.push({ id, parentId: null, name: '', class: random.int(5) });
+    rootRow.parentId = id;
+    rootRow.name = nameAt(ctx);
+  } else if (rows.length > 0 && special < 20) {
+    // a second row without a parent: EEXIST (QA В42)
+    rows.push({ id: newId(), parentId: null, name: '', class: random.int(5) });
+  } else if (ids.length > 0 && special < 28) {
+    // two new rows that close a cycle: EINVAL (QA В42)
+    const a = newId();
+    const b = newId();
+    rows.push(
+      { id: a, parentId: b, name: nameAt(ctx), class: random.int(5) },
+      { id: b, parentId: a, name: nameAt(ctx), class: random.int(5) },
+    );
+  } else if (rows.length > 0 && special < 46) {
+    // A row the format refuses: an id twice, a new row without a class, a
+    // row that is not an object.
     const bad = random.pick([
       { ...random.pick(rows) },
       {
