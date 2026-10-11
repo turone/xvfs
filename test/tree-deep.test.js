@@ -6,12 +6,15 @@ const engine = require('./tree-engine.js');
 const data = require('./tree-data.js');
 
 // Shapes the random tests never reach — a chain 50 000 deep, a parent with
-// 10⁵ children, a load of a long chain — and the costs that must not grow
+// 10⁵ children, a load of a long chain, a load that states the chain's rows
+// children first or turns the chain over — and the costs that must not grow
 // with them (.work/stage1/SPEC.md, "Correctness"; the reviews of step A
 // found each of them broken in one engine). Nothing may recurse by depth: a
 // RangeError is no refusal but an engine's bug. A cost is held to a ratio,
 // not to a time, so that a slow machine passes and a path that grows with
-// the children or with rows × depth does not.
+// the children or with rows × depth does not; the width test's power is
+// checked by a mutant of a fast engine (.work/stage1/harness-check/
+// run-wide.js), since the naive engine pays O(n) for any commit.
 
 const DEPTH = 50000;
 const WIDE = 100000;
@@ -40,6 +43,15 @@ const clientTree = (options = {}) =>
   });
 
 const file = () => ({ size: 1, mtimeMs: 1, representations: [] });
+
+// The rows of a chain of DEPTH nodes under the root (id 0), parents first.
+const chainRows = () => {
+  const rows = [{ id: 0, parentId: null, name: '', class: 0 }];
+  for (let id = 1; id <= DEPTH; id++) {
+    rows.push({ id, parentId: id - 1, name: 'n', class: 0 });
+  }
+  return rows;
+};
 
 const replicaOf = (tree, segments) =>
   engine.fromSnapshot(structuredClone(tree.snapshot()), segments);
@@ -97,11 +109,9 @@ describe('tree engine on deep and wide trees', () => {
 
   it(`a client chain ${DEPTH} deep: load, policies on the way, check, removal`, () => {
     const tree = clientTree();
-    const rows = [{ id: 0, parentId: null, name: '', class: 0 }];
-    for (let id = 1; id <= DEPTH; id++) {
-      const row = { id, parentId: id - 1, name: 'n', class: 0 };
-      if (id % 1000 === 0) row.policy = { level: id };
-      rows.push(row);
+    const rows = chainRows();
+    for (const row of rows) {
+      if (row.id > 0 && row.id % 1000 === 0) row.policy = { level: row.id };
     }
     let version = 0;
     tree.load(rows, ++version, 2);
@@ -122,6 +132,60 @@ describe('tree engine on deep and wide trees', () => {
     tree.commit([['remove', 1]], ++version, 4);
     assert.equal(tree.get(key), null, 'the chain is removed');
     assert.equal(tree.byId(DEPTH), null, 'byId of a removed node');
+  });
+
+  it(`a client chain ${DEPTH} deep: rows children first, the chain turned over, puts children first, a replica`, () => {
+    const segments = data.createSegments(1);
+    const tree = clientTree({ segments });
+    const rows = chainRows();
+    const key = '/n'.repeat(DEPTH);
+    let version = 0;
+    // A load states a final state: its rows in any order, the children
+    // before their parents too.
+    tree.load([...rows].reverse(), ++version, 2);
+    assert.equal(
+      tree.get(key),
+      tree.byId(DEPTH),
+      'the chain from rows children first',
+    );
+    const replica = replicaOf(tree, segments);
+    // The chain turned over by one load: every node under its former child,
+    // the deepest under the root. No cycle in the final state — though every
+    // row of it, taken against the tree as it was, would close one.
+    const flipped = rows.map((row) =>
+      row.parentId === null
+        ? row
+        : { ...row, parentId: row.id === DEPTH ? 0 : row.id + 1 },
+    );
+    const { delta } = tree.load(flipped, ++version, 3);
+    replica.apply(structuredClone(delta), NO_PINS);
+    for (const t of [tree, replica]) {
+      assert.equal(
+        t.parentOf(t.byId(DEPTH)),
+        t.byId(0),
+        'the deepest node is under the root',
+      );
+      assert.equal(
+        t.parentOf(t.byId(1)),
+        t.byId(2),
+        'the first node is under its former child',
+      );
+      assert.equal(t.get(key), t.byId(1), 'the first node is the deepest now');
+      assert.equal(count(t.walk(t.byId(0))), DEPTH, 'walk after the turn');
+      assert.equal(t.countOf(t.byId(0)), 1, 'the root has one child');
+    }
+    // Puts children first, in one commit of a fresh tree.
+    const fresh = clientTree();
+    const puts = [...rows]
+      .reverse()
+      .map((row) => ['put', row.id, row.parentId, row.name, { class: 0 }]);
+    fresh.commit(puts, 1, 2);
+    assert.equal(
+      fresh.get(key),
+      fresh.byId(DEPTH),
+      'the chain from puts children first',
+    );
+    assert.equal(fresh.trailOf(fresh.byId(DEPTH)).length, DEPTH + 1, 'trailOf');
   });
 
   it(`an insertion under a parent of ${WIDE} children costs about what it does under a narrow one`, () => {
