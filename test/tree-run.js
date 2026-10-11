@@ -1945,10 +1945,15 @@ const runSeed = (seed) => {
         }
       }
     }
-    // Iterators: alive unless the structure of their tree changed.
+    // Iterators: alive unless the structure of their tree changed — a change
+    // of structureVersion, or a commit of the same publication (an equal
+    // version) that changed it and leaves the number as it was: an iterator
+    // never yields a dead node.
+    const structural = mres !== null && mres.structure === true;
     for (const { th, it, rest, done, sv } of iters) {
       if (done) continue;
-      if (th.tree.structureVersion !== sv) {
+      const applied = th.main || held === null || held.th !== th;
+      if (th.tree.structureVersion !== sv || (structural && applied)) {
         assert.throws(
           () => it.next(),
           { code: 'ESTALE' },
