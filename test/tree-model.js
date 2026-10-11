@@ -268,7 +268,7 @@ class ModelTree {
     while (stack.length > 0) {
       const n = stack.pop();
       if (n.cls === cls) count++;
-      stack.push(...n.kids);
+      for (const k of n.kids) stack.push(k);
     }
     return count;
   }
@@ -279,7 +279,7 @@ class ModelTree {
     while (stack.length > 0) {
       const n = stack.pop();
       if (!this.isContainer(n, containers)) count++;
-      stack.push(...n.kids);
+      for (const k of n.kids) stack.push(k);
     }
     return count;
   }
@@ -291,23 +291,31 @@ class ModelTree {
     const mode = opts.containers ?? 'include';
     const classes = opts.classes ?? null;
     const out = [];
-    const visit = (node, depth) => {
-      const isCont = this.isContainer(node, containers);
-      let selected =
-        (mode === 'include' || (mode === 'skip' ? !isCont : isCont)) &&
-        (classes === null || classes.includes(node.cls));
-      if (selected && opts.filter) {
-        if (log) log.push(['filter', node]);
-        selected = opts.filter(node) === true;
-      }
-      if (selected) out.push([node, depth]);
-      if (node.kids.length > 0 && depth < depthMax) {
-        let down = true;
-        if (opts.descend) {
-          if (log) log.push(['descend', node]);
-          down = opts.descend(node) === true;
+    // Pre-order with an explicit stack (any depth): a node, then its
+    // children in order — the same order of filter and descend calls.
+    const visit = (first, firstDepth) => {
+      const stack = [[first, firstDepth]];
+      while (stack.length > 0) {
+        const [node, depth] = stack.pop();
+        const isCont = this.isContainer(node, containers);
+        let selected =
+          (mode === 'include' || (mode === 'skip' ? !isCont : isCont)) &&
+          (classes === null || classes.includes(node.cls));
+        if (selected && opts.filter) {
+          if (log) log.push(['filter', node]);
+          selected = opts.filter(node) === true;
         }
-        if (down) for (const k of node.kids) visit(k, depth + 1);
+        if (selected) out.push([node, depth]);
+        if (node.kids.length > 0 && depth < depthMax) {
+          let down = true;
+          if (opts.descend) {
+            if (log) log.push(['descend', node]);
+            down = opts.descend(node) === true;
+          }
+          if (down)
+            for (let i = node.kids.length - 1; i >= 0; i--)
+              stack.push([node.kids[i], depth + 1]);
+        }
       }
     };
     for (const s of starts) {
@@ -427,10 +435,17 @@ class ModelTree {
         c.subVer = n.subVer;
         map.set(n, c);
         byId.set(n.id, c);
-        c.kids = n.kids.map((k) => make(k, c));
         return c;
       };
+      // An explicit stack: trees of any depth (the stand builds 50 000).
       root = make(this.root, null);
+      const stack = [this.root];
+      while (stack.length > 0) {
+        const n = stack.pop();
+        const c = map.get(n);
+        c.kids = n.kids.map((k) => make(k, c));
+        for (const k of n.kids) stack.push(k);
+      }
     }
     return { root, byId, map };
   }
@@ -560,7 +575,7 @@ class ModelTree {
           if (!isEmptyExtent(rep)) out.set(rep.uid, { id: n.id, rep });
         }
       }
-      stack.push(...n.kids);
+      for (const k of n.kids) stack.push(k);
     }
     return out;
   }
@@ -618,7 +633,8 @@ class ModelTree {
       return id;
     };
     const ancestorsMark = (n) => {
-      for (let a = n; a !== null; a = a.parent) marks.add(a);
+      // a mark always reaches the root: an ancestor marked has all above it
+      for (let a = n; a !== null && !marks.has(a); a = a.parent) marks.add(a);
     };
     // The parent of a key, walking down from the root: the first component
     // above the key that is not an existing directory decides — missing →
@@ -662,7 +678,7 @@ class ModelTree {
         touchedDirs.delete(m);
         createdDirs.delete(m);
         marks.delete(m);
-        stack.push(...m.kids);
+        for (const k of m.kids) stack.push(k);
       }
     };
     try {
@@ -1001,24 +1017,36 @@ class ModelTree {
     }
     // Liveness: removed nodes are dead; put nodes alive; others alive when
     // their final parent is alive; the root (no parent) alive.
+    // A climb, not recursion: chains of any length; each id is decided once.
     const aliveMemo = new Map();
-    const aliveOf = (id, seen = new Set()) => {
-      if (aliveMemo.has(id)) return aliveMemo.get(id);
+    const aliveOf = (start) => {
+      const path = [];
+      const onPath = new Set();
+      let id = start;
       let alive;
-      if (!ids.has(id)) alive = false;
-      else if (removeIds.has(id)) alive = false;
-      else if (putById.has(id)) alive = true;
-      else {
-        const parent = finalParent.get(id);
-        if (parent === null) alive = true;
-        else if (seen.has(id))
-          alive = false; // a cycle of unnamed nodes cannot happen; guard
-        else {
-          seen.add(id);
-          alive = aliveOf(parent, seen);
+      for (;;) {
+        if (aliveMemo.has(id)) {
+          alive = aliveMemo.get(id);
+          break;
         }
+        if (!ids.has(id) || removeIds.has(id)) {
+          alive = false;
+          break;
+        }
+        if (putById.has(id) || finalParent.get(id) === null) {
+          alive = true;
+          break;
+        }
+        if (onPath.has(id)) {
+          alive = false; // a cycle of unnamed nodes cannot happen; guard
+          break;
+        }
+        onPath.add(id);
+        path.push(id);
+        id = finalParent.get(id);
       }
-      aliveMemo.set(id, alive);
+      if (ids.has(id)) aliveMemo.set(id, alive);
+      for (const x of path) aliveMemo.set(x, alive);
       return alive;
     };
     // Violations, per put: ENOENT (parent not alive), EINVAL (on a cycle),
@@ -1030,22 +1058,33 @@ class ModelTree {
       if (p.parentId === null) continue;
       if (!aliveOf(p.parentId)) violations.set(p.index, { code: 'ENOENT' });
     }
-    // EINVAL — a put node on a cycle by the final parents.
+    // EINVAL — a put node on a cycle by the final parents. Each id is climbed
+    // over once: a climb stops at an id already decided, and the ids of a
+    // cycle it closes are the ones on it (a node leading into a cycle is not).
+    const onCycle = new Set();
+    const decided = new Set();
+    for (const p of putsByIndex) {
+      const path = [];
+      const at = new Map(); // id → its place in path
+      let id = p.id;
+      while (
+        id !== null &&
+        id !== undefined &&
+        ids.has(id) &&
+        !decided.has(id) &&
+        !at.has(id)
+      ) {
+        at.set(id, path.length);
+        path.push(id);
+        id = finalParent.get(id);
+      }
+      if (at.has(id))
+        for (let i = at.get(id); i < path.length; i++) onCycle.add(path[i]);
+      for (const x of path) decided.add(x);
+    }
     for (const p of putsByIndex) {
       if (violations.has(p.index)) continue;
-      const seen = new Set([p.id]);
-      let at = finalParent.get(p.id);
-      let cycle = false;
-      while (at !== null && at !== undefined && ids.has(at)) {
-        if (at === p.id) {
-          cycle = true;
-          break;
-        }
-        if (seen.has(at)) break; // runs into another node's cycle
-        seen.add(at);
-        at = finalParent.get(at);
-      }
-      if (cycle) violations.set(p.index, { code: 'EINVAL' });
+      if (onCycle.has(p.id)) violations.set(p.index, { code: 'EINVAL' });
     }
     // EEXIST — live children's names under each parent.
     const groups = new Map(); // `${parent}\0${name}` → [ids]
@@ -1106,7 +1145,8 @@ class ModelTree {
     let structure = false;
     let policy = false;
     const markUp = (n) => {
-      for (let a = n; a !== null; a = a.parent) marks.add(a);
+      // a mark always reaches the root: an ancestor marked has all above it
+      for (let a = n; a !== null && !marks.has(a); a = a.parent) marks.add(a);
     };
     // Removals: nodes not alive after the commit.
     for (const [id, n] of [...st.byId]) {
