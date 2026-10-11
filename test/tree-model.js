@@ -921,6 +921,9 @@ class ModelTree {
         if (!Number.isInteger(k) || k < 0 || k >= KIND_COUNT)
           throw refusal('EINVAL', index);
         if (!this.validExtent(extent)) throw refusal('EINVAL', index);
+        // one op per id in a tree with client ids, a relocation's included
+        if (named.has(id)) throw refusal('EINVAL', index);
+        named.add(id);
         if (kind === null) kind = 'relocate';
         else if (kind !== 'relocate') throw refusal('EINVAL', index);
         const node = this.byId.get(id) ?? null;
@@ -941,7 +944,6 @@ class ModelTree {
     const before = ModelTree.published(this.root);
     for (const r of relocs) {
       const node = st.byId.get(r.id);
-      // Two relocations of one node in a commit: the second sees the first.
       if (!node.payload.reps.has(r.kind)) throw refusal('ENOENT', r.index);
       node.payload = this.#relocated(node.payload, r.kind, r.extent);
     }
@@ -1132,7 +1134,7 @@ class ModelTree {
       let n = st.byId.get(p.id) ?? null;
       if (n === null) {
         n = new ModelNode(this.nextUid++, p.id, null, p.name, p.fields.class);
-        st.byId.set(p.id, n);
+        st.byId.set(n.id, n); // the node's own id string, not the caller's
         n._pendingParent = p.parentId;
         n._created = true;
         changed = true;

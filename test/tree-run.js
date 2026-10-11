@@ -16,7 +16,7 @@
 
 const assert = require('node:assert/strict');
 const engine = require('./tree-engine.js');
-const { ModelTree, OTHERS } = require('./tree-model.js');
+const { ModelTree, OTHERS, isKey, isName } = require('./tree-model.js');
 const data = require('./tree-data.js');
 
 const env = process.env;
@@ -49,6 +49,7 @@ class Thread {
     this.empty = null; // the one shared empty Buffer
     this.containers = null; // this thread's own rule (client trees)
     this.pinned = new Set(); // engine Representations this thread's readers hold
+    this.formerReps = []; // retired Representations the test still holds
   }
 }
 
@@ -85,6 +86,15 @@ const noSab = (value, what, seen = new Set()) => {
       `${what}: a view over a SharedArrayBuffer`,
     );
     return;
+  }
+  // structured clone carries the contents of collections too
+  if (value instanceof Map) {
+    for (const [k, v] of value) {
+      noSab(k, what, seen);
+      noSab(v, what, seen);
+    }
+  } else if (value instanceof Set) {
+    for (const v of value) noSab(v, what, seen);
   }
   for (const key of Object.keys(value)) noSab(value[key], what, seen);
 };
@@ -194,10 +204,42 @@ const checkPayload = (ctx, thread, mp, p, what) => {
 
 const iterate = (iterable) => [...iterable];
 
+// A retired representation the test still holds views its own extent on
+// every access, however the node's bytes moved since.
+const holdFormer = (thread, rep) => {
+  thread.formerReps.push({
+    rep,
+    segmentId: rep.segmentId,
+    offset: rep.offset,
+    length: rep.length,
+  });
+  if (thread.formerReps.length > 12) thread.formerReps.shift();
+};
+
+const checkFormer = (ctx, thread) => {
+  for (const { rep, segmentId, offset, length } of thread.formerReps) {
+    const what = (s) => where(ctx, thread, `a retired representation: ${s}`);
+    assert.equal(rep.segmentId, segmentId, what('segmentId changed'));
+    assert.equal(rep.offset, offset, what('offset changed'));
+    assert.equal(rep.length, length, what('length changed'));
+    const view = rep.data;
+    assert.equal(view.length, length, what('data length'));
+    if (length > 0) {
+      assert.equal(
+        view.buffer,
+        thread.segments.get(segmentId),
+        what('data over another segment'),
+      );
+      assert.equal(view.byteOffset, offset, what('data offset'));
+    }
+  }
+};
+
 const compare = (ctx, thread) => {
   const { model } = ctx;
   const t = thread.tree;
   const what = (s) => where(ctx, thread, s);
+  checkFormer(ctx, thread);
   assert.equal(t.version, model.version, what('version'));
   assert.equal(
     t.structureVersion,
@@ -214,6 +256,10 @@ const compare = (ctx, thread) => {
     thread.nodes.delete(uid);
     thread.nodeUid.delete(node);
     thread.dead.push([node, ctx.ids.get(uid)]);
+    if (thread.main) {
+      ctx.deadIds.push(ctx.ids.get(uid));
+      if (ctx.deadIds.length > 20) ctx.deadIds.shift();
+    }
   }
   if (thread.dead.length > 60) thread.dead.splice(0, thread.dead.length - 60);
   for (const n of model.nodes()) {
@@ -311,6 +357,18 @@ const compare = (ctx, thread) => {
       n.kids.map((k) => k.uid),
       what(`childNodesOf order of ${JSON.stringify(key)}`),
     );
+    // childOf: every child by its name, and a name no child has.
+    for (const k of n.kids)
+      assert.equal(
+        t.childOf(node, k.name),
+        thread.nodes.get(k.uid),
+        what(`childOf(${JSON.stringify(key)}, ${JSON.stringify(k.name)})`),
+      );
+    assert.equal(
+      t.childOf(node, 'no such child'),
+      null,
+      what(`childOf(${JSON.stringify(key)}) of a name no child has`),
+    );
     if (ctx.random.chance(0.2)) {
       const trail = t.trailOf(node).map((x) => thread.nodeUid.get(x));
       assert.deepEqual(
@@ -322,6 +380,14 @@ const compare = (ctx, thread) => {
   }
   if (model.root !== null) {
     const root = thread.nodes.get(model.root.uid);
+    assert.equal(t.get('/'), root, what("get('/') is the root"));
+    if (model.aggregates.classes)
+      assert.equal(
+        t.classCountOf(root, 99),
+        0,
+        what('classCountOf a class no node has'),
+      );
+    assert.equal(t.match('/'), root, what("match('/') is the root"));
     if (!model.aggregates.classes) {
       assert.throws(
         () => t.classCountOf(root, 0),
@@ -382,6 +448,7 @@ const compare = (ctx, thread) => {
       null,
       what('check of a dead node'),
     );
+    assert.equal(t.childOf(node, 'x'), null, what('childOf of a dead node'));
     assert.deepEqual(
       iterate(t.childNodesOf(node)),
       [],
@@ -429,6 +496,38 @@ const fingerprint = (ctx, thread) => {
   return out.join('|');
 };
 
+// The keys a commit names, by the model as it is: an FS op's keys as
+// given; a client put's or row's place (its parent's key and its name) and
+// the node of a put or a removal.
+const keysOfOps = (ctx, ops, isLoad) => {
+  const { model } = ctx;
+  const keys = [];
+  if (!Array.isArray(ops)) return keys;
+  const place = (id, parentId, name) => {
+    const n = model.byId.get(id);
+    if (n !== undefined) keys.push(model.pathOf(n));
+    const p = model.byId.get(parentId);
+    if (p !== undefined && isName(name))
+      keys.push(`${model.pathOf(p)}/${name}`);
+  };
+  for (const op of ops) {
+    if (isLoad) {
+      if (op !== null && typeof op === 'object')
+        place(op.id, op.parentId, op.name);
+    } else if (!Array.isArray(op)) {
+      continue;
+    } else if (model.fs) {
+      if (isKey(op[1])) keys.push(op[1]);
+      if (op[0] === 'move' && isKey(op[2])) keys.push(op[2]);
+    } else if (op[0] === 'put') {
+      place(op[1], op[2], op[3]);
+    } else if (op[0] === 'remove') {
+      place(op[1], undefined, undefined);
+    }
+  }
+  return keys;
+};
+
 // --- lookups, policies, walks ----------------------------------------------------
 
 const missKeys = (ctx) => {
@@ -446,71 +545,74 @@ const missKeys = (ctx) => {
   return keys;
 };
 
-const checkLookups = (ctx, thread) => {
+// One key: get, match and resolve as the model answers them.
+const checkKey = (ctx, thread, key) => {
   const { model, random } = ctx;
   const t = thread.tree;
   const what = (s) => where(ctx, thread, s);
+  const m = model.get(key);
+  const got = t.get(key);
+  if (m.node === null)
+    assert.equal(got, null, what(`get(${JSON.stringify(key)}) should miss`));
+  else
+    assert.equal(
+      got,
+      thread.nodes.get(m.node.uid),
+      what(`get(${JSON.stringify(key)})`),
+    );
+  if (model.root === null) return;
+  const mm = model.match(key);
+  const gm = t.match(key);
+  if (mm.node)
+    assert.equal(
+      gm,
+      thread.nodes.get(mm.node.uid),
+      what(`match(${JSON.stringify(key)}) node`),
+    );
+  else {
+    assert.ok(
+      gm instanceof engine.NotFound,
+      what(`match(${JSON.stringify(key)}) not a NotFound`),
+    );
+    assert.equal(
+      gm.node,
+      thread.nodes.get(mm.notFound.node.uid),
+      what(`match(${JSON.stringify(key)}).node`),
+    );
+    assert.equal(
+      gm.rest,
+      mm.notFound.rest,
+      what(`match(${JSON.stringify(key)}).rest`),
+    );
+  }
+  // resolve() with the tree's separators, from a mount ('/' is no path
+  // past a mount: the root there is '').
+  if (key === '/') return;
+  const mount = ctx.sep === '\\' ? 'C:\\app\\place' : '/app/place';
+  const rel =
+    ctx.sep === '\\' && random.chance(0.5)
+      ? key.replace(/\//g, random.chance(0.5) ? '\\' : '/')
+      : key;
+  const abs = mount + rel;
+  const mr = model.resolve(abs, mount.length, ctx.sep);
+  const gr = t.resolve(abs, mount.length);
+  if (mr.node === null)
+    assert.equal(gr, null, what(`resolve(${JSON.stringify(abs)}) should miss`));
+  else
+    assert.equal(
+      gr,
+      thread.nodes.get(mr.node.uid),
+      what(`resolve(${JSON.stringify(abs)})`),
+    );
+};
+
+const checkLookups = (ctx, thread) => {
+  const { model, random } = ctx;
   const keys = missKeys(ctx);
   for (const n of random.shuffle([...model.nodes()]).slice(0, 6))
     keys.push(model.pathOf(n));
-  for (const key of keys) {
-    const m = model.get(key);
-    const got = t.get(key);
-    if (m.node === null)
-      assert.equal(got, null, what(`get(${JSON.stringify(key)}) should miss`));
-    else
-      assert.equal(
-        got,
-        thread.nodes.get(m.node.uid),
-        what(`get(${JSON.stringify(key)})`),
-      );
-    if (model.root === null) continue;
-    const mm = model.match(key);
-    const gm = t.match(key);
-    if (mm.node)
-      assert.equal(
-        gm,
-        thread.nodes.get(mm.node.uid),
-        what(`match(${JSON.stringify(key)}) node`),
-      );
-    else {
-      assert.ok(
-        gm instanceof engine.NotFound,
-        what(`match(${JSON.stringify(key)}) not a NotFound`),
-      );
-      assert.equal(
-        gm.node,
-        thread.nodes.get(mm.notFound.node.uid),
-        what(`match(${JSON.stringify(key)}).node`),
-      );
-      assert.equal(
-        gm.rest,
-        mm.notFound.rest,
-        what(`match(${JSON.stringify(key)}).rest`),
-      );
-    }
-    // resolve() with the tree's separators, from a mount.
-    const mount = ctx.sep === '\\' ? 'C:\\app\\place' : '/app/place';
-    const rel =
-      ctx.sep === '\\' && random.chance(0.5)
-        ? key.replace(/\//g, random.chance(0.5) ? '\\' : '/')
-        : key;
-    const abs = mount + rel;
-    const mr = model.resolve(abs, mount.length, ctx.sep);
-    const gr = t.resolve(abs, mount.length);
-    if (mr.node === null)
-      assert.equal(
-        gr,
-        null,
-        what(`resolve(${JSON.stringify(abs)}) should miss`),
-      );
-    else
-      assert.equal(
-        gr,
-        thread.nodes.get(mr.node.uid),
-        what(`resolve(${JSON.stringify(abs)})`),
-      );
-  }
+  if (random.chance(0.3)) keys.push('/'); // the root, as ''
+  for (const key of keys) checkKey(ctx, thread, key);
 };
 
 // allow(policy, owner, context): true unless the policy says no — a deny
@@ -530,7 +632,9 @@ const makeAllow =
     if (throwOn !== null && policy === throwOn)
       throw new Error('allow: a planned failure');
     let decision = true;
-    if (policy && policy.deny) decision = { status: 403, tag: policy.tag };
+    // only true lets through: a truthy primitive is a decision too
+    if (policy && policy.prim !== undefined) decision = policy.prim;
+    else if (policy && policy.deny) decision = { status: 403, tag: policy.tag };
     else if (policy && policy.redirect)
       decision = { redirect: '/elsewhere', tag: policy.tag };
     if (decision !== true) log.decisions.push(decision);
@@ -612,6 +716,23 @@ const checkPolicies = (ctx, thread) => {
       const got = t.match(key, { allow: makeAllow(glog), context });
       sameLog(glog, mlog, `match(${k}) with allow`);
       sameAnswer(got, m, glog, `match(${k}) with allow`);
+    }
+    {
+      // resolve with allow: as get, from a mount.
+      const mount = ctx.sep === '\\' ? 'C:\\app\\place' : '/app/place';
+      const abs = mount + key;
+      const mlog = newLog();
+      const glog = newLog();
+      const m = model.resolve(abs, mount.length, ctx.sep, {
+        allow: makeAllow(mlog),
+        context,
+      });
+      const got = t.resolve(abs, mount.length, {
+        allow: makeAllow(glog),
+        context,
+      });
+      sameLog(glog, mlog, `resolve(${JSON.stringify(abs)}) with allow`);
+      sameAnswer(got, m, glog, `resolve(${JSON.stringify(abs)}) with allow`);
     }
     {
       // Without allow: two outcomes and no call.
@@ -732,6 +853,188 @@ const checkWalks = (ctx, thread) => {
 
 // --- generators --------------------------------------------------------------------
 
+// Names a key may hold beyond ASCII letters: two-byte ones, a surrogate
+// pair, lone surrogates, spaces and dots, and the names of Object.prototype
+// (a dictionary keyed by names must not see them).
+const ODD_NAMES = [
+  '__proto__',
+  'constructor',
+  'hasOwnProperty',
+  'toString',
+  'категория',
+  '目录',
+  'emoji-\u{1F600}',
+  'lone-\uD800',
+  '\uDFFF-lone',
+  'x\uD83Dy',
+  '\uDC00',
+  ' spaced name ',
+  '...',
+  'a.b',
+];
+
+const nameAt = (ctx) => {
+  const { random } = ctx;
+  const i = ctx.counter++;
+  if (!random.chance(0.1)) return data.nameOf(random, i);
+  const odd = random.pick(ODD_NAMES);
+  return random.chance(0.5) ? odd : `${odd}${i}`;
+};
+
+// A client's number id: mostly small, now and then beyond a small integer of
+// any build or negative — the numeric columns of snapshots and deltas take
+// doubles then.
+const numberId = (ctx) => {
+  const n = ctx.counter++;
+  switch (ctx.random.int(24)) {
+    case 0:
+      return 2 ** 30 + n;
+    case 1:
+      return -(2 ** 30) - n;
+    case 2:
+      return -n;
+    case 3:
+      return Number.MAX_SAFE_INTEGER - n;
+    default:
+      return n;
+  }
+};
+
+// A payload input, now and then with a size past a small integer.
+const sized = (ctx, input) => {
+  if (input !== undefined && ctx.random.chance(0.04))
+    input.size = 2 ** 31 + ctx.random.int(1e6);
+  return input;
+};
+
+// An extent that is not one: no such segment, past the segment's end,
+// negative, not an integer.
+const badExtent = (ctx) => {
+  const ok = { segmentId: 1, offset: 0, length: 8 };
+  return ctx.random.pick([
+    { ...ok, segmentId: 9 },
+    { ...ok, offset: (1 << 18) - 4 },
+    { ...ok, offset: -8 },
+    { ...ok, length: 1.5 },
+    { ...ok, segmentId: '1' },
+  ]);
+};
+
+// A refused FS op of every kind of check: the format first, then each op's
+// own, the root as '' and as '/'. Mistakes about a parent are about the
+// direct one only: a file deeper up the path is the spec's open question.
+const badFsOp = (ctx, m) => {
+  const { random, extents } = ctx;
+  const all = [...m.nodes()];
+  const dirs = all.filter((n) => n.cls === 0);
+  const files = all.filter((n) => n.cls === 1);
+  const nonRoot = all.filter((n) => n.parent !== null);
+  const keyOf = (n) => m.pathOf(n);
+  const payload = () =>
+    data.payloadOf(random, extents, { birthtime: m.birthtime, noSource: true });
+  const missing = () => `/missing-${random.int(9)}`;
+  const fresh = () => `/x-${ctx.counter++}`;
+  const reps = (list) => ({ size: 8, mtimeMs: 1.7e12, representations: list });
+  const format = [
+    ['mkdir', '//x'],
+    ['frob', '/x'],
+    ['move', '', '/x'],
+    ['mkdir', '/a/./b'],
+    ['relocate', 'not-an-id', 0, extents.next(8)],
+    ['relocate', -1, 0, extents.next(8)],
+    ['relocate', 999999, 99, extents.next(8)],
+    ['relocate', 999999, 0, badExtent(ctx)],
+    ['write', fresh(), { size: -1, mtimeMs: 1, representations: [] }],
+    ['write', fresh(), { size: 1.5, mtimeMs: 1, representations: [] }],
+    ['write', fresh(), { size: 1, mtimeMs: NaN, representations: [] }],
+    ['write', fresh(), reps([[0, badExtent(ctx)]])],
+    ['write', fresh(), reps([[99, extents.next(8)]])],
+    [
+      'write',
+      fresh(),
+      reps([
+        [0, extents.next(8)],
+        [0, extents.next(8)],
+      ]),
+    ],
+  ];
+  if (m.birthtime)
+    format.push([
+      'write',
+      fresh(),
+      { size: 1, mtimeMs: 1, birthtimeMs: Infinity, representations: [] },
+    ]);
+  const bad = [
+    ['mkdir', ''],
+    ['mkdir', '/'],
+    ['write', '', payload()],
+    ['write', '/', payload()],
+    ['unlink', ''],
+    ['unlink', '/'],
+    ['rmdir', '/'],
+    ['remove', '/'],
+    ['move', '/', '/x'],
+    ['remove', missing()],
+    ['unlink', missing()],
+    ['mkdir', `${missing()}/x`],
+    ['write', `${missing()}/x`, payload()],
+    ['relocate', 999999, 0, extents.next(8)],
+    ['relocate', dirs[0].id, 0, extents.next(8)],
+    [
+      'rmdir',
+      dirs.length > 1
+        ? keyOf(
+            random.pick(
+              dirs.filter((d) => d.parent !== null).concat(dirs.slice(0, 1)),
+            ),
+          )
+        : '/x',
+    ],
+    ['unlink', dirs.length > 1 ? keyOf(dirs[dirs.length - 1]) : '/x'],
+  ];
+  if (ctx.deadIds.length > 0)
+    bad.push(['relocate', random.pick(ctx.deadIds), 0, extents.next(8)]);
+  if (files.length > 0) {
+    const file = keyOf(random.pick(files));
+    bad.push(['mkdir', `${file}/sub`], ['write', `${file}/x`, payload()]);
+    if (nonRoot.length > 0)
+      bad.push(['move', keyOf(random.pick(nonRoot)), `${file}/x`]);
+    // a kind the file has not: ENOENT
+    const known = files.filter(
+      (f) => f.payload !== null && ctx.ids.get(f.uid) === f.id,
+    );
+    if (known.length > 0) {
+      const f = random.pick(known);
+      const lacks = [0, 1, 2, 3, 4].filter((k) => !f.payload.reps.has(k));
+      if (lacks.length > 0)
+        bad.push(['relocate', f.id, random.pick(lacks), extents.next(8)]);
+    }
+  }
+  if (nonRoot.length > 0) {
+    const n = keyOf(random.pick(nonRoot));
+    bad.push(
+      ['move', n, `${missing()}/x`],
+      ['move', n, '/'],
+      ['mkdir', n], // EEXIST
+    );
+  }
+  // errors of meaning twice as often: there are more kinds of them
+  return random.chance(0.33) ? random.pick(format) : random.pick(bad);
+};
+
+// An FS op the format refuses: an unknown name, a key that is not one.
+const formatBadOp = (ctx) =>
+  ctx.random.pick([
+    ['frob', '/x'],
+    ['mkdir', '//x'],
+    ['mkdir', '/a/./b'],
+    ['unlink', 'no-slash'],
+    ['remove', '/a/'],
+    ['move', '/a', '/b/..'],
+    ['write', '/a\b', { size: 1, mtimeMs: 1, representations: [] }],
+    'not an op',
+  ]);
+
 const fsOp = (ctx, m) => {
   const { random, extents } = ctx;
   const all = [...m.nodes()];
@@ -739,9 +1042,15 @@ const fsOp = (ctx, m) => {
   const files = all.filter((n) => n.cls === 1);
   const nonRoot = all.filter((n) => n.parent !== null);
   const keyOf = (n) => m.pathOf(n);
-  const child = (d) => `${keyOf(d)}/${data.nameOf(random, ctx.counter++)}`;
+  const child = (d) => `${keyOf(d)}/${nameAt(ctx)}`;
   const payload = () =>
-    data.payloadOf(random, extents, { birthtime: m.birthtime, noSource: true });
+    sized(
+      ctx,
+      data.payloadOf(random, extents, {
+        birthtime: m.birthtime,
+        noSource: true,
+      }),
+    );
   switch (random.int(16)) {
     case 0:
     case 1:
@@ -805,46 +1114,8 @@ const fsOp = (ctx, m) => {
       ctx.pending = ['move', keyOf(from), keyOf(to)];
       return [from.cls === 1 ? 'unlink' : 'rmdir', keyOf(to)];
     }
-    case 14: {
-      // A refused op of every kind of check.
-      const bad = [
-        ['mkdir', '//x'],
-        ['mkdir', ''],
-        ['write', '', payload()],
-        ['frob', '/x'],
-        ['move', '', '/x'],
-        ['remove', `/missing-${random.int(9)}`],
-        [
-          'rmdir',
-          dirs.length > 1
-            ? keyOf(
-                random.pick(
-                  dirs
-                    .filter((d) => d.parent !== null)
-                    .concat(dirs.slice(0, 1)),
-                ),
-              )
-            : '/x',
-        ],
-        ['relocate', 999999, 0, extents.next(8)],
-        ['relocate', dirs[0].id, 0, extents.next(8)],
-        ['relocate', 'not-an-id', 0, extents.next(8)],
-        ['relocate', -1, 0, extents.next(8)],
-        ['unlink', ''],
-        ['unlink', `/missing-${random.int(9)}`],
-        [
-          'write',
-          `/x-${random.int(9)}`,
-          { size: -1, mtimeMs: 1, representations: [] },
-        ],
-        ['unlink', dirs.length > 1 ? keyOf(dirs[dirs.length - 1]) : '/x'],
-        [
-          'mkdir',
-          `${files.length > 0 ? keyOf(random.pick(files)) : '/nope'}/sub`,
-        ],
-      ];
-      return random.pick(bad);
-    }
+    case 14:
+      return badFsOp(ctx, m);
     default:
       return ['write', child(random.pick(dirs)), payload()];
   }
@@ -886,11 +1157,36 @@ const fsOps = (ctx) => {
       scratch.commit([op], scratch.version + 1, ctx.now);
       ops.push(op);
     } catch {
-      if (random.chance(0.25)) ops.push(op); // a refused op, kept now and then
+      if (random.chance(0.4)) {
+        ops.push(op); // a refused op, kept now and then
+        // and a second refused one after it, of format or of meaning: the
+        // refusal is the first one's either way
+        if (random.chance(0.6))
+          ops.push(
+            random.chance(0.6) ? formatBadOp(ctx) : badFsOp(ctx, scratch),
+          );
+      }
       break;
     }
   }
   return ops;
+};
+
+// A policy of a node of a tree with client ids: deny, redirect, or one whose
+// allow answers a primitive — only true lets through; null for none.
+const policyOf = (ctx) => {
+  const { random } = ctx;
+  if (!on('policy') || !random.chance(0.2)) return null;
+  if (random.chance(0.15))
+    return {
+      prim: random.pick([1, 'ok', 0, '', false, null, true]),
+      tag: random.int(100),
+    };
+  return {
+    deny: random.chance(0.4),
+    redirect: random.chance(0.1),
+    tag: random.int(100),
+  };
 };
 
 // A commit of a tree with client ids: puts and removes, one per id; patterns
@@ -902,19 +1198,11 @@ const clientOps = (ctx) => {
   const named = new Set();
   const newId = () =>
     model.mode === 'number'
-      ? ctx.counter++
+      ? numberId(ctx)
       : `id-${ctx.counter++}${random.chance(0.3) ? '-'.repeat(14) : ''}`;
   const payload = () =>
     random.chance(0.6)
-      ? data.payloadOf(random, extents, { noSource: true })
-      : undefined;
-  const policy = () =>
-    on('policy') && random.chance(0.2)
-      ? {
-          deny: random.chance(0.4),
-          redirect: random.chance(0.1),
-          tag: random.int(100),
-        }
+      ? sized(ctx, data.payloadOf(random, extents, { noSource: true }))
       : undefined;
   const fields = (create) => {
     const f = {};
@@ -922,8 +1210,8 @@ const clientOps = (ctx) => {
     const p = payload();
     if (p !== undefined) f.payload = p;
     else if (!create && random.chance(0.1)) f.payload = null;
-    const pol = policy();
-    if (pol !== undefined) f.policy = pol;
+    const pol = policyOf(ctx);
+    if (pol !== null) f.policy = pol;
     else if (!create && random.chance(0.05)) f.policy = null;
     return f;
   };
@@ -931,13 +1219,7 @@ const clientOps = (ctx) => {
     const id = newId();
     ops.push(['put', id, null, '', fields(true)]);
     for (let i = 0; i < 3; i++)
-      ops.push([
-        'put',
-        newId(),
-        id,
-        data.nameOf(random, ctx.counter++),
-        fields(true),
-      ]);
+      ops.push(['put', newId(), id, nameAt(ctx), fields(true)]);
     return ops;
   }
   const nonRoot = all.filter((n) => n.parent !== null);
@@ -946,13 +1228,7 @@ const clientOps = (ctx) => {
     const choice = random.int(12);
     if (choice <= 3 || nonRoot.length === 0) {
       const parent = random.pick(all);
-      ops.push([
-        'put',
-        newId(),
-        parent.id,
-        data.nameOf(random, ctx.counter++),
-        fields(true),
-      ]);
+      ops.push(['put', newId(), parent.id, nameAt(ctx), fields(true)]);
       continue;
     }
     const n = random.pick(nonRoot);
@@ -961,9 +1237,7 @@ const clientOps = (ctx) => {
     if (choice <= 5) {
       // a move or rename, sometimes under its own descendant (a cycle)
       const parent = random.pick(all);
-      const name = random.chance(0.5)
-        ? n.name
-        : data.nameOf(random, ctx.counter++);
+      const name = random.chance(0.5) ? n.name : nameAt(ctx);
       ops.push(['put', n.id, parent.id, name, fields(false)]);
     } else if (choice <= 7) {
       ops.push(['put', n.id, n.parent.id, n.name, fields(false)]);
@@ -983,8 +1257,11 @@ const clientOps = (ctx) => {
       }
     }
   }
-  if (random.chance(0.1)) {
-    // a refused op of the first group
+  if (random.chance(0.12)) {
+    // a refused op of the first group; an id of the other kind is one that
+    // would convert to a live id
+    const otherKind =
+      model.mode === 'number' ? String(model.root.id) : ctx.counter++;
     const bad = random.pick([
       ['put', newId(), model.root.id, '', { class: 1 }],
       ['put', newId(), model.root.id, 'x', {}],
@@ -999,6 +1276,30 @@ const clientOps = (ctx) => {
       ],
       ['put', newId(), model.root.id, 'a/b', { class: 1 }],
       ['put', newId(), model.root.id, 'ok', { class: -1 }],
+      ['put', newId(), otherKind, 'pk', { class: 1 }],
+      ['put', otherKind, model.root.id, 'ik', { class: 1 }],
+      ['remove', otherKind],
+      [
+        'put',
+        newId(),
+        model.root.id,
+        'bp',
+        { class: 1, payload: { size: -1, mtimeMs: 1, representations: [] } },
+      ],
+      [
+        'put',
+        newId(),
+        model.root.id,
+        'be',
+        {
+          class: 1,
+          payload: {
+            size: 1,
+            mtimeMs: 1,
+            representations: [[0, badExtent(ctx)]],
+          },
+        },
+      ],
       ['frob', 1],
       ops.length > 0 ? ops[0] : ['remove', model.root.id],
     ]);
@@ -1007,21 +1308,62 @@ const clientOps = (ctx) => {
   return random.shuffle(ops);
 };
 
+// Compaction of a tree with client ids: one relocation, mostly; now and then
+// one the first group refuses — the id named twice, a put or a remove
+// beside it, an id of another kind, an unknown kind, an extent that is not
+// one — or one the node refuses: an id no live node has, a kind it has not.
 const clientRelocations = (ctx) => {
   const { model, random, extents } = ctx;
-  const withReps = [...model.nodes()].filter(
+  const all = [...model.nodes()];
+  const withReps = all.filter(
     (n) => n.payload !== null && n.payload.reps.size > 0,
   );
   if (withReps.length === 0) return null;
   const n = random.pick(withReps);
-  return [
-    [
-      'relocate',
-      n.id,
-      random.pick([...n.payload.reps.keys()]),
-      extents.next(8),
-    ],
-  ];
+  const kinds = [...n.payload.reps.keys()];
+  const op = ['relocate', n.id, random.pick(kinds), extents.next(8)];
+  const others = all.filter((x) => x !== n && x.parent !== null);
+  const otherKind = model.mode === 'number' ? String(n.id) : ctx.counter++;
+  const dead = ctx.deadIds.filter((id) => !model.byId.has(id));
+  switch (random.int(16)) {
+    case 0:
+      return [op, ['relocate', n.id, random.pick(kinds), extents.next(8)]];
+    case 1: {
+      if (others.length === 0) return [op];
+      const x = random.pick(others);
+      const beside = random.chance(0.5)
+        ? ['put', x.id, x.parent.id, x.name, {}]
+        : ['remove', x.id];
+      return random.chance(0.5) ? [op, beside] : [beside, op];
+    }
+    case 2:
+      return [['relocate', otherKind, 0, extents.next(8)]];
+    case 3:
+      return [['relocate', n.id, 99, extents.next(8)]];
+    case 4:
+      return [['relocate', n.id, kinds[0], badExtent(ctx)]];
+    case 5:
+      return [
+        [
+          'relocate',
+          model.mode === 'number' ? 9e15 : 'no-such-id',
+          0,
+          extents.next(8),
+        ],
+      ];
+    case 6:
+      return dead.length > 0
+        ? [['relocate', random.pick(dead), 0, extents.next(8)]]
+        : [op];
+    case 7: {
+      const lacks = [0, 1, 2, 3, 4].filter((k) => !n.payload.reps.has(k));
+      return lacks.length > 0
+        ? [['relocate', n.id, random.pick(lacks), extents.next(8)]]
+        : [op];
+    }
+    default:
+      return [op];
+  }
 };
 
 const loadRows = (ctx) => {
@@ -1045,19 +1387,38 @@ const loadRows = (ctx) => {
     if (random.chance(0.2)) row.class = random.int(5);
     if (random.chance(0.2))
       row.payload = random.chance(0.8)
-        ? data.payloadOf(random, extents, { noSource: true })
+        ? sized(ctx, data.payloadOf(random, extents, { noSource: true }))
         : null;
+    if (random.chance(0.1)) row.policy = policyOf(ctx);
     rows.push(row);
   }
   const ids = rows.map((r) => r.id);
   for (let i = 0; i < 3 && ids.length > 0; i++) {
-    const id = model.mode === 'number' ? ctx.counter++ : `id-${ctx.counter++}`;
-    rows.push({
+    const id = model.mode === 'number' ? numberId(ctx) : `id-${ctx.counter++}`;
+    const row = {
       id,
       parentId: random.pick(ids),
-      name: data.nameOf(random, ctx.counter++),
+      name: nameAt(ctx),
       class: random.int(5),
-    });
+    };
+    const pol = policyOf(ctx);
+    if (pol !== null) row.policy = pol;
+    rows.push(row);
+  }
+  // Now and then a row the format refuses: an id twice, a new row without
+  // a class, a row that is not an object.
+  if (rows.length > 0 && random.chance(0.12)) {
+    const bad = random.pick([
+      { ...random.pick(rows) },
+      {
+        id: model.mode === 'number' ? numberId(ctx) : `id-${ctx.counter++}`,
+        parentId: random.pick(ids),
+        name: nameAt(ctx),
+      },
+      null,
+      7,
+    ]);
+    rows.push(bad);
   }
   return random.shuffle(rows);
 };
@@ -1118,6 +1479,7 @@ const runSeed = (seed) => {
     idOwner: new Map(),
     former: new Set(),
     pending: null,
+    deadIds: [], // ids of nodes main saw die, for ops by a dead id
   };
   const threads = [main];
   const replicaOf = (name) => {
@@ -1140,6 +1502,8 @@ const runSeed = (seed) => {
       segments,
       false,
     );
+    // the snapshot carries main's rule as it is now, its own until it sets one
+    r.containers = main.containers;
     return r;
   };
   // A delta of another tree at the same revision is EINVAL.
@@ -1193,6 +1557,45 @@ const runSeed = (seed) => {
       where(ctx, main, 'apply on a main tree'),
     );
     threads.push(early);
+    // The arguments: `ops` (`rows`) an array, `next` a safe integer, `now` a
+    // finite number — EINVAL, index -1, nothing changed.
+    const fpArgs = fingerprint(ctx, main);
+    const badArgs = (f, s) =>
+      assert.throws(
+        f,
+        (e) => e.code === 'EINVAL' && e.index === -1,
+        where(ctx, main, s),
+      );
+    badArgs(() => main.tree.commit('ops', 1, 1001), 'ops not an array');
+    badArgs(() => main.tree.commit([], 1.5, 1001), 'next not an integer');
+    badArgs(() => main.tree.commit([], 2 ** 53, 1001), 'next not safe');
+    badArgs(() => main.tree.commit([], 1, NaN), 'now not a finite number');
+    badArgs(() => main.tree.commit([], 1, Infinity), 'now not finite');
+    if (!fs) badArgs(() => main.tree.load({}, 1, 1001), 'rows not an array');
+    // Not a snapshot of this engine — no format mark — and options the spec
+    // forbids: EINVAL.
+    for (const junk of [null, 42, 'snapshot', {}, { nodes: [] }])
+      assert.throws(
+        () => engine.fromSnapshot(junk, segments),
+        { code: 'EINVAL' },
+        where(ctx, main, `fromSnapshot(${JSON.stringify(junk)})`),
+      );
+    for (const bad of [
+      { ids: 'number', directories: true },
+      { ids: 'string', directories: true },
+      { cache: { size: 2 ** 24 + 1 } },
+      { cache: { size: 4, misses: { size: 2 ** 24 + 1 } } },
+    ])
+      assert.throws(
+        () => engine.createTree({ ...options, ...bad }),
+        { code: 'EINVAL' },
+        where(ctx, main, `createTree(${JSON.stringify(bad)})`),
+      );
+    assert.equal(
+      fingerprint(ctx, main),
+      fpArgs,
+      where(ctx, main, 'a refusal of the arguments changed the tree'),
+    );
   }
   compare(ctx, main);
   let held = null; // a delta held back to test ESTALE
@@ -1276,6 +1679,14 @@ const runSeed = (seed) => {
         sv: th.tree.structureVersion,
       });
     }
+    // The rule of containers changes in a thread while its iterators live:
+    // they go on (the rule is no structure).
+    if (!fs && random.chance(0.06)) {
+      const heldTh = held === null ? null : held.th;
+      const th = random.pick(threads.filter((x) => x !== heldTh));
+      th.containers = random.shuffle([0, 1, 2, 3, 4]).slice(0, random.int(4));
+      th.tree.containers = th.containers;
+    }
     const saved = model.save();
     let mres = null;
     let merr = null;
@@ -1284,6 +1695,10 @@ const runSeed = (seed) => {
         ? model.load(ops, next, ctx.now)
         : model.commit(ops, next, ctx.now);
     } catch (err) {
+      // a refusal has a code and an index; anything else is the model's own
+      // failure, and an engine throwing anything must not match it
+      if (typeof err.code !== 'string' || !Number.isInteger(err.index))
+        throw err;
       merr = err;
     }
     const fpBefore =
@@ -1321,6 +1736,8 @@ const runSeed = (seed) => {
         fpBefore,
         what('a refused commit changed the tree'),
       );
+      // The keys it named: the caches gained no answer from it.
+      for (const key of keysOfOps(ctx, ops, isLoad)) checkKey(ctx, main, key);
     } else if (
       eerr !== null &&
       retire.error !== null &&
@@ -1387,7 +1804,9 @@ const runSeed = (seed) => {
           main.reps.get(m.uid),
           what("retired rep is not the main tree's object"),
         );
-        // The former representation, while it is held, views its own extent.
+        // The former representation, while it is held, views its own extent:
+        // now and on later steps.
+        holdFormer(main, r.rep);
         const view = r.rep.data;
         assert.equal(
           view.length,
@@ -1454,6 +1873,7 @@ const runSeed = (seed) => {
             if (random.chance(0.3) && th.reps.has(r.uid))
               th.pinned.add(th.reps.get(r.uid));
           const retained = th.tree.apply(structuredClone(clone), pins);
+          for (const [rep] of pins.calls) holdFormer(th, rep);
           const wantRetain = mres.retired
             .map((r) => th.reps.get(r.uid))
             .filter(Boolean);
@@ -1552,10 +1972,16 @@ const runSeed = (seed) => {
       if (held !== null && held.th === th) continue; // a delta behind, on purpose
       compare(ctx, th);
       checkLookups(ctx, th);
-      if (!fs && on('policy')) checkPolicies(ctx, th);
+      // an FS tree has no policies: allow is never called there
+      if (on('policy')) checkPolicies(ctx, th);
       if (on('walk')) checkWalks(ctx, th);
     }
   }
+  // A replica of the final state from a snapshot: everything the run made
+  // goes through the snapshot's encoding once more.
+  const late = replicaOf('late');
+  compare(ctx, late);
+  checkLookups(ctx, late);
 };
 
 module.exports = {

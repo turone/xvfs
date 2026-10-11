@@ -68,6 +68,7 @@ const run = (seed) => {
     ids: new Map(),
     idOwner: new Map(),
     former: new Set(),
+    deadIds: [],
   };
   // A replica from the first delta, and one from a snapshot taken later.
   const first = new Thread(
@@ -89,11 +90,15 @@ const run = (seed) => {
       ? main.tree.load(ops, next, ctx.now)
       : main.tree.commit(ops, next, ctx.now);
     assert.equal(r.version, model.version, where(ctx, main, 'version'));
-    assert.equal(
-      r.retired.length,
-      m.retired.length,
-      where(ctx, main, 'retired count'),
-    );
+    // retired as a multiset of (id, kind, extent), as the model test has it
+    const want = m.retired.map((x) => `${x.id}|${x.kind}|${x.extent}`).sort();
+    const got = r.retired
+      .map(
+        (x) =>
+          `${x.id}|${x.kind}|${x.rep.segmentId}:${x.rep.offset}:${x.rep.length}`,
+      )
+      .sort();
+    assert.deepEqual(got, want, where(ctx, main, 'retired'));
     if (r.delta !== null) {
       noSab(r.delta, where(ctx, main, 'delta'));
       for (const th of threads.slice(1))
@@ -103,12 +108,16 @@ const run = (seed) => {
   };
   const refused = (ops, code, isLoad = false) => {
     const fp = fingerprint(ctx, main);
+    let index = null;
     assert.throws(
       () =>
         isLoad
           ? model.load(ops, next + 1, ctx.now)
           : model.commit(ops, next + 1, ctx.now),
-      { code },
+      (e) => {
+        index = e.index;
+        return e.code === code && Number.isInteger(e.index);
+      },
       where(ctx, main, 'the model should refuse'),
     );
     assert.throws(
@@ -116,8 +125,8 @@ const run = (seed) => {
         isLoad
           ? main.tree.load(ops, next + 1, ctx.now)
           : main.tree.commit(ops, next + 1, ctx.now),
-      { code },
-      where(ctx, main, `a refused large batch (${code})`),
+      (e) => e.code === code && e.index === index,
+      where(ctx, main, `a refused large batch (${code} at ${index})`),
     );
     assert.equal(
       fingerprint(ctx, main),
