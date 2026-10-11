@@ -11,7 +11,7 @@
 // Node, Payload and Representation objects.
 //
 //   TREE_SEEDS (40)  TREE_COMMITS (150)  TREE_SEED (one seed)
-//   TREE_ONLY=fs,cache,client,policy,walk,aggregates (sections to run)
+//   TREE_ONLY=fs,client,policy,walk,aggregates (sections to run)
 //   TREE_ENGINE=<module> (default lib/tree.js)
 
 const assert = require('node:assert/strict');
@@ -24,7 +24,7 @@ const SEEDS = Number(env.TREE_SEEDS ?? 40);
 const COMMITS = Number(env.TREE_COMMITS ?? 150);
 const ONE = env.TREE_SEED === undefined ? null : Number(env.TREE_SEED);
 const SECTIONS = new Set(
-  (env.TREE_ONLY ?? 'fs,cache,client,policy,walk,aggregates')
+  (env.TREE_ONLY ?? 'fs,client,policy,walk,aggregates')
     .split(',')
     .map((s) => s.trim()),
 );
@@ -1186,7 +1186,7 @@ const fsOps = (ctx) => {
       scratch.commit([op], scratch.version + 1, ctx.now);
       ops.push(op);
       // Now and then a removed node's key is taken again in the same commit,
-      // by a new node: no cache and no replica may give the former one.
+      // by a new node: no lookup and no replica may give the former one.
       if (
         (op[0] === 'remove' || op[0] === 'unlink' || op[0] === 'rmdir') &&
         random.chance(0.3)
@@ -1572,15 +1572,6 @@ const runSeed = (seed) => {
       .shuffle([0, 1, 2, 3, 4])
       .slice(0, random.int(4));
   if (random.chance(0.12)) options.maxNodes = 12 + random.int(30);
-  if (on('cache')) {
-    options.cache = {
-      size: random.pick([0, 1, 2, 3, 1 << 16]),
-      misses: random.chance(0.5)
-        ? false
-        : { size: random.pick([1, 2, 3, 1 << 12]) },
-      moveThreshold: random.pick([0, 1, 1024]),
-    };
-  }
   const model = new ModelTree(options);
   const main = new Thread('main', engine.createTree(options), segments, true);
   const ctx = {
@@ -1605,20 +1596,9 @@ const runSeed = (seed) => {
   const replicaOf = (name) => {
     const snapshot = main.tree.snapshot();
     noSab(snapshot, where(ctx, main, 'snapshot'));
-    const cache =
-      on('cache') && random.chance(0.5)
-        ? {
-            size: random.pick([0, 2, 1 << 16]),
-            misses: random.chance(0.5) ? false : { size: 3 },
-          }
-        : undefined;
     const r = new Thread(
       name,
-      engine.fromSnapshot(
-        structuredClone(snapshot),
-        segments,
-        cache === undefined ? {} : { cache },
-      ),
+      engine.fromSnapshot(structuredClone(snapshot), segments),
       segments,
       false,
     );
@@ -1703,8 +1683,6 @@ const runSeed = (seed) => {
     for (const bad of [
       { ids: 'number', directories: true },
       { ids: 'string', directories: true },
-      { cache: { size: 2 ** 24 + 1 } },
-      { cache: { size: 4, misses: { size: 2 ** 24 + 1 } } },
     ])
       assert.throws(
         () => engine.createTree({ ...options, ...bad }),
@@ -1856,7 +1834,7 @@ const runSeed = (seed) => {
         fpBefore,
         what('a refused commit changed the tree'),
       );
-      // The keys it named: the caches gained no answer from it.
+      // The keys it named: the lookups answer as before it.
       for (const key of keysOfOps(ctx, ops, isLoad)) checkKey(ctx, main, key);
     } else if (
       eerr !== null &&

@@ -13,7 +13,7 @@
 //            came from a snapshot, and from a delta
 //   keys     the heap per node of trees committed and loaded from keys, ids
 //            and names cut from 4 KiB strings, against flat ones
-//   cache    the heap per entry of get, resolve and misses whose keys are
+//   lookups  the heap per query of get, resolve and misses whose keys are
 //            cut from 4 KiB strings
 //   spoil    the answers of a tree after the input of fromSnapshot, apply,
 //            commit and load is overwritten with garbage
@@ -260,7 +260,6 @@ const FS_OPTIONS = {
   directories: true,
   birthtime: true,
   aggregates: { classes: true, subtreeVersion: true },
-  cache: { size: 4096, misses: { size: 1024 } },
 };
 
 const fsInput = (ctx) =>
@@ -382,7 +381,6 @@ const clientTree = (ids, count) => {
     retireIds: retireIds(),
     now: now(),
     aggregates: { classes: true, subtreeVersion: true },
-    cache: { size: 4096, misses: { size: 1024 } },
   });
   const { id, sections } = ctx;
   const rows = [
@@ -797,15 +795,15 @@ const keys = async () => {
   return { check: 'keys', results };
 };
 
-// --- 4. cache --------------------------------------------------------------------------
+// --- 4. lookups ------------------------------------------------------------------------
 
-const CACHE_FILES = 10000;
+const LOOKUP_FILES = 10000;
 
-// A replica with both caches, and the queries of `variant` as flat strings
-// (made before the measurement starts): the catalog's keys for `get`, its
-// paths below a mount for `resolve` with either separator, misses — under a
-// directory, below a file, at the root — for `miss` and `match`.
-const cacheSetup = (variant) => {
+// A replica, and the queries of `variant` as flat strings (made before the
+// measurement starts): the catalog's keys for `get`, its paths below a
+// mount for `resolve` with either separator, misses — under a directory,
+// below a file, at the root — for `miss` and `match`.
+const lookupSetup = (variant) => {
   const sep = variant === 'resolve \\' ? '\\' : '/';
   const segments = data.createSegments(2);
   const extents = new data.Extents(segments);
@@ -815,14 +813,13 @@ const cacheSetup = (variant) => {
     retireIds: retireIds(),
     now: now(),
   });
-  const files = data.catalogKeys(CACHE_FILES);
+  const files = data.catalogKeys(LOOKUP_FILES);
   for (const batch of data.catalogBatches(files, extents)) {
     main.commit(batch, next(), now());
   }
   const replica = engine.fromSnapshot(
     structuredClone(main.snapshot()),
     segments,
-    { cache: { size: 2 ** 16, misses: { size: 2 ** 16 } } },
   );
   const mount = sep === '/' ? '/mnt/site' : 'X:\\mnt\\site';
   let queries = files;
@@ -859,22 +856,22 @@ const ask = (ctx, variant) => {
   return queries.length;
 };
 
-const perEntry = async (variant) => {
-  const ctx = cacheSetup(variant);
+const perQuery = async (variant) => {
+  const ctx = lookupSetup(variant);
   keep.push(ctx.replica);
   const base = heap();
-  const entries = ask(ctx, variant);
+  const queries = ask(ctx, variant);
   await turn();
   const after = heap();
-  return { variant, entries, perEntry: (after - base) / entries };
+  return { variant, queries, perQuery: (after - base) / queries };
 };
 
-const cache = async () => {
+const lookups = async () => {
   const results = [];
   for (const variant of ['get', 'resolve /', 'resolve \\', 'miss', 'match']) {
-    results.push(await perEntry(variant));
+    results.push(await perQuery(variant));
   }
-  return { check: 'cache', results };
+  return { check: 'lookups', results };
 };
 
 // --- 5. spoil --------------------------------------------------------------------------
@@ -977,7 +974,7 @@ const spoilCheck = () => {
 
 // --- Main --------------------------------------------------------------------------------
 
-const CHECKS = { objects, strings, keys, cache, spoil: spoilCheck };
+const CHECKS = { objects, strings, keys, lookups, spoil: spoilCheck };
 
 const fail = (err) => {
   process.stderr.write(`${err.stack || err}\n`);
