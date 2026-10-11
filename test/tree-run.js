@@ -1454,11 +1454,15 @@ const loadRows = (ctx) => {
     (n) => n.parent === null || random.chance(0.85),
   );
   const kept = new Set(keep.map((n) => n.id));
+  // a kept node whose parent is dropped would be a refused load (ENOENT) —
+  // keep the chain, and let one orphan through in a load of ten
+  let orphan = random.chance(0.1);
   for (const n of keep) {
-    // a kept node whose parent is dropped would be a refused load — keep the
-    // chain, mostly; now and then let it fail
     const parent = n.parent;
-    if (parent !== null && !kept.has(parent.id) && random.chance(0.8)) continue;
+    if (parent !== null && !kept.has(parent.id)) {
+      if (!orphan) continue;
+      orphan = false;
+    }
     const row = {
       id: n.id,
       parentId: parent === null ? null : parent.id,
@@ -1488,6 +1492,45 @@ const loadRows = (ctx) => {
       [a.name, b.name] = [b.name, a.name];
     }
   }
+  // Now and then a kept row moves: under another kept node — a move,
+  // or a cycle (EINVAL) when that node is below it; under its own kept
+  // descendant, which takes its place — a rotation, legal as a final
+  // state; or two nodes swap their parents. A load that applied its rows
+  // one by one against the tree as it was would refuse each of them.
+  const rowOf = new Map(rows.map((r) => [r.id, r]));
+  const movable = rows.filter((r) => r.parentId !== null);
+  const keptBelow = (id) => {
+    const out = [];
+    const stack = [...model.byId.get(id).kids];
+    while (stack.length > 0) {
+      const n = stack.pop();
+      if (rowOf.has(n.id)) out.push(rowOf.get(n.id));
+      for (const k of n.kids) stack.push(k);
+    }
+    return out;
+  };
+  const move = random.int(100);
+  let moved = false;
+  if (movable.length > 0 && move < 10) {
+    const r = random.pick(movable);
+    r.parentId = random.pick(rows).id;
+    if (random.chance(0.5)) r.name = nameAt(ctx);
+    moved = true;
+  } else if (movable.length > 0 && move < 34) {
+    const r = random.pick(movable);
+    const below = keptBelow(r.id);
+    if (below.length > 0) {
+      const d = random.pick(below);
+      [r.parentId, d.parentId] = [d.id, r.parentId];
+      // the descendant takes the name too, mostly: its place is free then
+      if (random.chance(0.7)) [r.name, d.name] = [d.name, r.name];
+      moved = true;
+    }
+  } else if (movable.length > 1 && move < 44) {
+    const [a, b] = random.shuffle(movable);
+    [a.parentId, b.parentId] = [b.parentId, a.parentId];
+    moved = true;
+  }
   const ids = rows.map((r) => r.id);
   for (let i = 0; i < 3 && ids.length > 0; i++) {
     const id = model.mode === 'number' ? numberId(ctx) : `id-${ctx.counter++}`;
@@ -1504,7 +1547,9 @@ const loadRows = (ctx) => {
   const newId = () =>
     model.mode === 'number' ? numberId(ctx) : `id-${ctx.counter++}`;
   const rootRow = rows.find((r) => r.parentId === null);
-  // At most one case of these per load, so that no refusal hides another.
+  // At most one case of these per load, so that no refusal hides another;
+  // a load that moved a node carries no refused row — the move is what it
+  // tests.
   const special = random.int(100);
   if (rootRow !== undefined && special < 12) {
     // The root changes: a new row without a parent, the former root's row
@@ -1513,6 +1558,8 @@ const loadRows = (ctx) => {
     rows.push({ id, parentId: null, name: '', class: random.int(5) });
     rootRow.parentId = id;
     rootRow.name = nameAt(ctx);
+  } else if (moved) {
+    // nothing more
   } else if (rows.length > 0 && special < 20) {
     // a second row without a parent: EEXIST (QA В42)
     rows.push({ id: newId(), parentId: null, name: '', class: random.int(5) });
