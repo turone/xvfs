@@ -1571,20 +1571,15 @@ const loadRows = (ctx) => {
       { id: a, parentId: b, name: nameAt(ctx), class: random.int(5) },
       { id: b, parentId: a, name: nameAt(ctx), class: random.int(5) },
     );
-  } else if (rows.length > 0 && special < 46) {
-    // A row the format refuses: an id twice, a new row without a class, a
-    // row that is not an object.
-    const bad = random.pick([
-      { ...random.pick(rows) },
-      {
-        id: model.mode === 'number' ? numberId(ctx) : `id-${ctx.counter++}`,
-        parentId: random.pick(ids),
-        name: nameAt(ctx),
-      },
-      null,
-      7,
-    ]);
-    rows.push(bad);
+  } else if (rows.length > 0 && special < 36) {
+    // a row the format refuses: an id twice
+    rows.push({ ...random.pick(rows) });
+  } else if (ids.length > 0 && special < 48) {
+    // a new row without a class
+    rows.push({ id: newId(), parentId: random.pick(ids), name: nameAt(ctx) });
+  } else if (rows.length > 0 && special < 54) {
+    // a row that is not an object
+    rows.push(random.pick([null, 7]));
   }
   return random.shuffle(rows);
 };
