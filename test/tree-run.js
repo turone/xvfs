@@ -11,7 +11,7 @@
 // Node, Payload and Representation objects.
 //
 //   TREE_SEEDS (40)  TREE_COMMITS (150)  TREE_SEED (one seed)
-//   TREE_ONLY=fs,cache,client,policy,walk,aggregates (sections to run)
+//   TREE_ONLY=fs,client,policy,walk,aggregates (sections to run)
 //   TREE_ENGINE=<module> (default lib/tree.js)
 
 const assert = require('node:assert/strict');
@@ -24,7 +24,7 @@ const SEEDS = Number(env.TREE_SEEDS ?? 40);
 const COMMITS = Number(env.TREE_COMMITS ?? 150);
 const ONE = env.TREE_SEED === undefined ? null : Number(env.TREE_SEED);
 const SECTIONS = new Set(
-  (env.TREE_ONLY ?? 'fs,cache,client,policy,walk,aggregates')
+  (env.TREE_ONLY ?? 'fs,client,policy,walk,aggregates')
     .split(',')
     .map((s) => s.trim()),
 );
@@ -1186,7 +1186,7 @@ const fsOps = (ctx) => {
       scratch.commit([op], scratch.version + 1, ctx.now);
       ops.push(op);
       // Now and then a removed node's key is taken again in the same commit,
-      // by a new node: no cache and no replica may give the former one.
+      // by a new node: no lookup and no replica may give the former one.
       if (
         (op[0] === 'remove' || op[0] === 'unlink' || op[0] === 'rmdir') &&
         random.chance(0.3)
@@ -1454,11 +1454,15 @@ const loadRows = (ctx) => {
     (n) => n.parent === null || random.chance(0.85),
   );
   const kept = new Set(keep.map((n) => n.id));
+  // a kept node whose parent is dropped would be a refused load (ENOENT) —
+  // keep the chain, and let one orphan through in a load of ten
+  let orphan = random.chance(0.1);
   for (const n of keep) {
-    // a kept node whose parent is dropped would be a refused load — keep the
-    // chain, mostly; now and then let it fail
     const parent = n.parent;
-    if (parent !== null && !kept.has(parent.id) && random.chance(0.8)) continue;
+    if (parent !== null && !kept.has(parent.id)) {
+      if (!orphan) continue;
+      orphan = false;
+    }
     const row = {
       id: n.id,
       parentId: parent === null ? null : parent.id,
@@ -1488,6 +1492,45 @@ const loadRows = (ctx) => {
       [a.name, b.name] = [b.name, a.name];
     }
   }
+  // Now and then a kept row moves: under another kept node — a move,
+  // or a cycle (EINVAL) when that node is below it; under its own kept
+  // descendant, which takes its place — a rotation, legal as a final
+  // state; or two nodes swap their parents. A load that applied its rows
+  // one by one against the tree as it was would refuse each of them.
+  const rowOf = new Map(rows.map((r) => [r.id, r]));
+  const movable = rows.filter((r) => r.parentId !== null);
+  const keptBelow = (id) => {
+    const out = [];
+    const stack = [...model.byId.get(id).kids];
+    while (stack.length > 0) {
+      const n = stack.pop();
+      if (rowOf.has(n.id)) out.push(rowOf.get(n.id));
+      for (const k of n.kids) stack.push(k);
+    }
+    return out;
+  };
+  const move = random.int(100);
+  let moved = false;
+  if (movable.length > 0 && move < 10) {
+    const r = random.pick(movable);
+    r.parentId = random.pick(rows).id;
+    if (random.chance(0.5)) r.name = nameAt(ctx);
+    moved = true;
+  } else if (movable.length > 0 && move < 34) {
+    const r = random.pick(movable);
+    const below = keptBelow(r.id);
+    if (below.length > 0) {
+      const d = random.pick(below);
+      [r.parentId, d.parentId] = [d.id, r.parentId];
+      // the descendant takes the name too, mostly: its place is free then
+      if (random.chance(0.7)) [r.name, d.name] = [d.name, r.name];
+      moved = true;
+    }
+  } else if (movable.length > 1 && move < 44) {
+    const [a, b] = random.shuffle(movable);
+    [a.parentId, b.parentId] = [b.parentId, a.parentId];
+    moved = true;
+  }
   const ids = rows.map((r) => r.id);
   for (let i = 0; i < 3 && ids.length > 0; i++) {
     const id = model.mode === 'number' ? numberId(ctx) : `id-${ctx.counter++}`;
@@ -1504,7 +1547,9 @@ const loadRows = (ctx) => {
   const newId = () =>
     model.mode === 'number' ? numberId(ctx) : `id-${ctx.counter++}`;
   const rootRow = rows.find((r) => r.parentId === null);
-  // At most one case of these per load, so that no refusal hides another.
+  // At most one case of these per load, so that no refusal hides another;
+  // a load that moved a node carries no refused row — the move is what it
+  // tests.
   const special = random.int(100);
   if (rootRow !== undefined && special < 12) {
     // The root changes: a new row without a parent, the former root's row
@@ -1513,6 +1558,8 @@ const loadRows = (ctx) => {
     rows.push({ id, parentId: null, name: '', class: random.int(5) });
     rootRow.parentId = id;
     rootRow.name = nameAt(ctx);
+  } else if (moved) {
+    // nothing more
   } else if (rows.length > 0 && special < 20) {
     // a second row without a parent: EEXIST (QA В42)
     rows.push({ id: newId(), parentId: null, name: '', class: random.int(5) });
@@ -1524,20 +1571,15 @@ const loadRows = (ctx) => {
       { id: a, parentId: b, name: nameAt(ctx), class: random.int(5) },
       { id: b, parentId: a, name: nameAt(ctx), class: random.int(5) },
     );
-  } else if (rows.length > 0 && special < 46) {
-    // A row the format refuses: an id twice, a new row without a class, a
-    // row that is not an object.
-    const bad = random.pick([
-      { ...random.pick(rows) },
-      {
-        id: model.mode === 'number' ? numberId(ctx) : `id-${ctx.counter++}`,
-        parentId: random.pick(ids),
-        name: nameAt(ctx),
-      },
-      null,
-      7,
-    ]);
-    rows.push(bad);
+  } else if (rows.length > 0 && special < 36) {
+    // a row the format refuses: an id twice
+    rows.push({ ...random.pick(rows) });
+  } else if (ids.length > 0 && special < 48) {
+    // a new row without a class
+    rows.push({ id: newId(), parentId: random.pick(ids), name: nameAt(ctx) });
+  } else if (rows.length > 0 && special < 54) {
+    // a row that is not an object
+    rows.push(random.pick([null, 7]));
   }
   return random.shuffle(rows);
 };
@@ -1572,15 +1614,6 @@ const runSeed = (seed) => {
       .shuffle([0, 1, 2, 3, 4])
       .slice(0, random.int(4));
   if (random.chance(0.12)) options.maxNodes = 12 + random.int(30);
-  if (on('cache')) {
-    options.cache = {
-      size: random.pick([0, 1, 2, 3, 1 << 16]),
-      misses: random.chance(0.5)
-        ? false
-        : { size: random.pick([1, 2, 3, 1 << 12]) },
-      moveThreshold: random.pick([0, 1, 1024]),
-    };
-  }
   const model = new ModelTree(options);
   const main = new Thread('main', engine.createTree(options), segments, true);
   const ctx = {
@@ -1605,20 +1638,9 @@ const runSeed = (seed) => {
   const replicaOf = (name) => {
     const snapshot = main.tree.snapshot();
     noSab(snapshot, where(ctx, main, 'snapshot'));
-    const cache =
-      on('cache') && random.chance(0.5)
-        ? {
-            size: random.pick([0, 2, 1 << 16]),
-            misses: random.chance(0.5) ? false : { size: 3 },
-          }
-        : undefined;
     const r = new Thread(
       name,
-      engine.fromSnapshot(
-        structuredClone(snapshot),
-        segments,
-        cache === undefined ? {} : { cache },
-      ),
+      engine.fromSnapshot(structuredClone(snapshot), segments),
       segments,
       false,
     );
@@ -1703,8 +1725,6 @@ const runSeed = (seed) => {
     for (const bad of [
       { ids: 'number', directories: true },
       { ids: 'string', directories: true },
-      { cache: { size: 2 ** 24 + 1 } },
-      { cache: { size: 4, misses: { size: 2 ** 24 + 1 } } },
     ])
       assert.throws(
         () => engine.createTree({ ...options, ...bad }),
@@ -1856,7 +1876,7 @@ const runSeed = (seed) => {
         fpBefore,
         what('a refused commit changed the tree'),
       );
-      // The keys it named: the caches gained no answer from it.
+      // The keys it named: the lookups answer as before it.
       for (const key of keysOfOps(ctx, ops, isLoad)) checkKey(ctx, main, key);
     } else if (
       eerr !== null &&

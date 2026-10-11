@@ -2,10 +2,11 @@
 
 // The tree engine on large trees (SPEC.md, "Correctness"): a catalog built in
 // compound commits and a replica fed from the very first delta; moves of
-// subtrees above and below the move threshold after the caches are warm,
-// and the former keys below them; a large batch refused at its last op; both
-// separators; in a tree with client ids, a large load and loads with a few
-// rows changed. The model and the comparison are the model test's.
+// subtrees of every size — 21, ~420 and ~8000 nodes — after every key below
+// them was asked, and the former keys below them; a large batch refused at
+// its last op; both separators; in a tree with client ids, a large load and
+// loads with a few rows changed. The model and the comparison are the model
+// test's.
 //
 //   TREE_SEEDS (1 in npm test, 6 for the gate)  TREE_BIG (files, 1500)
 //   TREE_ENGINE=<module>
@@ -42,11 +43,6 @@ const run = (seed) => {
     aggregates: {
       classes: random.chance(0.5),
       subtreeVersion: random.chance(0.5),
-    },
-    cache: {
-      size: random.pick([0, 64, 1 << 16]),
-      misses: random.pick([false, { size: 4096 }]),
-      moveThreshold: random.pick([0, 1, 1024]),
     },
     retireIds: retire,
     now: 1000,
@@ -150,7 +146,9 @@ const run = (seed) => {
       ),
     );
     all();
-    // Warm the caches, then move subtrees of every size; the former keys miss.
+    // Ask every key of a subtree, then move it: the former keys miss, the
+    // new ones hit — in main and in every replica, for subtrees of every
+    // size.
     const subtree = (key) =>
       [...model.nodes()]
         .map((n) => model.pathOf(n))
@@ -194,7 +192,7 @@ const run = (seed) => {
       assert.notEqual(
         th.tree.get('/moved-c/new-dir/x'),
         null,
-        where(ctx, th, 'a miss cached before a creation'),
+        where(ctx, th, 'a miss asked before a creation'),
       );
     // A large batch refused at its last op.
     const big = [];

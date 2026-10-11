@@ -5,7 +5,7 @@
 // tree-run.js.
 //
 //   TREE_SEEDS (40)  TREE_COMMITS (150)  TREE_SEED (one seed)
-//   TREE_ONLY=fs,cache,client,policy,walk,aggregates (sections to run)
+//   TREE_ONLY=fs,client,policy,walk,aggregates (sections to run)
 //   TREE_ENGINE=<module> (default lib/tree.js)
 
 const test = require('node:test');

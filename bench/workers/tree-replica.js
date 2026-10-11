@@ -16,8 +16,6 @@ const { helpers } = require('../scenarios/tree.js');
 //            with the snapshot in scope and dropped; boxed numbers
 //   views    the same replica: heap and a full GC as its views are read;
 //            the first and a repeated access to `data`; an apply
-//   cache    the heap per entry of the node cache and the miss cache, and
-//            at their bound
 //   refusal  large commits and loads, successful and refused at the last
 //            op or row, in a main tree of this thread
 //   ids      an FS replica before and after a `number` tree takes ids
@@ -37,7 +35,6 @@ const {
   commitAll,
   buildTree,
   TodayReplica,
-  flat,
   fresh,
   shuffled,
   heap,
@@ -153,14 +150,14 @@ const grown = (before, after, type) => {
 // The replica of the snapshot waiting on the port, and the heap while the
 // snapshot is still in scope. In a function of its own, so that nothing
 // of the message outlives it.
-const build = (side, options) => {
+const build = (side) => {
   const message = take();
   const { snapshot, segments } = message;
   const t0 = hr();
   const replica =
     side === 'today'
       ? TodayReplica.fromSnapshot(snapshot, segments)
-      : engine.fromSnapshot(snapshot, segments, options);
+      : engine.fromSnapshot(snapshot, segments);
   const ms = msSince(t0);
   const withSnapshot = heap();
   use(message);
@@ -250,54 +247,6 @@ const views = async () => {
     points,
     firstNs: (firstTenth + firstRest) / reps.length,
     repeatNs: repeat / reps.length,
-  };
-};
-
-// --- cache ---------------------------------------------------------------------------
-
-const BOUND = 2 ** 16;
-
-// Each key asked once with a string of the request's own, gone after.
-const ask = (tree, keys, from, to) => {
-  for (let i = from; i < to; i++) use(tree.get(`#${keys[i]}`.slice(1)));
-};
-
-const cache = async () => {
-  const keys = flat(workerData.files);
-  const misses = [];
-  for (let i = 0; i < BOUND + 1000; i++) {
-    const key = keys[i % keys.length];
-    misses.push(`${key.slice(0, key.lastIndexOf('/'))}/none-${i}.html`);
-  }
-  const missKeys = flat(misses);
-  const options = { cache: { size: BOUND, misses: { size: BOUND } } };
-  const built = build('engine', options);
-  await turn();
-  const { replica } = built;
-  const K = Math.min(keys.length, 2 ** 15);
-  const h0 = heap(true);
-  ask(replica, keys, 0, K);
-  await turn();
-  const h1 = heap(true);
-  let atBound = null;
-  if (keys.length > BOUND) {
-    ask(replica, keys, K, keys.length);
-    await turn();
-    atBound = heap(true) - h0;
-  }
-  const h2 = heap(true);
-  ask(replica, missKeys, 0, K);
-  await turn();
-  const h3 = heap(true);
-  ask(replica, missKeys, K, missKeys.length);
-  await turn();
-  const h4 = heap(true);
-  use(replica);
-  return {
-    entry: (h1 - h0) / K,
-    miss: (h3 - h2) / K,
-    atBound,
-    missesAtBound: h4 - h2,
   };
 };
 
@@ -625,7 +574,7 @@ const numbers = async () => {
 
 // --- Main ----------------------------------------------------------------------------
 
-const MODES = { memory, views, cache, refusal, ids, numbers };
+const MODES = { memory, views, refusal, ids, numbers };
 
 MODES[workerData.mode]().then(
   (result) => parentPort.postMessage(result),

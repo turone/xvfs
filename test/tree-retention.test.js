@@ -17,7 +17,7 @@ const { execFile } = require('node:child_process');
 
 const FIXTURE = path.join(__dirname, 'fixtures', 'tree-retention.js');
 const NOISE = 100; // B per node
-const LIMIT = 10 * NOISE; // B per node, or per cache entry
+const LIMIT = 10 * NOISE; // B per node, or per query
 
 // The child is stopped before the test's own timeout, so that a hung check
 // says so.
@@ -90,17 +90,19 @@ describe('tree retention', () => {
     }
   });
 
-  // The path cache and the miss cache keep keys of their own: get, resolve
-  // with either separator, misses of get and of match, each with its key
-  // cut from a 4 KiB string.
-  it('cache: an entry costs tens of bytes, not its key cut from 4 KiB', async () => {
-    const { results } = await run('cache');
+  // A lookup keeps nothing of its key: get, resolve with either separator,
+  // misses of get and of match, 10⁴ of each with its key cut from a 4 KiB
+  // string — the heap after them is as before, to the noise. A kept parent
+  // costs 4 KiB a query, forty times the bound; an own flat copy of a key
+  // (~100 B) lies within the noise and is not told from nothing.
+  it('lookups: get, resolve and misses keep nothing of a key cut from 4 KiB', async () => {
+    const { results } = await run('lookups');
     assert.equal(results.length, 5);
-    for (const { variant, entries, perEntry } of results) {
+    for (const { variant, queries, perQuery } of results) {
       assert.ok(
-        perEntry < LIMIT,
-        `${variant}: ${bytes(perEntry)} per entry (${entries} asked): the ` +
-          "cache keeps the caller's key",
+        perQuery < LIMIT,
+        `${variant}: ${bytes(perQuery)} per query (${queries} asked): the ` +
+          "tree keeps the caller's key",
       );
     }
   });

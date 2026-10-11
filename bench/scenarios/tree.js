@@ -22,11 +22,16 @@ const { bytecodeKey, compressedKey } = require('../../lib/companion.js');
 // The data: a catalog /section-S/category-CC/sub-SSS/item-IIIIII.html of n
 // files (20 a leaf directory, 20 leaves a category, 20 categories a
 // section), 30 % with fs:br and fs:gzip, and two flat directories — /big,
-// 1000 files, and /wide, 1023 files: a subtree of 1024 nodes, the default
-// move threshold. Sizes: n = 10⁴ and 10⁵, the memory of a replica at 10⁶
-// too; `--n` sets them all. Metrics are `tree.<section>.<n>.<what>`, and
-// `…<n>.today.<what>` for today's index; a lookup is timed with a fresh key
-// string per call, as a request's is.
+// 1000 files, and /wide, 1023 files, the directory a replacement moves when
+// the catalog has no 8000-file section. Sizes: n = 10⁴ and 10⁵, the memory
+// of a replica at 10⁶ too; `--n` sets them all. Metrics are
+// `tree.<section>.<n>.<what>`, and `…<n>.today.<what>` for today's index;
+// a lookup is timed with a fresh key string per call, as a request's is. A
+// random read takes its key from a stream of indices built beforehand from
+// a seed — uniform, or Zipf (s = 1) over the shuffled keys — so that what a
+// round reads does not depend on the number of iterations calibration
+// picks: `i % R` was a cycle over the first n keys, or over all of them, by
+// that number (Т22).
 //
 //   memory    a replica built in a fresh worker from a snapshot that came
 //             by its port: the heap per file once the snapshot is dropped,
@@ -39,23 +44,21 @@ const { bytecodeKey, compressedKey } = require('../../lib/companion.js');
 //             engine may read — eagerly: the heap and a full GC once built,
 //             after 10 % and after all representations are read; the first
 //             and a repeated access to `data`
-//   lookup    get, random and hot, and resolve; Map.get and slice + get
-//   cache     get with a cache of size 0; the module resolver's candidates
-//             and misses below a file, with the miss cache and without;
-//             moves of 20, 1024 and 8000 nodes by a replica that walks the
-//             subtree (moveThreshold 2²⁴) and one over the threshold (0):
-//             apply and the deferred cost of the lookups after; in a
-//             worker, the heap per entry of the node cache and of the miss
-//             cache, and at their bound; load on a live tree of client ids
-//             with 1 % of the rows changed (new payloads, renames)
+//   lookup    get, random — uniform and Zipf — and hot, and resolve;
+//             Map.get and slice + get
+//   miss      get over the module resolver's candidates, a hot set of them
+//             and misses below a file; load on a live tree of client ids
+//             with 1 % of the rows changed (new payloads, renames) — the
+//             spec's "Misses"
 //   policy    get, random and hot, on a tree of client ids with allow at 0,
 //             1 and 3 own policies on the path and without allow; check by
 //             id
 //   listing   children() of a 20-entry and of a 1000-entry directory
-//   move      apply of a move of 20, 1024 and 8000 nodes and the deferred
-//             cost; a file replacing a file, a directory of 8000 files (of
-//             1023 when the catalog is smaller) replacing an empty one, and
-//             the size of `retired`; today's index re-keys what moved
+//   move      apply of a move of 20 and of 8000 nodes and the deferred cost
+//             of the lookups after; a file replacing a file, a directory of
+//             8000 files (of 1023 when the catalog is smaller) replacing an
+//             empty one, and the size of `retired`; today's index re-keys
+//             what moved
 //   attach    snapshot + structuredClone + fromSnapshot; today's snapshot,
 //             clone and projection
 //   delta     apply per replaced, per new and per removed file; the first
@@ -93,7 +96,6 @@ const CHANGES = 1000; // files per delta
 const SIZES = [1e4, 1e5];
 const MEMORY_SIZES = [1e4, 1e5, 1e6];
 const BOXED_MAX = 1e5; // a heap snapshot of a larger heap takes minutes
-const MIB = 2 ** 20;
 
 // --- Clock, strings, memory ----------------------------------------------------
 
@@ -121,6 +123,37 @@ const flat = (strings) => JSON.parse(JSON.stringify(strings));
 const fresh = (keys) => flat(keys.map((key) => `#${key}`));
 
 const shuffled = (array, seed) => data.rng(seed).shuffle(array);
+
+// A stream of STREAM indices below `count`, from a seed, read at `i & MASK`
+// by a timed call: uniform, or Zipf with s = 1 — the k-th index drawn in
+// proportion to 1/k. What a round reads is then the same whatever the
+// number of iterations calibration picks.
+const STREAM = 2 ** 18;
+const MASK = STREAM - 1;
+
+const streamOf = (count, kind, seed) => {
+  const random = data.rng(seed);
+  const out = new Uint32Array(STREAM);
+  if (kind === 'uniform') {
+    for (let i = 0; i < STREAM; i++) out[i] = random.int(count);
+    return out;
+  }
+  const weights = new Float64Array(count);
+  let total = 0;
+  for (let k = 0; k < count; k++) weights[k] = total += 1 / (k + 1);
+  for (let i = 0; i < STREAM; i++) {
+    const x = random() * total;
+    let lo = 0;
+    let hi = count - 1;
+    while (lo < hi) {
+      const mid = (lo + hi) >> 1;
+      if (weights[mid] < x) lo = mid + 1;
+      else hi = mid;
+    }
+    out[i] = lo;
+  }
+  return out;
+};
 
 const absOf = (key) => MOUNT + key.split('/').join(SEP);
 
@@ -362,16 +395,11 @@ const setup = (n) => {
 };
 
 // A replica of the main tree in this thread, kept current by publish().
-const replicaOf = (ctx, cache) => {
+const replicaOf = (ctx) => {
   const clone = structuredClone(ctx.tree.snapshot());
-  const options = cache === undefined ? undefined : { cache };
-  const replica = engine.fromSnapshot(clone, ctx.segments, options);
+  const replica = engine.fromSnapshot(clone, ctx.segments);
   ctx.replicas.push(replica);
   return replica;
-};
-
-const dropReplica = (ctx, replica) => {
-  ctx.replicas.splice(ctx.replicas.indexOf(replica), 1);
 };
 
 // One commit of the main tree, its delta applied by every replica — each
@@ -503,8 +531,7 @@ const lookups = (b, ctx) => {
   const { nk, replica, todayReplica } = ctx;
   const files = ctx.keys.slice(0, ctx.n);
   expectAll(replica, files, 'the replica');
-  // The hot set is drawn apart from the order the random pass fills a lazy
-  // cache in: the first keys in would sit at the tails of V8's hash chains.
+  // The hot set is drawn by a seed of its own, apart from the random order.
   const random = shuffled(files, 42);
   const hot = shuffled(files, 7).slice(0, HOT);
   const freshRandom = fresh(random);
@@ -513,18 +540,22 @@ const lookups = (b, ctx) => {
   const sameHot = flat(hot);
   const absRandom = fresh(random.map(absOf));
   const absHot = fresh(hot.map(absOf));
+  const uniform = streamOf(random.length, 'uniform', 1);
+  const zipf = streamOf(random.length, 'zipf', 2);
   const sides = [
     [`tree.lookup.${nk}`, replica],
     [`tree.lookup.${nk}.today`, todayReplica],
   ];
   for (const [id, r] of sides) {
-    const R = freshRandom.length;
-    b.ops(`${id}.get.random`, (i) => r.get(freshRandom[i % R].slice(1)));
+    b.ops(`${id}.get.random`, (i) =>
+      r.get(freshRandom[uniform[i & MASK]].slice(1)),
+    );
+    b.ops(`${id}.get.zipf`, (i) => r.get(freshRandom[zipf[i & MASK]].slice(1)));
     b.ops(`${id}.get.hot`, (i) => r.get(freshHot[i % HOT].slice(1)));
-    b.ops(`${id}.get.random.same`, (i) => r.get(sameRandom[i % R]));
+    b.ops(`${id}.get.random.same`, (i) => r.get(sameRandom[uniform[i & MASK]]));
     b.ops(`${id}.get.hot.same`, (i) => r.get(sameHot[i % HOT]));
     b.ops(`${id}.resolve.random`, (i) =>
-      r.resolve(absRandom[i % R].slice(1), FROM),
+      r.resolve(absRandom[uniform[i & MASK]].slice(1), FROM),
     );
     b.ops(`${id}.resolve.hot`, (i) =>
       r.resolve(absHot[i % HOT].slice(1), FROM),
@@ -552,7 +583,7 @@ const listing = (b, ctx) => {
   b.ops(`${id}.today.children1000`, () => todayReplica.children('/big'));
 };
 
-// --- Path cache --------------------------------------------------------------------------
+// --- Misses ------------------------------------------------------------------------------
 
 // What the module resolver asks for require('lodash') from `files`: for
 // each directory up from the file's, node_modules/lodash, its extensions,
@@ -573,17 +604,11 @@ const resolverCandidates = (files) => {
   return out;
 };
 
-const pathCache = (b, ctx) => {
+// The candidates of 200 files, one of them a call by a uniform stream; a
+// hot set of them; misses below a file.
+const misses = (b, ctx) => {
   const { nk, replica, todayReplica } = ctx;
   const files = ctx.keys.slice(0, ctx.n);
-  const size0 = replicaOf(ctx, { size: 0 });
-  const misses = replicaOf(ctx, { misses: { size: 2 ** 16 } });
-  const random = fresh(shuffled(files, 42));
-  const hot = fresh(shuffled(files, 7).slice(0, HOT));
-  const R = random.length;
-  const id = `tree.cache.${nk}`;
-  b.ops(`${id}.get.random.size0`, (i) => size0.get(random[i % R].slice(1)));
-  b.ops(`${id}.get.hot.size0`, (i) => size0.get(hot[i % HOT].slice(1)));
   const candidates = fresh(
     resolverCandidates(shuffled(files, 5).slice(0, 200)),
   );
@@ -593,36 +618,20 @@ const pathCache = (b, ctx) => {
       .slice(0, 1000)
       .map((k) => `${k}/x`),
   );
-  const C = candidates.length;
-  const B = below.length;
+  const overCandidates = streamOf(candidates.length, 'uniform', 3);
+  const overBelow = streamOf(below.length, 'uniform', 4);
+  const id = `tree.miss.${nk}`;
   const sides = [
-    [`${id}.miss`, '.off', replica],
-    [`${id}.miss`, '.on', misses],
-    [`${id}.today.miss`, '', todayReplica],
+    [id, replica],
+    [`${id}.today`, todayReplica],
   ];
-  for (const [at, suffix, r] of sides) {
-    b.ops(`${at}.resolver${suffix}`, (i) => r.get(candidates[i % C].slice(1)));
-    b.ops(`${at}.hot${suffix}`, (i) => r.get(hotMisses[i % HOT].slice(1)));
-    b.ops(`${at}.belowFile${suffix}`, (i) => r.get(below[i % B].slice(1)));
+  for (const [at, r] of sides) {
+    b.ops(`${at}.resolver`, (i) =>
+      r.get(candidates[overCandidates[i & MASK]].slice(1)),
+    );
+    b.ops(`${at}.hot`, (i) => r.get(hotMisses[i % HOT].slice(1)));
+    b.ops(`${at}.belowFile`, (i) => r.get(below[overBelow[i & MASK]].slice(1)));
   }
-  dropReplica(ctx, size0);
-  dropReplica(ctx, misses);
-};
-
-// The heap per entry of the node cache and of the miss cache, in a worker.
-const cacheMemory = async (b, ctx) => {
-  const { nk } = ctx;
-  const snapshot = ctx.tree.snapshot();
-  const message = { snapshot, segments: ctx.segments };
-  const files = ctx.keys.slice(0, ctx.n);
-  const r = await inWorker('cache', { files }, [message]);
-  const id = `tree.cache.${nk}.memory`;
-  b.value(`${id}.entry`, 'B/entry', 'lower', r.entry);
-  b.value(`${id}.miss`, 'B/entry', 'lower', r.miss);
-  if (r.atBound !== null) {
-    b.value(`${id}.atBound`, 'MiB', 'lower', r.atBound / MIB);
-  }
-  b.value(`${id}.missesAtBound`, 'MiB', 'lower', r.missesAtBound / MIB);
 };
 
 // --- Moves ---------------------------------------------------------------------------------
@@ -630,12 +639,11 @@ const cacheMemory = async (b, ctx) => {
 // [nodes, the subtree, its files]: a catalog smaller than a subtree skips it.
 const MOVES = [
   [20, '/section-0/category-00/sub-000', 20],
-  [1024, '/wide', WIDE],
   [8000, '/section-0', 8000],
 ];
 
-// The pass over `keys` once the cache holds them, the first after a full
-// GC — as the pass after a move is, which comes after the GC of publish().
+// The pass over `keys` warm, the first after a full GC — as the pass after
+// a move is, which comes after the GC of publish().
 const warmPass = (reader, keys) => {
   pass(reader, keys);
   global.gc();
@@ -684,13 +692,7 @@ const moveRounds = (b, ctx, sides, from) => {
 
 const moves = (b, ctx) => {
   const { nk } = ctx;
-  const walk = replicaOf(ctx, { moveThreshold: 2 ** 24 });
-  const over = replicaOf(ctx, { moveThreshold: 0 });
-  const sides = [
-    [`tree.move.${nk}`, ctx.replica],
-    [`tree.cache.${nk}.move.walk`, walk],
-    [`tree.cache.${nk}.move.over`, over],
-  ];
+  const sides = [[`tree.move.${nk}`, ctx.replica]];
   for (const [size, from, count] of MOVES) {
     const prefix = `${from}/`;
     if (ctx.keys.filter((key) => key.startsWith(prefix)).length < count) {
@@ -705,8 +707,6 @@ const moves = (b, ctx) => {
     const deferred = today.deferred;
     b.rounds(`tree.move.${nk}.today.${size}.deferred`, 'ms', 'lower', deferred);
   }
-  dropReplica(ctx, walk);
-  dropReplica(ctx, over);
 };
 
 // A replacement — `[unlink to, move from to]`, `[rmdir to, move from to]` —
@@ -1032,9 +1032,12 @@ const policies = (b, ctx) => {
     client.pages.map((row) => row.id),
     13,
   );
-  const R = random.length;
+  const uniform = streamOf(random.length, 'uniform', 5);
+  const overIds = streamOf(ids.length, 'uniform', 6);
   const id = `tree.policy.${nk}`;
-  b.ops(`${id}.get.random.none`, (i) => replica.get(random[i % R].slice(1)));
+  b.ops(`${id}.get.random.none`, (i) =>
+    replica.get(random[uniform[i & MASK]].slice(1)),
+  );
   b.ops(`${id}.get.hot.none`, (i) => replica.get(hot[i % HOT].slice(1)));
   for (const level of [0, 1, 3]) {
     setPolicies(client, level);
@@ -1044,13 +1047,13 @@ const policies = (b, ctx) => {
     }
     const p = `p${level}`;
     b.ops(`${id}.get.random.${p}`, (i) =>
-      replica.get(random[i % R].slice(1), options),
+      replica.get(random[uniform[i & MASK]].slice(1), options),
     );
     b.ops(`${id}.get.hot.${p}`, (i) =>
       replica.get(hot[i % HOT].slice(1), options),
     );
     b.ops(`${id}.check.${p}`, (i) =>
-      replica.check(replica.byId(ids[i % R]), allow, context),
+      replica.check(replica.byId(ids[overIds[i & MASK]]), allow, context),
     );
   }
   setPolicies(client, 0);
@@ -1094,7 +1097,7 @@ const liveLoad = (b, ctx) => {
     out.rename.push(rename.main);
     out.renameApply.push(rename.apply);
   }
-  const id = `tree.cache.${nk}.load`;
+  const id = `tree.miss.${nk}.load`;
   b.rounds(`${id}.payload1pct`, 'ms', 'lower', out.payload);
   b.rounds(`${id}.payload1pct.apply`, 'ms', 'lower', out.payloadApply);
   b.rounds(`${id}.rename1pct`, 'ms', 'lower', out.rename);
@@ -1168,7 +1171,7 @@ const inProcess = async (b, ctx, first) => {
   attach(b, ctx);
   lookups(b, ctx);
   listing(b, ctx);
-  pathCache(b, ctx);
+  misses(b, ctx);
   moves(b, ctx);
   replacements(b, ctx);
   deltas(b, ctx);
@@ -1176,7 +1179,6 @@ const inProcess = async (b, ctx, first) => {
   policies(b, ctx);
   liveLoad(b, ctx);
   ctx.client = null;
-  await cacheMemory(b, ctx);
   await views(b, ctx);
   await refusal(b, ctx, first);
   await isolation(b, ctx);
