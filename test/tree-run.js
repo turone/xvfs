@@ -613,6 +613,21 @@ const checkLookups = (ctx, thread) => {
     keys.push(model.pathOf(n));
   if (random.chance(0.3)) keys.push('/'); // the root, as ''
   for (const key of keys) checkKey(ctx, thread, key);
+  // A key without its leading '/' is no key: a miss or a refusal — the spec
+  // leaves which — but never a node.
+  for (const key of keys) {
+    if (key.length < 2) continue;
+    let got = null;
+    try {
+      got = thread.tree.get(key.slice(1));
+    } catch {
+      got = null;
+    }
+    assert.ok(
+      got === null || got === undefined,
+      where(ctx, thread, `get(${JSON.stringify(key.slice(1))}) found a node`),
+    );
+  }
 };
 
 // allow(policy, owner, context): true unless the policy says no — a deny
@@ -1156,6 +1171,28 @@ const fsOps = (ctx) => {
     try {
       scratch.commit([op], scratch.version + 1, ctx.now);
       ops.push(op);
+      // Now and then the node goes back in the same commit — directly or
+      // through a third name — and is sometimes removed after: its former
+      // slot under the parent is taken again within one commit.
+      if (op[0] === 'move' && op[1] !== op[2] && random.chance(0.3)) {
+        const from = op[1];
+        const via = `${from.slice(0, from.lastIndexOf('/'))}/via-${ctx.counter++}`;
+        const back = random.chance(0.5)
+          ? [['move', op[2], from]]
+          : [
+              ['move', op[2], via],
+              ['move', via, from],
+            ];
+        if (random.chance(0.3)) back.push(['remove', from]);
+        for (const b of back) {
+          try {
+            scratch.commit([b], scratch.version + 1, ctx.now);
+            ops.push(b);
+          } catch {
+            break;
+          }
+        }
+      }
     } catch {
       if (random.chance(0.4)) {
         ops.push(op); // a refused op, kept now and then
