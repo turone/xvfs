@@ -886,9 +886,17 @@ const ODD_NAMES = [
   'a.b',
 ];
 
+// The names of a seed in the tight mode (every fourth seed): three, and an
+// odd one now and then — a key is taken, freed and taken again by another
+// node, within a commit and across commits, and a create often meets one
+// taken (the fuzzer of the review of step A).
+const TIGHT = ['a', 'b', 'c'];
+
 const nameAt = (ctx) => {
   const { random } = ctx;
   const i = ctx.counter++;
+  if (ctx.tight)
+    return random.chance(0.05) ? random.pick(ODD_NAMES) : random.pick(TIGHT);
   if (!random.chance(0.1)) return data.nameOf(random, i);
   const odd = random.pick(ODD_NAMES);
   return random.chance(0.5) ? odd : `${odd}${i}`;
@@ -1170,13 +1178,39 @@ const fsOps = (ctx) => {
     }
   }
   const ops = [];
-  const count = 1 + random.int(6);
+  const count = 1 + random.int(ctx.tight ? 10 : 6);
   for (let i = 0; i < count; i++) {
     const op = fsOp(ctx, scratch);
     if (op === null) continue;
     try {
       scratch.commit([op], scratch.version + 1, ctx.now);
       ops.push(op);
+      // Now and then a removed node's key is taken again in the same commit,
+      // by a new node: no cache and no replica may give the former one.
+      if (
+        (op[0] === 'remove' || op[0] === 'unlink' || op[0] === 'rmdir') &&
+        random.chance(0.3)
+      ) {
+        const again = random.chance(0.5)
+          ? ['mkdir', op[1]]
+          : [
+              'write',
+              op[1],
+              sized(
+                ctx,
+                data.payloadOf(random, ctx.extents, {
+                  birthtime: scratch.birthtime,
+                  noSource: true,
+                }),
+              ),
+            ];
+        try {
+          scratch.commit([again], scratch.version + 1, ctx.now);
+          ops.push(again);
+        } catch {
+          // refused (no room under maxNodes): not kept
+        }
+      }
       // Now and then the node goes back in the same commit — directly or
       // through a third name — and is sometimes removed after: its former
       // slot under the parent is taken again within one commit.
@@ -1200,6 +1234,9 @@ const fsOps = (ctx) => {
         }
       }
     } catch {
+      // In the tight mode most refusals are of a name taken: the commit goes
+      // on past one, mostly.
+      if (ctx.tight && random.chance(0.6)) continue;
       if (random.chance(0.4)) {
         ops.push(op); // a refused op, kept now and then
         // and a second refused one after it, of format or of meaning: the
@@ -1435,6 +1472,22 @@ const loadRows = (ctx) => {
     if (random.chance(0.1)) row.policy = policyOf(ctx);
     rows.push(row);
   }
+  // Now and then two siblings swap their names: a final state that no order
+  // of single renames reaches without a third name.
+  if (random.chance(0.2)) {
+    const byParent = new Map();
+    for (const r of rows) {
+      if (r.parentId === null) continue;
+      const list = byParent.get(r.parentId) ?? [];
+      list.push(r);
+      byParent.set(r.parentId, list);
+    }
+    const pairs = [...byParent.values()].filter((l) => l.length >= 2);
+    if (pairs.length > 0) {
+      const [a, b] = random.shuffle(random.pick(pairs));
+      [a.name, b.name] = [b.name, a.name];
+    }
+  }
   const ids = rows.map((r) => r.id);
   for (let i = 0; i < 3 && ids.length > 0; i++) {
     const id = model.mode === 'number' ? numberId(ctx) : `id-${ctx.counter++}`;
@@ -1541,6 +1594,7 @@ const runSeed = (seed) => {
     sep: options.sep,
     now: 1000,
     counter: 1,
+    tight: seed % 4 === 3, // names of three letters: see nameAt
     ids: new Map(),
     idOwner: new Map(),
     former: new Set(),
