@@ -97,11 +97,11 @@ The gzip representations are built once, at publication (180 ms for the
 |       8 | 95.6 ±5% | 87.1 ±10% | 47.2 ±23% |
 
 A bare worker takes ~22 ms. A cache worker adds its 10 ms of reads;
-`attach()` adds the library's modules and the projection of the snapshot
-— offsets, not bytes — and costs more at this set size: `sab` pools are
+`attach()` adds the library's modules and the replicas built from the
+snapshot — offsets, not bytes — and costs more at this set size: `sab` pools are
 ready 6, 8 and 11 ms after `cache` pools at 1, 2 and 4 workers (at 2
 workers every `sab` run lies above every `cache` run), 8 ms at 8. The
-cache's share grows with the set, the projection's does not.
+cache's share grows with the set, the replicas' does not.
 
 ### Memory of the process, MiB (the workers' `arrayBuffers` in brackets)
 
@@ -632,7 +632,7 @@ own behind.
 
 ## Publication events
 
-`bench/scenarios/events.js`: the cost `#apply` pays to build and deliver
+`bench/scenarios/events.js`: the cost `#publish` pays to build and deliver
 a `'publish'` event — nothing is built with no listener
 (`listenerCount('publish') === 0`); with some, one frozen event is built
 once and delivered to each.
@@ -670,5 +670,118 @@ Directionally the listener costs a little more — it is the only row of
 this scenario where the array is built at all, over 2000 keys — but at 5
 samples per run the noise (±21–44 %) is wider than the ~3 % gap: not a
 figure this page can stand behind. The mechanism is not in question (the
-array is built only when `listenerCount('publish') > 0`, `#apply` in
+array is built only when `listenerCount('publish') > 0`, `#publish` in
 `lib/kernel.js`); its cost at this N is not resolved at this sample size.
+
+## Node trees against the flat index
+
+Every indexed place became a tree of nodes in every thread
+([architecture → Node trees](architecture.md#node-trees)); the flat index
+it replaced is gone from the library, so the two are compared as two
+revisions: `main` at `ffb3e26`, the last with the flat index, against the
+trees at `359086a`, `node bench/ab.js main tree/b --pairs 3` on the
+machine above, Node 24.20, quiet. The rest of this page was measured
+before the trees and stands as it was; where a figure below differs from
+one above, this section is the later.
+
+### Reads, ns/op
+
+| figure                           |   flat |   tree |
+| -------------------------------- | -----: | -----: |
+| `read.sab.1k.view`               |     91 |    179 |
+| `read.map.1k.view`               |     46 |     87 |
+| `views.acquire` (N held)         |     90 |    264 |
+| `views.withFileView.sync`        |    169 |    250 |
+| `read.sab.stat`                  |     57 |     74 |
+| `read.sab.version`               |     22 |     35 |
+| `read.sab.exists`                |     23 |     33 |
+| `read.sab.1k.readFile`           |    337 |    395 |
+| `router.open.read.file`          |    201 |    245 |
+| `router.open.read.dir`           |    234 |    292 |
+| `router.open.read.miss`          |    262 |    335 |
+| `read.sab.readdir100`            | 47 700 | 39 580 |
+| `patch.strict.vfs.readdirSync` ¹ | 12 648 |  4 715 |
+
+¹ From the first run of the same comparison, at `d3973c1`; nothing on
+its path changed after.
+
+A lookup walks the names of its key, a `Map` of children a level, with
+no cache of paths (architecture, "A lookup walks"): a key of one name
+costs 27 ns where a hit of the flat `Map` with the key's hash cached
+cost 6, which `stat`, `version`, `exists` and the routing pay once per
+call. A view is made on each access of `data` (19 ns) and kept by no
+representation, so a lease or a stream holds one of its own — `views.acquire`
+keeps N of them alive at once. Listings read a directory's children and
+are faster: 17 % for a hundred files of a place, 63 % through the patched
+`readdirSync` under strict.
+
+### Writes, µs p50
+
+| figure                      | flat | tree |
+| --------------------------- | ---: | ---: |
+| `publish.map.raw`           |  1.9 |  2.8 |
+| `publish.sab.raw`           |  6.1 |  6.4 |
+| `batch.series.1`            |  4.3 |  4.9 |
+| `batch.writeFiles.1`        |  5.5 |  8.7 |
+| `events.publish.1`          |  4.5 |  5.4 |
+| `ack.inthread.1` (one link) | 15.4 | 25.3 |
+| `ack.worker.1`              | 16.8 | 26.3 |
+| `batch.series.linked.1`     |  5.1 |  8.6 |
+| `batch.series.linked.512`   | 2775 | 5574 |
+| `retain.worker.1.held`      | 34.5 | 42.1 |
+
+A commit plans its ops against the tree, logs them and applies the log as
+a delta, the main tree as every replica does: about 1.2 µs a commit,
+which a `map` place pays alone. With a link the delta travels: its
+numeric columns are typed arrays (architecture, "Snapshots and deltas"),
+14 of them for a one-file write, and its structured clone takes 5.3 µs
+where the flat index's entries took 2.0 — on each side of the port. The
+single calls of `batch` (200 samples after 20 rounds of warm-up) run
+colder than a loop: in a steady loop a one-file `writeFiles` costs
+1.3 µs more than before and a `writeFile` 0.6.
+
+Found and fixed during this comparison: every update carried the SAB of
+each segment it touched (1.7 µs of a clone on each side — the flat index
+did the same; now a segment travels once), a `map` place copied bytes it
+owned a second time, and a write built its path for a refusal it never
+made (0.6 µs — the flat index too).
+
+### Compaction
+
+Not a scenario of `bench/`: `n` files of 1000 B in 1 MiB segments, the
+files of the first segment unlinked one by one; the unlink whose free
+takes a segment below the threshold compacts. The cost of that free
+cycle, ms:
+
+|                 | 10⁵ files | 10⁶ files |
+| --------------- | --------: | --------: |
+| flat index      |       4.8 |   27 – 75 |
+| a walk of trees |        30 | 340 – 360 |
+| books (now)     |       2.0 |       2.2 |
+
+A compaction needs the owners of what its segment holds. The flat index
+scanned every entry; a walk of the trees did the same, six times slower,
+and in a nearly full pool — where a relocation finds no room — every
+free cycle with a candidate paid it again. The kernel keeps books of the
+published extents now (architecture, "Lifetime of shared bytes"), and a
+compaction costs its segment. A failed attempt still copies and rolls
+back what it placed, and the allocator looks for room per
+representation: 1–2 ms in that nearly full pool of 10⁶ files.
+
+### Memory
+
+| figure, per file                                       | flat | tree |
+| ------------------------------------------------------ | ---: | ---: |
+| main thread, heap (10⁵ files of 100 B, books incl.)    |  535 |  407 |
+| a worker's replica (10⁵ files, `bench … --only tree`)  |    — |  408 |
+| a replica with `stat.birthtime` and `stat.directories` |    — |  438 |
+| a snapshot on the port                                 |    — |   68 |
+
+The books take 37 B a file on the main thread. A worker attaches 10⁵
+files in 44 ms: 19 to take the snapshot, 7 to clone it, 19 to build the
+replica. `memory.start.heap` grows by 0.35 MiB, mostly the engine's code. RSS
+after a scenario moves with the collector's timing — the `read`
+scenario's figure ranges by a third between runs of the same code;
+`mem.publish.rss` is 7 MiB higher in every pair — while a run of 200 000
+writes under a link keeps the heap after a collection flat: nothing grows
+with writes.

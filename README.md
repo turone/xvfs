@@ -276,6 +276,11 @@ are never scanned and hold no VFS entries. `disk` differs from
 `node-default` only in being _managed_ — the router applies the fs
 domain's writable policy and strict routing to it.
 
+An indexed place costs every thread its tree — about 400 B a file in the
+main thread and in each worker, 440 B with `stat.birthtime` and
+`stat.directories` — beside the bytes, which a `sab` or `sea` place keeps
+once, in shared memory ([benchmarks](doc/benchmarks.md#node-trees-against-the-flat-index)).
+
 **`origin`** applies only to `sab` and `map`, defaults to `'disk'`, and is
 always explicit in the resolved config:
 
