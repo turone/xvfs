@@ -240,12 +240,13 @@ export class ClientTree {
   viewCompressed(node: TreeNode, encoding: Encoding): TreeLease | null;
   createReadStream(
     node: TreeNode,
-    options?: ReadStreamOptions,
+    options?: ReadStreamOptions | BufferEncoding,
   ): VfsReadStream | null;
+  /** `encoding` one the tree's `compress` makes (`ENOTSUP` otherwise). */
   createReadStreamCompressed(
     node: TreeNode,
     encoding: Encoding,
-    options?: ReadStreamOptions,
+    options?: ReadStreamOptions | BufferEncoding,
   ): VfsReadStream | null;
 
   /**

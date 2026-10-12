@@ -192,6 +192,18 @@ describe('trees: the main thread', () => {
       );
       assert.deepEqual(t.payloadOf(t.get('/b.bin')).encodings, []);
       assert.equal(t.readCompressed(t.get('/b.bin'), 'gzip'), null);
+      for (const name of ['br', 'requireBytecode', 'bogus']) {
+        assert.throws(() => t.readCompressed(a, name), { code: 'ENOTSUP' });
+        assert.throws(() => t.createReadStreamCompressed(a, name), {
+          code: 'ENOTSUP',
+        });
+      }
+      let text = '';
+      for await (const chunk of t.createReadStream(a, 'utf8')) {
+        assert.equal(typeof chunk, 'string', 'an encoding string');
+        text += chunk;
+      }
+      assert.equal(text, html);
       assert.equal(leakedBytes(k), 0);
     } finally {
       done();
