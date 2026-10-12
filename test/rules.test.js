@@ -98,6 +98,28 @@ describe('PlaceRules: the settings at a key', () => {
   });
 });
 
+describe('PlaceRules: the scope of a key', () => {
+  it('the settings at a key, and whether a rule lies below it', () => {
+    const rules = new PlaceRules(
+      placeOf({ '/a/b': { fs: false }, '/c': { fs: { writable: false } } }),
+    );
+    const of = (key) => {
+      const { settings, below } = rules.scope(key);
+      return [settings === rules.at(key), below];
+    };
+    assert.deepEqual(of(''), [true, true]);
+    assert.deepEqual(of('/'), [true, true]);
+    assert.deepEqual(of('/a'), [true, true]);
+    assert.deepEqual(of('/a/'), [true, true]);
+    assert.deepEqual(of('/a/b'), [true, false]);
+    assert.deepEqual(of('/a/b/x'), [true, false]);
+    assert.deepEqual(of('/a/x'), [true, false]);
+    assert.deepEqual(of('/c'), [true, false]);
+    assert.deepEqual(of('/d'), [true, false]);
+    assert.equal(rules.scope('/c/x').settings.fs.writable, false);
+  });
+});
+
 describe('PlaceRules: what the rules below a key restrict', () => {
   it('EACCES where a rule hides, else EROFS where one forbids writes, else nothing', () => {
     const rules = new PlaceRules(
