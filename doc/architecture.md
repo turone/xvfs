@@ -657,12 +657,16 @@ uncaught exception. One watch per directory is also what inotify costs at
 least.
 
 **On a disk that takes a name in any case the watcher asks the disk how
-it spells a name it is told of (`realpath`, `spelledSo`): spelled otherwise
-in its case alone, the key is gone, and the event of the new spelling
-publishes the file or rescans the directory.** _Why:_ such a disk stats a
-name in any case, so after a rename that changed only the case DirWatcher
-named the old spelling a change — or a rescan — and both spellings stayed
-in the tree, listed in every worker.
+it spells a name fs.watch reported in a rename (`realpath`, `spelledSo`;
+DirWatcher hands each epoch those paths): spelled otherwise in its case
+alone, the key is gone, and the event of the new spelling publishes the
+file or rescans the directory.** _Why:_ such a disk stats a name in any
+case, so after a rename that changed only the case DirWatcher named the
+old spelling a change — or a rescan — and both spellings stayed in the
+tree, listed in every worker. A change names a file as the disk spells
+it, and the call costs a handle of the disk — about 12 µs a file on
+Windows, half again the cost of a watcher epoch of 100 changed files
+when it was asked for every one.
 
 **The watcher publishes no link the scan would not: a rescan starts only
 at a real directory (`scan()` lstats its `startPath`), and under strict a

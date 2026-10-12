@@ -772,9 +772,9 @@ describe('watcher: a job in flight at close()', () => {
     const at = path.join(root, 'site', 'a.txt');
     fs.writeFileSync(at, 'b');
     const calls = diskCalls();
-    // Its stat, the spelling of its name where the disk takes any case
-    // (realpath), then the open of its read.
-    const before = k.registry.get('site').caseless ? 3 : 2;
+    // Its stat, then the open of its read: a change asks the disk no
+    // spelling of its name, whatever case the disk takes.
+    const before = 2;
     try {
       const first = k.nextUpdateId;
       k.watcher.emit('epoch', new Map([[at, 'change']]));
@@ -1234,6 +1234,43 @@ describe('DirWatcher: the disk, whatever fs-patch routes', () => {
         await until(() => events.get(fresh) === 'delete', 4000);
         assert.equal(events.get(fresh), 'delete');
         assert.equal(watcher.watchers.has(fresh), false);
+      }
+    } finally {
+      watcher.close();
+      rm(root);
+    }
+  });
+});
+
+// A name fs.watch reports in a rename may be spelled in a way the disk no
+// longer has: DirWatcher hands each epoch those paths, and only they are
+// asked how the disk spells them (watch-pipeline.js, spelledSo).
+describe('DirWatcher: the renamed paths of an epoch', () => {
+  it('a rename names both paths; a write into a file names none', async () => {
+    const { DirWatcher } = require('../lib/watcher.js');
+    const root = writeTree(tmpDir('watch-renamed'), {
+      'a.txt': 'a',
+      'b.txt': 'b',
+    });
+    const watcher = new DirWatcher({ timeout: 30 });
+    const epochs = [];
+    watcher.on('epoch', (epoch, renamed) => epochs.push({ epoch, renamed }));
+    const at = (name) => path.join(root, name);
+    const named = (key) => epochs.some(({ epoch }) => epoch.has(key));
+    const renamedOf = () =>
+      new Set(epochs.flatMap(({ renamed }) => [...renamed]));
+    try {
+      watcher.watch(root);
+      fs.renameSync(at('a.txt'), at('c.txt'));
+      await until(() => named(at('c.txt')) && named(at('a.txt')), 4000);
+      assert.ok(renamedOf().has(at('a.txt')), 'the old name');
+      assert.ok(renamedOf().has(at('c.txt')), 'the new name');
+      // FSEvents may report a write as a rename; Windows and Linux do not.
+      if (process.platform !== 'darwin') {
+        epochs.length = 0;
+        fs.appendFileSync(at('b.txt'), 'b');
+        await until(() => named(at('b.txt')), 4000);
+        assert.equal(renamedOf().has(at('b.txt')), false, 'a change');
       }
     } finally {
       watcher.close();

@@ -945,7 +945,8 @@ describe('a published source named in another case, where the disk would answer'
   // A rename that changes only the case: on such a disk the old spelling
   // still stats — DirWatcher names it a change, or a rescan for a
   // directory — but the disk spells it the new way, so the old key goes and
-  // the new one comes: the tree never holds both.
+  // the new one comes: the tree never holds both. fs.watch reports both
+  // names in a rename, and DirWatcher hands them to the epoch as renamed.
   it(
     'a rename that changes only the case leaves one spelling',
     { skip: process.platform !== 'win32' && 'a caseless platform only' },
@@ -967,7 +968,8 @@ describe('a published source named in another case, where the disk would answer'
           const p = k.fs('p');
           const at = (...names) => path.join(dir, 'p', ...names);
           const epoch = async (events) => {
-            k.watcher.emit('epoch', new Map(events));
+            const renamed = new Set(events.map(([at]) => at));
+            k.watcher.emit('epoch', new Map(events), renamed);
             await k.watchQueue.idle;
           };
           disk.renameSync(at('Dir', 'File.js'), at('Dir', 'FILE.js'));
