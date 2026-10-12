@@ -1543,6 +1543,14 @@ of the call — a frozen plain object, a new one each time:
     files, bytes,
     fallback: { files, bytes }, // of them, those the pool had no room for
   },
+  trees: {              // each tree of client ids
+    [name]: {
+      nodes, payloads,  // its live nodes, the payloads among them
+      bytes,            // what their representations take of the pool
+      last,             // the number of the last batch it shows
+      held, waiting,    // its intake holds the batches; how many wait
+    },
+  },
   preparation: {
     failures,           // preparations that failed since initialize()
     places,             // { [place]: failures }, each place that declares `prepare`
@@ -1568,8 +1576,12 @@ of the call — a frozen plain object, a new one each time:
   retires one waits for ACKs; one that adds files never does. A worker
   that ACKs but keeps a stream or lease open shows as its `held`; the
   main thread's own streams and leases as `main.held`.
-- `pool.used` is `published.bytes` plus `retired.bytes`, plus the bytes of
-  the publications in progress: anything more is a leak.
+- `pool.used` is `published.bytes` plus the `bytes` of every tree, plus
+  `retired.bytes`, plus the bytes of the publications in progress:
+  anything more is a leak.
+- A **stuck intake** shows as a tree whose `waiting` grows: `held` —
+  a refused batch or no load yet, waiting for a load — or past a gap its
+  source has not filled.
 - `disk.fallback` counts sources a place caches but serves from disk, the
   pool having had no room when they were published — neither larger than
   `maxFileSize` nor kept on disk by `retainRaw: false`; they stay on disk

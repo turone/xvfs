@@ -157,6 +157,22 @@ export interface VfsDiagnostics {
   /** What this thread's streams and leases still read. */
   readonly main: { readonly held: HeldRepresentations };
   readonly links: readonly LinkDiagnostics[];
+  /**
+   * Each tree of client ids: its live nodes, the payloads among them and
+   * the bytes their representations take of the pool, the number of the
+   * last batch it shows; whether its intake holds the batches, and how
+   * many wait in it.
+   */
+  readonly trees: {
+    readonly [tree: string]: {
+      readonly nodes: number;
+      readonly payloads: number;
+      readonly bytes: number;
+      readonly last: number | null;
+      readonly held: boolean;
+      readonly waiting: number;
+    };
+  };
   /** Published sources read from disk; `fallback`: for want of room. */
   readonly disk: {
     readonly files: number;

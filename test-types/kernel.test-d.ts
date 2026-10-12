@@ -145,6 +145,12 @@ expectType<{
   readonly places: {
     readonly [name: string]: object;
   };
+  readonly trees: {
+    readonly [name: string]: {
+      readonly snapshot: object;
+      readonly last: number | null;
+    };
+  };
   readonly version: number;
   readonly instance: string;
   readonly links?: {
@@ -223,6 +229,16 @@ expectType<{
     readonly files: number;
     readonly bytes: number;
     readonly fallback: { readonly files: number; readonly bytes: number };
+  };
+  readonly trees: {
+    readonly [tree: string]: {
+      readonly nodes: number;
+      readonly payloads: number;
+      readonly bytes: number;
+      readonly last: number | null;
+      readonly held: boolean;
+      readonly waiting: number;
+    };
   };
   readonly preparation: {
     readonly failures: number;

@@ -49,6 +49,13 @@ export interface Segment {
 export interface VfsSnapshot {
   readonly segments: Segment[];
   readonly places: { readonly [name: string]: object };
+  /** Each tree of client ids, and the number of the last batch it shows. */
+  readonly trees: {
+    readonly [name: string]: {
+      readonly snapshot: object;
+      readonly last: number | null;
+    };
+  };
   readonly version: number;
   readonly instance: string;
   readonly links?: {

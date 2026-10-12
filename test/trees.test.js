@@ -495,3 +495,41 @@ describe('trees: at rest', () => {
     }
   });
 });
+
+describe('trees: diagnostics', () => {
+  it('a tree shows its nodes, payloads, bytes and intake; the pool adds up', async () => {
+    const { k, done } = await treeKernel({
+      pages: { ...PAGES, intake: { window: 1, gapTimeout: 60_000 } },
+    });
+    try {
+      const t = k.tree('pages');
+      const empty = k.diagnostics().trees.pages;
+      assert.deepEqual(empty, {
+        nodes: 0,
+        payloads: 0,
+        bytes: 0,
+        last: null,
+        held: true,
+        waiting: 0,
+      });
+      await t.load([ROOT, page(2, 'a', 'one'), page(3, 'b', 'three')], 4);
+      const late = t.submit({ seq: 9, ops: [] });
+      late.catch(() => {});
+      const { pool, published, retired, trees } = k.diagnostics();
+      assert.deepEqual(trees.pages, {
+        nodes: 3,
+        payloads: 2,
+        bytes: 8,
+        last: 4,
+        held: false,
+        waiting: 1,
+      });
+      assert.equal(
+        pool.used,
+        published.bytes + trees.pages.bytes + retired.bytes,
+      );
+    } finally {
+      done();
+    }
+  });
+});
