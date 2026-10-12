@@ -1424,8 +1424,8 @@ positional `attach(link)` of earlier versions.
 
 An update the worker cannot apply breaks its view in the step that
 applies it, so no one sees half of it: every call that reaches its
-places — through `kernel.fs()`, the patched `node:fs`, `require` or
-`import` — is then `ERR_VFS_CLOSED` with the failure as its `cause`, a
+places — its own `map` places too, one view, one refusal — through
+`kernel.fs()`, the patched `node:fs`, `require` or `import` — is then `ERR_VFS_CLOSED` with the failure as its `cause`, a
 mutation waiting for its answer rejects with the same, `'close'` comes
 with it, and `kernel.broken` holds it. The worker ACKs neither that
 update nor any later one; its streams stop, and its port stays open
@@ -1872,9 +1872,12 @@ kernel closes, or asked of it afterwards (`[vfs] mutations requires a
 ready kernel (state: closed)`); a worker's mutation whose link to the main
 kernel closed before its answer (`[vfs] link closed before the mutation
 was answered: it may or may not have been published` — the main kernel
-may have published it before it closed). In a worker whose view broke,
-every call that reaches its places is `ERR_VFS_CLOSED` with the failure
-as its `cause` ([`VfsKernel` (worker)](#vfskernel-worker)).
+may have published it before it closed). So are a read of a facade of a
+closed kernel — never "no file" — and `kernel.fs()`, `snapshot()` or
+`diagnostics()` of one (`[vfs] fs() requires a ready kernel (state:
+closed)`). In a worker whose view broke, every call that reaches its
+places is `ERR_VFS_CLOSED` with the failure as its `cause`
+([`VfsKernel` (worker)](#vfskernel-worker)).
 
 ## Protocol
 

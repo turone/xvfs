@@ -521,6 +521,14 @@ describe('nodes: a broken view', () => {
           return true;
         });
       }
+      assert.throws(
+        () => w.fs('v'),
+        (err) => {
+          assert.equal(err.code, 'ERR_VFS_CLOSED');
+          assert.equal(err.cause, cause, 'fs() of the broken view too');
+          return true;
+        },
+      );
       assert.throws(() => w.routeRead(path.join(root, 'v', 'a.txt')), {
         code: 'ERR_VFS_CLOSED',
       });
@@ -535,6 +543,41 @@ describe('nodes: a broken view', () => {
       assert.ok(await until(() => k.links.size === 1), 'only the tap is left');
     } finally {
       w?.close();
+      k.close();
+      rm(root);
+    }
+  });
+
+  // A closed kernel answers fs() and the reads of a facade it gave with the
+  // code of every refusal close() causes, never "no file"; a link taken
+  // twice says what its port held instead of its snapshot.
+  it('a closed kernel refuses fs() and every read; a link taken twice names what it held', async () => {
+    const root = tmpDir('vfs-nodes');
+    const k = await kernel(root, { v: VIRTUAL });
+    try {
+      const v = k.fs('v');
+      await v.writeFile('/a.txt', 'a');
+      const { vfs } = k.link();
+      const { takeSnapshot } = require('../lib/kernel.js');
+      takeSnapshot(vfs.port);
+      await v.writeFile('/b.txt', 'b');
+      assert.throws(
+        () => takeSnapshot(vfs.port),
+        /its next message: vfs-update/,
+      );
+      vfs.port.close();
+      k.close();
+      for (const call of [
+        () => k.fs('v'),
+        () => v.readFile('/a.txt'),
+        () => v.stat('/a.txt'),
+        () => v.exists('/a.txt'),
+        () => v.version('/a.txt'),
+        () => v.readdir(''),
+      ]) {
+        assert.throws(call, { code: 'ERR_VFS_CLOSED' });
+      }
+    } finally {
       k.close();
       rm(root);
     }
