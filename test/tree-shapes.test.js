@@ -6,7 +6,7 @@ const path = require('node:path');
 const { execFile } = require('node:child_process');
 
 // Field representations of the engine's objects after one large number:
-// a size or a version past 2^31, a client id past 2^31 beside FS nodes
+// a size or a version past 2^31, an id tree's id past 2^31 beside FS nodes
 // (doc/architecture.md, "Node trees"; both
 // engines of step A had fields that a full GC before the first object left
 // unprotected — the bench saw it, no test did). In a child process with

@@ -33,7 +33,7 @@ const fsTree = () => {
   return { tree, segments };
 };
 
-const clientTree = (options = {}) =>
+const idTree = (options = {}) =>
   engine.createTree({
     ids: 'number',
     segments: data.createSegments(1),
@@ -108,7 +108,7 @@ describe('tree engine on deep and wide trees', () => {
   });
 
   it(`a client chain ${DEPTH} deep: load, policies on the way, check, removal`, () => {
-    const tree = clientTree();
+    const tree = idTree();
     const rows = chainRows();
     for (const row of rows) {
       if (row.id > 0 && row.id % 1000 === 0) row.policy = { level: row.id };
@@ -136,7 +136,7 @@ describe('tree engine on deep and wide trees', () => {
 
   it(`a client chain ${DEPTH} deep: rows children first, the chain turned over, puts children first, a replica`, () => {
     const segments = data.createSegments(1);
-    const tree = clientTree({ segments });
+    const tree = idTree({ segments });
     const rows = chainRows();
     const key = '/n'.repeat(DEPTH);
     let version = 0;
@@ -175,7 +175,7 @@ describe('tree engine on deep and wide trees', () => {
       assert.equal(t.countOf(t.byId(0)), 1, 'the root has one child');
     }
     // Puts children first, in one commit of a fresh tree.
-    const fresh = clientTree();
+    const fresh = idTree();
     const puts = [...rows]
       .reverse()
       .map((row) => ['put', row.id, row.parentId, row.name, { class: 0 }]);
@@ -218,7 +218,7 @@ describe('tree engine on deep and wide trees', () => {
       wide < RATIO * Math.max(narrow, 0.01),
       `a write under ${WIDE} children: ${wide.toFixed(3)} ms, under 10: ${narrow.toFixed(3)} ms`,
     );
-    const client = clientTree();
+    const client = idTree();
     const rows = [{ id: 0, parentId: null, name: '', class: 0 }];
     rows.push({ id: 1, parentId: 0, name: 'narrow', class: 0 });
     for (let id = 2; id < WIDE + 2; id++)
@@ -255,7 +255,7 @@ describe('tree engine on deep and wide trees', () => {
     const loadOf = (rows) => {
       const times = [];
       for (let i = 0; i < 5; i++) {
-        const tree = clientTree();
+        const tree = idTree();
         const t0 = process.hrtime.bigint();
         tree.load(rows, 1, 2);
         times.push(Number(process.hrtime.bigint() - t0) / 1e6);

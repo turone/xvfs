@@ -3,7 +3,7 @@
 const { VfsConfig } = require('./lib/config.js');
 const { VfsKernel } = require('./lib/kernel.js');
 const { PlaceFs } = require('./lib/place-fs.js');
-const { ClientTree } = require('./lib/client-tree.js');
+const { SharedTree } = require('./lib/shared-tree.js');
 const { Denied, NotFound } = require('./lib/tree.js');
 const { FilesystemCache } = require('./lib/cache.js');
 const { VfsStats, VfsDirent } = require('./lib/stats.js');
@@ -13,7 +13,7 @@ module.exports = {
   VfsConfig,
   VfsKernel,
   PlaceFs,
-  ClientTree,
+  SharedTree,
   Denied,
   NotFound,
   FilesystemCache,

@@ -322,7 +322,7 @@ const fsChanges = (ctx, r) => {
 };
 
 // Relocations of sources and of derived representations, by id: both of a
-// node in an FS tree; one op per id in a tree with client ids, as its
+// node in an FS tree; one op per id in an id tree, as its
 // commits take them — the source of every other node, fs:br of the rest.
 const relocations = (ctx, ids) => {
   const { tree, extents } = ctx;
@@ -355,10 +355,10 @@ const fsRelocations = (ctx) => {
 
 const clientInput = (ctx) => marked(data.payloadOf(ctx.random, ctx.extents));
 
-// A tree with client ids: a root, containers under it (classes 0) and
+// An id tree: a root, containers under it (classes 0) and
 // leaves under them (classes 1 and 2, 2 a container class too), payloads
 // on leaves and on some containers, policies on every seventh node.
-const clientTree = (ids, count) => {
+const idTree = (ids, count) => {
   const segments = data.createSegments(4);
   const ctx = {
     kind: ids,
@@ -573,7 +573,7 @@ const objects = async () => {
     );
   }
   for (const ids of ['number', 'string']) {
-    const c = clientTree(ids, 2000);
+    const c = idTree(ids, 2000);
     keep.push(c.tree);
     await record(`${ids}: snapshot after fromSnapshot`, snapshotCase(c));
     for (let r = 0; r < 2; r++) {
@@ -879,7 +879,7 @@ const lookups = async () => {
 // A sample of keys to ask: the catalog's, the round's, misses.
 const askedOf = (ctx) => {
   const asked = ['/', '/nope', '/round-0/renamed.html', '/round-1/moved'];
-  // A client tree's keys are a sample already.
+  // An id tree's keys are a sample already.
   const step = ctx.kind === 'fs' ? 37 : 1;
   for (let i = 0; i < ctx.keys.length; i += step) asked.push(ctx.keys[i]);
   return asked;
@@ -960,7 +960,7 @@ const spoilCheck = () => {
   results.push(spoilDelta(fs, 'a relocation', () => fsRelocations(fs)));
   results.push(spoilInput(fs, 'commit', () => fsChanges(fs, 1)));
   for (const ids of ['number', 'string']) {
-    const c = clientTree(ids, 2000);
+    const c = idTree(ids, 2000);
     keep.push(c.tree);
     results.push(spoilSnapshot(c));
     results.push(spoilDelta(c, 'a delta', () => clientChanges(c, 0)));

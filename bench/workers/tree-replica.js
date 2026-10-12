@@ -358,7 +358,7 @@ const refusal = async () => {
   const back = files.map((key) => ['move', `${key}.m`, key]);
   const removal = [['remove', '/doomed']];
   const rows = load ? loadRows(ctx.extents) : null;
-  const clientTree = () =>
+  const idTree = () =>
     engine.createTree({
       ids: 'number',
       containers: [0],
@@ -389,7 +389,7 @@ const refusal = async () => {
       okMs(() => commit(tree, removal)),
     );
     if (rows === null || r > loads) continue;
-    const target = clientTree();
+    const target = idTree();
     const run = () => target.load(rows.rows, clock.next(), clock.now());
     record('load1e5.ok', r, okMs(run));
   }
@@ -404,7 +404,7 @@ const refusal = async () => {
     const remove = () => commit(tree, [...removal, BAD]);
     record('removal.refused', r, refusedMs(remove, removal.length));
     if (rows === null || r > loads) continue;
-    const empty = clientTree();
+    const empty = idTree();
     const all = [...rows.rows, rows.orphan];
     const run = () => empty.load(all, clock.next(), clock.now());
     record('load1e5.refused', r, refusedMs(run, rows.rows.length));

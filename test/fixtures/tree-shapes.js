@@ -14,7 +14,7 @@
 // Float64Array among them once a value is past a small integer. A time is
 // an integer first and a double after, as fs.stat gives them; a
 // representation's offset is small and at the end of a segment; `others`
-// holds different sets of fields; ids of a client tree are past 2³¹, below
+// holds different sets of fields; ids of an id tree are past 2³¹, below
 // −2³¹ and strings, beside the FS nodes. Prints one line of JSON:
 // { cases: [{ name, same }] }.
 
@@ -73,7 +73,7 @@ const apply = (replica, result) =>
   tree.commit([['write', '/d', file(3, 1.5)]], BIG + 1, 5);
   const d = tree.payloadOf(tree.get('/d'));
   check('payload: mtimeMs an integer, then a double', a, d);
-  // A client tree's ids beside the FS nodes (the spec's rule: other trees'
+  // An id tree's ids beside the FS nodes (the spec's rule: other trees'
   // ids must not turn the FS nodes' ids into doubles): past 2^31, below
   // -2^31, strings; a policy on a node beside one without.
   const client = mk({ ids: 'number' });
@@ -86,12 +86,16 @@ const apply = (replica, result) =>
     2,
   );
   client.commit([['put', BIG, 1, 'big', { class: 1 }]], 2, 3);
-  check('client node: an id past 2^31', client.byId(2), client.byId(BIG));
+  check('id tree node: an id past 2^31', client.byId(2), client.byId(BIG));
   tree.commit([['write', '/e', file(4)]], BIG + 2, 6);
-  check('FS node: after a client id past 2^31', tree.get('/a'), tree.get('/e'));
+  check(
+    "FS node: after an id tree's id past 2^31",
+    tree.get('/a'),
+    tree.get('/e'),
+  );
   client.commit([['put', NEGATIVE, 1, 'negative', { class: 1 }]], 3, 4);
   check(
-    'client node: an id below -2^31',
+    'id tree node: an id below -2^31',
     client.byId(2),
     client.byId(NEGATIVE),
   );
@@ -101,7 +105,7 @@ const apply = (replica, result) =>
     5,
   );
   check(
-    'client node: with a policy beside one without',
+    'id tree node: with a policy beside one without',
     client.byId(2),
     client.byId(3),
   );
@@ -122,7 +126,7 @@ const apply = (replica, result) =>
   );
   client.commit([['put', 4, 1, 'later', { class: 1 }]], 5, 6);
   check(
-    'client node: after a tree of string ids appeared',
+    'id tree node: after a tree of string ids appeared',
     client.byId(2),
     client.byId(4),
   );

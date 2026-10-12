@@ -1,11 +1,11 @@
-// A tree of client ids: the kernel option of its handlers, kernel.tree(),
+// A shared tree: the kernel option of its handlers, kernel.tree(),
 // lookups with and without policies, nodes, payloads and bytes, the
 // batches of its source; what must not compile.
 
-import { ClientTree, Denied, NotFound, VfsConfig, VfsKernel } from 'xvfs';
+import { SharedTree, Denied, NotFound, VfsConfig, VfsKernel } from 'xvfs';
 import type {
   BatchResult,
-  ClientId,
+  NodeId,
   TreeLease,
   TreeNode,
   TreePayloadInfo,
@@ -37,7 +37,7 @@ const kernel = new VfsKernel(config, {
         expectType<TreeRefusal>()(err);
         expectType<string>()(err.code);
         expectType<number | undefined>()(err.seq);
-        expectType<ClientId | undefined>()(err.id);
+        expectType<NodeId | undefined>()(err.id);
       },
     },
   },
@@ -46,7 +46,7 @@ const kernel = new VfsKernel(config, {
 const main = async () => {
   await kernel.initialize();
   const pages = kernel.tree('pages');
-  expectType<ClientTree>()(pages);
+  expectType<SharedTree>()(pages);
   expectType<number | null>()(pages.last);
   expectType<number>()(pages.policyVersion);
   expectType<TreeNode | null>()(pages.root);
@@ -73,7 +73,7 @@ const main = async () => {
   const node = pages.get('/news');
   expectType<TreeNode | null>()(node);
   if (node !== null) {
-    expectType<ClientId>()(pages.nodeId(node));
+    expectType<NodeId>()(pages.nodeId(node));
     expectType<string | null>()(pages.pathOf(node));
     expectType<TreePayloadInfo | null>()(pages.payloadOf(node));
     expectType<Buffer | null>()(pages.read(node));

@@ -221,8 +221,8 @@ export interface StatConfig {
 }
 
 /**
- * How a tree of client ids takes its batches (`lib/intake.js`, README,
- * "Trees of client ids").
+ * How a shared tree takes its batches (`lib/intake.js`, README, "Page
+ * and route trees").
  */
 export interface IntakeConfig {
   /**
@@ -242,9 +242,9 @@ export interface IntakeConfig {
 }
 
 /**
- * A tree of client ids: nodes the source names by its own ids, payloads
- * in the pool, the same in every thread (`kernel.tree(name)`). Its name
- * takes no name of a place.
+ * A shared tree: nodes with the ids its source gives them — a page's key
+ * in the database — payloads in the pool, the same in every thread
+ * (`kernel.tree(name)`). Its name takes no name of a place.
  */
 export interface TreeConfig {
   /** The source's ids: numbers (safe integers) or strings. */
@@ -405,7 +405,7 @@ export class VfsConfig {
   get places(): ResolvedPlace[];
   get allPlaces(): ResolvedPlace[];
   place(name: string): ResolvedPlace | null;
-  /** The trees of client ids, in declaration order. */
+  /** The shared trees, in declaration order. */
   get trees(): ResolvedTree[];
   tree(name: string): ResolvedTree | null;
   /**

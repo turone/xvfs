@@ -160,7 +160,7 @@ const publishedReps = function* (place) {
   }
 };
 
-// The representations a tree of client ids publishes: the payload of any
+// The representations a shared tree publishes: the payload of any
 // node, the root's included.
 const treeReps = function* (tree) {
   const root = tree.get('');

@@ -53,7 +53,7 @@ class Thread {
     this.others = new Map(); // model others uid → engine others object
     this.dead = []; // [engine node, id]
     this.empty = null; // the one shared empty Buffer
-    this.containers = null; // this thread's own rule (client trees)
+    this.containers = null; // this thread's own rule (id trees)
     this.pinned = new Set(); // engine Representations this thread's readers hold
     this.formerReps = []; // retired Representations the test still holds
   }
@@ -1274,7 +1274,7 @@ const fsOps = (ctx) => {
   return ops;
 };
 
-// A policy of a node of a tree with client ids: deny, redirect, or one whose
+// A policy of a node of an id tree: deny, redirect, or one whose
 // allow answers a primitive — only true lets through; null for none.
 const policyOf = (ctx) => {
   const { random } = ctx;
@@ -1291,7 +1291,7 @@ const policyOf = (ctx) => {
   };
 };
 
-// A commit of a tree with client ids: puts and removes, one per id; patterns
+// A commit of an id tree: puts and removes, one per id; patterns
 // of the final state; now and then refused.
 const clientOps = (ctx) => {
   const { model, random, extents } = ctx;
@@ -1410,7 +1410,7 @@ const clientOps = (ctx) => {
   return random.shuffle(ops);
 };
 
-// Compaction of a tree with client ids: one relocation, mostly; now and then
+// Compaction of an id tree: one relocation, mostly; now and then
 // one the first group refuses — the id named twice, a put or a remove
 // beside it, an id of another kind, an unknown kind, an extent that is not
 // one — or one the node refuses: an id no live node has, a kind it has not.

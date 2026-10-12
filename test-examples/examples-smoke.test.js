@@ -699,7 +699,7 @@ describe('examples smoke', () => {
   );
 
   it(
-    'url-tree loads a tree of client ids, takes batches from a worker and the log, resolves URLs under policies',
+    'url-tree loads a shared tree of pages, takes batches from a worker and the log, resolves URLs under policies',
     { timeout: URL_TREE_MS },
     async () => {
       const child = spawn(process.execPath, ['examples/url-tree/run.js'], {

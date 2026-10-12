@@ -6,10 +6,10 @@ const { worker } = require('../../test/helpers.js');
 const { median } = require('../harness.js');
 const { tmpDir, cleanup, quiet, timeCommits, timePosts } = require('../lib.js');
 
-// The intake of a tree of client ids (doc/architecture.md, "Trees of
-// client ids"): the synchronous step one part of a run takes on the main
-// thread — from its first commit to the update posted to the one linked
-// worker — by the size of the batches and the limit of a part; what
+// The intake of a shared tree (doc/architecture.md, "Shared trees"): the
+// synchronous step one part of a run takes on the main thread — from its
+// first commit to the update posted to the one linked worker — by the size
+// of the batches and the limit of a part; what
 // `trees.<name>.intake.limit` defaults to rests on it. A run is `TOTAL`
 // ops of new nodes with a 64-byte payload each, under 100 parents,
 // submitted at once.

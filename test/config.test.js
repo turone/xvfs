@@ -1132,7 +1132,7 @@ describe('VfsConfig.fromArgv: lists', () => {
   });
 });
 
-describe('VfsConfig: trees of client ids', () => {
+describe('VfsConfig: shared trees', () => {
   const tree = (raw, defaults) =>
     new VfsConfig({ defaults, trees: { pages: raw } }).tree('pages');
 

@@ -1,7 +1,7 @@
 'use strict';
 
-// url-tree — the pages of a site as a tree of client ids (README, "Trees
-// of client ids"): nodes named by the source's own ids, payloads in the
+// url-tree — the pages of a site as a shared tree (README, "Page and route
+// trees"): nodes with the ids the source gives them, payloads in the
 // shared pool, the same tree in every thread.
 //
 // The source here is an array and a counter — what a database table and

@@ -959,7 +959,7 @@ class ModelTree {
     };
   }
 
-  // ----- trees with client ids ------------------------------------------------
+  // ----- id trees -------------------------------------------------------------
 
   isId(id) {
     return this.mode === 'number'
@@ -1034,7 +1034,7 @@ class ModelTree {
         if (!Number.isInteger(k) || k < 0 || k >= KIND_COUNT)
           throw refusal('EINVAL', index);
         if (!this.validExtent(extent)) throw refusal('EINVAL', index);
-        // one op per id in a tree with client ids, a relocation's included
+        // one op per id in an id tree, a relocation's included
         if (named.has(id)) throw refusal('EINVAL', index);
         named.add(id);
         if (kind === null) kind = 'relocate';

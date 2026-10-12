@@ -18,11 +18,11 @@ const {
   closeAtRest,
 } = require('./helpers.js');
 
-// A tree of client ids in the kernel (doc/architecture.md, "Trees of
-// client ids"): declared in the config, created at initialize() — empty,
-// its root the source's first put of one — in every snapshot, read in
-// every thread through kernel.tree(name), its batches published by the
-// intake of the main thread, from the main thread or a worker.
+// A shared tree in the kernel (doc/architecture.md, "Shared trees"):
+// declared in the config, created at initialize() — empty, its root the
+// source's first put of one — in every snapshot, read in every thread
+// through kernel.tree(name), its batches published by the intake of the
+// main thread, from the main thread or a worker.
 
 const MEMORY = { limit: '8 mib', segmentSize: '1 mib', maxFileSize: '1 mib' };
 

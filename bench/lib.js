@@ -113,7 +113,7 @@ const settledUsage = async () => {
   return last;
 };
 
-// The [start, end] of every commit of the tree of client ids `name`, from
+// The [start, end] of every commit of the shared tree `name`, from
 // now on, as it happens.
 const timeCommits = (k, name) => {
   const { tree } = k.trees.get(name);

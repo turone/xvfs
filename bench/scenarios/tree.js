@@ -43,10 +43,10 @@ const data = require('../../test/tree-data.js');
 //   lookup    get, random — uniform and Zipf — and hot, and resolve;
 //             Map.get and slice + get
 //   miss      get over the module resolver's candidates, a hot set of them
-//             and misses below a file; load on a live tree of client ids
+//             and misses below a file; load on a live id tree
 //             with 1 % of the rows changed (new payloads, renames) — the
 //             spec's "Misses"
-//   policy    get, random and hot, on a tree of client ids with allow at 0,
+//   policy    get, random and hot, on an id tree with allow at 0,
 //             1 and 3 own policies on the path and without allow; check by
 //             id
 //   listing   children() of a 20-entry and of a 1000-entry directory
@@ -688,7 +688,7 @@ const deltas = (b, ctx) => {
   }
 };
 
-// --- Trees with client ids: policies and load ---------------------------------------------
+// --- Id trees: policies and load ----------------------------------------------------------
 
 // The catalog as rows of a tree with number ids: the root, a container
 // (class 0) per directory, a page (class 1, with a payload) per file.

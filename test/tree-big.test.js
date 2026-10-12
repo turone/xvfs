@@ -4,7 +4,7 @@
 // compound commits and a replica fed from the very first delta; moves of
 // subtrees of every size — 21, ~420 and ~8000 nodes — after every key below
 // them was asked, and the former keys below them; a large batch refused at
-// its last op; both separators; in a tree with client ids, a large load and
+// its last op; both separators; in an id tree, a large load and
 // loads with a few rows changed. The model and the comparison are the model
 // test's.
 //

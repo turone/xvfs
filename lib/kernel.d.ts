@@ -1,7 +1,7 @@
 // Types of kernel.js: VfsKernel, the orchestrator of the main thread and
 // the replicas of a worker. README, "VfsKernel (main thread)",
 // "Versions", "Publication events", "Diagnostics", "Adapter API",
-// "VfsKernel (worker)" and "Trees of client ids".
+// "VfsKernel (worker)" and "Page and route trees".
 
 import { EventEmitter } from 'node:events';
 import type { MessagePort } from 'node:worker_threads';
@@ -13,7 +13,7 @@ import type {
   VfsConfig,
   VfsRawConfig,
 } from './config.js';
-import type { ClientTree, TreeRefusal } from './client-tree.js';
+import type { SharedTree, TreeRefusal } from './shared-tree.js';
 import type { PreparerTable } from './pipeline.js';
 import type { FilePayload, Place } from './place.js';
 import type { PlaceFs } from './place-fs.js';
@@ -57,7 +57,7 @@ export interface VfsKernelOptions {
 }
 
 /**
- * What the intake of a tree of client ids tells its source, on the main
+ * What the intake of a shared tree tells its source, on the main
  * thread; what a handler throws is its own, an uncaught exception.
  */
 export interface TreeHandlers {
@@ -158,7 +158,7 @@ export interface VfsDiagnostics {
   readonly main: { readonly held: HeldRepresentations };
   readonly links: readonly LinkDiagnostics[];
   /**
-   * Each tree of client ids: its live nodes, the payloads among them and
+   * Each shared tree: its live nodes, the payloads among them and
    * the bytes their representations take of the pool, the number of the
    * last batch it shows; whether its intake holds the batches, and how
    * many wait in it.
@@ -251,12 +251,12 @@ export interface PlaceChanges {
 export interface PublishEvent {
   readonly version: number;
   readonly places: { readonly [name: string]: PlaceChanges };
-  /** The trees of client ids it changed; empty when none. */
+  /** The shared trees it changed; empty when none. */
   readonly trees: readonly TreePublication[];
 }
 
 /**
- * What one publication shows of a tree of client ids: the numbers of the
+ * What one publication shows of a shared tree: the numbers of the
  * batches of its source from `seqFrom` to `seqTo`; `loaded` when it
  * began with a load, which replaced the tree's state whole.
  */
@@ -344,8 +344,8 @@ export class VfsKernel extends EventEmitter<VfsKernelEvents> {
   close(): void;
   /** The `PlaceFs` of an indexed place with an fs domain; throws otherwise. */
   fs(name: string): PlaceFs;
-  /** A tree of client ids of the config, in every thread; throws otherwise. */
-  tree(name: string): ClientTree;
+  /** A shared tree of the config, in every thread; throws otherwise. */
+  tree(name: string): SharedTree;
   /** The trees as published, with `version` and `instance`; main thread. */
   snapshot(): VfsSnapshot;
   /**

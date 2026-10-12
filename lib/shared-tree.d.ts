@@ -1,7 +1,7 @@
-// Types of client-tree.js and of what tree.js exports with it: ClientTree,
-// a tree of client ids in every thread (`kernel.tree(name)`), its nodes,
-// lookups, payloads and the batches of its source. README, "Trees of
-// client ids".
+// Types of shared-tree.js and of what tree.js exports with it: SharedTree,
+// a shared tree in every thread (`kernel.tree(name)`) — the pages and
+// routes of a site, a menu, a catalogue — its nodes, lookups, payloads and
+// the batches of its source. README, "Page and route trees".
 
 import type { Encoding } from './config.js';
 import type { ReadStreamOptions, VfsReadStream } from './place-fs.js';
@@ -9,7 +9,7 @@ import type { ReadStreamOptions, VfsReadStream } from './place-fs.js';
 declare const nodeBrand: unique symbol;
 
 /**
- * A node of a tree of client ids: opaque — the facade hands it out and
+ * A node of a shared tree: opaque — the facade hands it out and
  * takes it back. It lives while its node does and keeps its identity
  * through a move; a removed node is dead with its subtree: every
  * operation answers for it as for a missing node, but `nodeId`.
@@ -18,8 +18,12 @@ export interface TreeNode {
   readonly [nodeBrand]: true;
 }
 
-/** The ids a source gives its nodes: as `trees.<name>.ids` says. */
-export type ClientId = number | string;
+/**
+ * The id a node has in its source — a page's key in the database — kept
+ * through moves and renames: a number or a string, as `trees.<name>.ids`
+ * says.
+ */
+export type NodeId = number | string;
 
 /**
  * A refusal of a policy on the way to a node: the node whose policy
@@ -52,8 +56,8 @@ export interface AllowOptions<Policy = unknown, Context = unknown> {
   context?: Context;
 }
 
-/** A payload in the client's form: bytes and their metadata. */
-export interface ClientPayload {
+/** A payload as a batch or a load gives it: bytes and their metadata. */
+export interface TreePayload {
   /** A string is taken as UTF-8. */
   data: Uint8Array | string;
   /** Default: the time it is placed. */
@@ -66,7 +70,7 @@ export interface PutFields {
   /** A small integer; containers by `trees.<name>.containers`. */
   class?: number;
   /** Absent: the node's as it was; null: none. */
-  payload?: ClientPayload | null;
+  payload?: TreePayload | null;
   /** Absent: the node's as it was; null: none. */
   policy?: unknown;
 }
@@ -74,13 +78,13 @@ export interface PutFields {
 /** Creates or changes the node `id`: under `parentId` (null: the root). */
 export type PutOp = readonly [
   'put',
-  id: ClientId,
-  parentId: ClientId | null,
+  id: NodeId,
+  parentId: NodeId | null,
   name: string,
   fields: PutFields,
 ];
 /** Removes the node `id` with its subtree. */
-export type RemoveOp = readonly ['remove', id: ClientId];
+export type RemoveOp = readonly ['remove', id: NodeId];
 export type BatchOp = PutOp | RemoveOp;
 
 /**
@@ -105,11 +109,11 @@ export interface BatchResult {
 
 /** A node of the source's state, for `load()`. */
 export interface LoadRow {
-  id: ClientId;
-  parentId: ClientId | null;
+  id: NodeId;
+  parentId: NodeId | null;
   name: string;
   class?: number;
-  payload?: ClientPayload | null;
+  payload?: TreePayload | null;
   policy?: unknown;
 }
 
@@ -123,8 +127,8 @@ export interface TreeRefusal extends Error {
   readonly code: string;
   readonly seq?: number;
   readonly index?: number;
-  readonly id?: ClientId;
-  readonly other?: ClientId;
+  readonly id?: NodeId;
+  readonly other?: NodeId;
 }
 
 /** What a node's payload is, without its bytes. Frozen. */
@@ -166,11 +170,11 @@ export interface TreeWalkOptions {
 }
 
 /**
- * A tree of client ids, in every thread: on the main thread its main tree,
+ * A shared tree, in every thread: on the main thread its main tree,
  * in a worker its replica. A closed kernel refuses every call
  * (`ERR_VFS_CLOSED`), a broken worker view with what broke it.
  */
-export class ClientTree {
+export class SharedTree {
   #private;
   private constructor();
   get name(): string;
@@ -200,9 +204,9 @@ export class ClientTree {
   match(key: string, options: AllowOptions): TreeNode | NotFound | Denied;
   /** The node, the upper refusal on its way, or null for a dead node. */
   check(node: TreeNode, options: AllowOptions): TreeNode | Denied | null;
-  byId(id: ClientId): TreeNode | null;
+  byId(id: NodeId): TreeNode | null;
 
-  nodeId(node: TreeNode): ClientId;
+  nodeId(node: TreeNode): NodeId;
   nameOf(node: TreeNode): string | null;
   parentOf(node: TreeNode): TreeNode | null;
   /** `'/a/b'`, `''` for the root, null for a dead node. */

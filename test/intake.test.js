@@ -5,7 +5,7 @@ const assert = require('node:assert/strict');
 const { createTree } = require('../lib/tree.js');
 const { Intake } = require('../lib/intake.js');
 
-// The intake of a tree of client ids (lib/intake.js) over a real tree of
+// The intake of a shared tree (lib/intake.js) over a real tree of
 // the engine, with a kernel, a pool, a clock and timers of the test's own:
 // every timer runs when the test moves the clock, every immediate when it
 // lets the queue drain — nothing waits for real time.
