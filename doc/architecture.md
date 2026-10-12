@@ -1341,18 +1341,21 @@ next one needs, which waiting before them would never see.
 **A batch past a gap waits; a gap older than `gapTimeout` is told once,
 `onGap({ from, to })`, and lasts until the missing batches come or a
 load. A refused batch — a commit's refusal, a payload larger than
-`maxFileSize` (`EFBIG`), no room for `spaceTimeout` (`ENOSPC`) — is told
-to `onError` and rejects its promise, with its `seq`, `index` and `id`;
-the batches before it publish, and it holds everything after it until a
-load. `load(rows, seq)` replaces the whole state in one commit: the
-batches waiting up to `seq` are `'superseded'`, those after it join its
-publication, and in `'source'` mode a load older than the tree is
-`ESTALE`. A load that
-fails leaves the tree as it was: in `'source'` mode the batches go on by
-their numbers; in `'intake'` mode those the writer submitted after it
-were made for its state, and wait for a load. A batch that changes
-nothing publishes nothing — no delta, no version, no event — and its
-update moves `last` in every thread: the tree shows it too.** _Why:_ the
+`maxFileSize` (`EFBIG`), no room for `spaceTimeout` (`ENOSPC`) — rejects
+its promise, with its `seq`, `index` and `id`; the batches before it
+publish, then it is told to `onError`, and it holds everything after it
+until a load. `load(rows, seq)` replaces the whole state in one commit:
+the batches waiting up to `seq` are `'superseded'`, those after it join
+its publication, and in `'source'` mode a load older than the tree is
+`ESTALE`. A load that fails leaves the tree as it was, and is told as a
+batch is, with its `seq` and the `index` and `id` of its row: in
+`'source'` mode the batches go on by their numbers; in `'intake'` mode
+those the writer submitted after it were made for its state, and wait
+for a load. A batch that changes nothing publishes nothing — no delta,
+no version, no event — and its update moves `last` in every thread: the
+tree shows it too. A publication the kernel cannot make leaves the main
+tree ahead of every other thread: its batches reject, and the kernel
+closes.** _Why:_ the
 numbers are the order of the source's commits, and a batch applied out
 of it would build a state the source never had; a source finds a lost
 batch by its gap, and the loss of its last one by comparing its counter
@@ -1360,15 +1363,26 @@ with `last`. A refusal past which batches went on would leave the tree in
 a state the source never had either: only the source's snapshot repairs
 it.
 
-**A worker's `submit` and `load` are checked at once, as on the main
-thread (`EINVAL`), then sent over its link as a `vfs-mutate` naming the
-tree, every payload's bytes copied and transferred; the answer comes
+**A batch and the rows of a load are the intake's own once taken, in
+the thread that takes them: the ops and their fields copied, every
+payload's bytes copied over a buffer of their own, a policy, a meta and
+scriptOptions cloned by structured clone and frozen — what it cannot
+clone is `EINVAL` at once, nothing taken; a replica freezes what it takes
+of them from a snapshot or a delta. A worker's `submit` and `load` are
+so taken, then sent over its link as a `vfs-mutate` naming the tree, its
+copies transferred; the answer comes
 after the publication, so the worker's replica shows the batch by the
 time its promise resolves. A replica applies the deltas of a tree in an
 update in one step, with those of the places, and takes `seq.to` for its
 `last`.** _Why:_ a port delivers the update before the answer, which
 gives read-your-writes for the writer's own batches with no wait of its
-own; a batch from another process reaches the threads in a publication
+own. A value held by reference was the client's to change after
+`submit` — on the main thread under the tree's feet, past every check —
+and one structured clone cannot carry, a function in a policy, made the
+update fail after the main tree had committed: the kernel closed, the
+batch's promise never settled, and a load left the workers a delta
+behind for good. A batch from another process reaches the threads in a
+publication
 like any other, and how a thread waits for one is the interface of a
 client that has several processes.
 

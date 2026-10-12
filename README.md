@@ -744,8 +744,12 @@ id, parentId, name, { class, payload, policy }]` — a node made or
 changed under `parentId` (null: the root) — and `['remove', id]`, each
 id once. A `payload` is `{ data, mtimeMs?, meta?, scriptOptions? }`,
 `data` a `Uint8Array` or a string (UTF-8); `null` takes it off, an
-absent one keeps it; `policy` likewise. A wrong form throws `EINVAL` at
-once. The promise resolves `{ seq, status }` once the batch is
+absent one keeps it; `policy` likewise. A batch is taken when submitted:
+its bytes copied, a `policy`, a `meta` and `scriptOptions` cloned — data
+structured clone carries, kept frozen in every thread — so what the
+caller does to its own objects after changes nothing. A wrong form, or
+a value structured clone cannot carry, throws `EINVAL` at once, with the
+`index` and `id` of the op. The promise resolves `{ seq, status }` once the batch is
 published and this thread's tree shows it — `'committed'`,
 `'duplicate'` (a number applied or waiting already: a worker's batch
 and the same change read back from the source's log collapse) or

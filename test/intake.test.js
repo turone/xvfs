@@ -127,7 +127,7 @@ const kernelOf = (pool) => {
   const kernel = {
     v: 0,
     published: [],
-    fatal: [],
+    fatals: [],
     version: () => kernel.v,
     publish(results, seq) {
       for (const r of results) {
@@ -144,8 +144,7 @@ const kernelOf = (pool) => {
       kernel.published.push(seq);
     },
   };
-  kernel.fatal = (err) => kernel.fatal.push(err);
-  kernel.fatal.push = Array.prototype.push;
+  kernel.fatal = (err) => kernel.fatals.push(err);
   return kernel;
 };
 
@@ -159,7 +158,7 @@ const SETTINGS = {
   maxFileSize: 1000,
 };
 
-const setup = (settings = {}, capacity) => {
+const setup = (settings = {}, capacity, handlers = {}) => {
   const segments = new Map();
   const tree = createTree({
     ids: 'number',
@@ -185,7 +184,7 @@ const setup = (settings = {}, capacity) => {
     clock: time.clock,
     timers: time.timers,
     onGap: (gap) => gaps.push(gap),
-    onError: (err) => errors.push(err),
+    onError: handlers.onError ?? ((err) => errors.push(err)),
     settings: { ...SETTINGS, ...settings },
   });
   // The bytes the tree publishes: what the pool holds, no more.
@@ -602,5 +601,110 @@ describe("intake: 'intake' numbers, close, format", () => {
     }
     await intake.load([ROOT], 5);
     await assert.rejects(intake.load([ROOT], 4), { code: 'ESTALE' });
+  });
+});
+
+describe('intake: what the client gives it, and what fails after a commit', () => {
+  it('a batch is its own once taken: copied, cloned, frozen; what does not clone is EINVAL at once', async () => {
+    const { tree, time, intake, pool, published } = setup();
+    await intake.load([ROOT], 0);
+    const policy = { role: 'admin', tags: ['a'] };
+    const meta = { title: 'A' };
+    const data = Buffer.from('aaaa');
+    const fields = { class: 1, policy, payload: { data, meta } };
+    const ops = [['put', 2, 1, 'a', fields]];
+    const done = intake.submit({ seq: 1, ops });
+    // What the client does to its own after changes nothing.
+    data.fill(0x7a);
+    policy.role = 'guest';
+    policy.tags.push('b');
+    meta.title = 'B';
+    fields.payload = null;
+    ops.push(['nonsense']);
+    await time.advance(10);
+    assert.deepEqual(await done, { seq: 1, status: 'committed' });
+    const node = tree.byId(2);
+    assert.equal(text(tree, 2), 'aaaa');
+    const kept = tree.policyOf(node);
+    assert.deepEqual(kept, { role: 'admin', tags: ['a'] });
+    assert.ok(Object.isFrozen(kept) && Object.isFrozen(kept.tags));
+    assert.deepEqual(tree.payloadOf(node).extras.meta, { title: 'A' });
+    assert.ok(Object.isFrozen(tree.payloadOf(node).extras.meta));
+    const wrong = [
+      { class: 1, policy: () => true },
+      { class: 1, payload: { data: 'x', meta: { f() {} } } },
+      { class: 1, payload: { data: 'x', scriptOptions: { s: Symbol('s') } } },
+    ];
+    for (const bad of wrong) {
+      assert.throws(
+        () => intake.submit({ seq: 2, ops: [['put', 3, 1, 'b', bad]] }),
+        (err) => err.code === 'EINVAL' && err.index === 0 && err.id === 3,
+      );
+    }
+    const row = { id: 3, parentId: 1, name: 'b', class: 1, policy: () => 1 };
+    assert.throws(() => intake.load([ROOT, row], 5), {
+      code: 'EINVAL',
+      index: 1,
+      id: 3,
+    });
+    assert.equal(intake.waiting, 0);
+    assert.equal(pool.used(), published());
+  });
+
+  it('a refusal of a load is told, with its number and the id of its row', async () => {
+    const { intake, errors } = setup();
+    await intake.load([ROOT], 0);
+    const big = { id: 9, parentId: 1, name: 'z', class: 1 };
+    big.payload = { data: 'x'.repeat(1001) };
+    await assert.rejects(intake.load([ROOT, big], 5), { code: 'EFBIG' });
+    const orphan = { id: 4, parentId: 77, name: 'o', class: 1 };
+    await assert.rejects(intake.load([ROOT, orphan], 6), { code: 'ENOENT' });
+    await intake.load([ROOT], 10);
+    await assert.rejects(intake.load([ROOT], 8), { code: 'ESTALE' });
+    assert.deepEqual(
+      errors.map(({ code, seq, index, id }) => ({ code, seq, index, id })),
+      [
+        { code: 'EFBIG', seq: 5, index: 1, id: 9 },
+        { code: 'ENOENT', seq: 6, index: 1, id: 4 },
+        { code: 'ESTALE', seq: 8, index: undefined, id: undefined },
+      ],
+    );
+  });
+
+  it('a refused batch is told once the batches before it published', async () => {
+    const told = [];
+    const ctx = setup({}, undefined, {
+      onError: (err) => told.push([err.seq, ctx.kernel.published.length]),
+    });
+    await ctx.intake.load([ROOT], 0);
+    const one = ctx.intake.submit({ seq: 1, ops: [put(2, 1, 'a', 'a')] });
+    const bad = ctx.intake.submit({ seq: 2, ops: [put(3, 99, 'b', 'b')] });
+    bad.catch(() => {});
+    await ctx.time.advance(10);
+    await one;
+    assert.deepEqual(told, [[2, 2]], 'the load and batch 1 published first');
+  });
+
+  it('a publication the kernel cannot make rejects every batch of it; the kernel hears it', async () => {
+    const { kernel, time, intake } = setup({ seq: 'intake' });
+    await intake.load([ROOT]);
+    const cannot = new Error('no publication');
+    kernel.publish = () => {
+      throw cannot;
+    };
+    const a = intake.submit({ ops: [put(2, 1, 'a', 'a')] });
+    const b = intake.submit({ ops: [put(3, 1, 'b', 'b')] });
+    const rejected = Promise.all([
+      assert.rejects(a, (err) => err === cannot),
+      assert.rejects(b, (err) => err === cannot),
+    ]);
+    await time.advance(10);
+    await rejected;
+    assert.deepEqual(kernel.fatals, [cannot]);
+    const waiting = intake.submit({ ops: [put(4, 1, 'c', 'c')] });
+    const loading = intake.load([ROOT]);
+    await assert.rejects(loading, (err) => err === cannot);
+    await assert.rejects(waiting, (err) => err === cannot);
+    assert.equal(kernel.fatals.length, 2);
   });
 });

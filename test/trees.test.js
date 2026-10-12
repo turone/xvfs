@@ -533,3 +533,53 @@ describe('trees: diagnostics', () => {
     }
   });
 });
+
+describe('trees: what the source gives', () => {
+  it('what structured clone cannot carry is EINVAL at once in every thread; what is kept is a frozen copy', async () => {
+    const { k, done } = await treeKernel({ pages: PAGES });
+    const w = worker(k);
+    try {
+      const t = k.tree('pages');
+      const wt = w.kernel.tree('pages');
+      await t.load([ROOT], 0);
+      assert.ok(await until(() => wt.last === 0));
+      for (const tree of [t, wt]) {
+        const bad = [
+          put(2, 1, 'a', { class: 1, policy: () => true }),
+          put(2, 1, 'a', {
+            class: 1,
+            payload: { data: 'a', meta: { f() {} } },
+          }),
+        ];
+        for (const op of bad) {
+          assert.throws(() => tree.submit({ seq: 1, ops: [op] }), {
+            code: 'EINVAL',
+            index: 0,
+            id: 2,
+          });
+        }
+        const row = { ...page(2, 'a', 'a'), policy: Symbol('p') };
+        assert.throws(() => tree.load([ROOT, row], 1), { code: 'EINVAL' });
+      }
+      assert.equal(k.state, 'ready');
+      const policy = { role: 'admin' };
+      const meta = { title: 'A' };
+      const fields = { class: 1, policy, payload: { data: 'a', meta } };
+      const submitted = wt.submit({ seq: 1, ops: [put(2, 1, 'a', fields)] });
+      policy.role = 'guest';
+      meta.title = 'B';
+      await submitted;
+      for (const tree of [t, wt]) {
+        const node = tree.get('/a');
+        assert.deepEqual(tree.policyOf(node), { role: 'admin' });
+        assert.ok(Object.isFrozen(tree.policyOf(node)));
+        assert.deepEqual(tree.payloadOf(node).meta, { title: 'A' });
+        assert.ok(Object.isFrozen(tree.payloadOf(node).meta));
+      }
+      assert.equal(leakedBytes(k), 0);
+    } finally {
+      w.kernel.close();
+      done();
+    }
+  });
+});
