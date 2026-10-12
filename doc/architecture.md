@@ -1842,9 +1842,9 @@ and without strict a `disk` or `node-default` place is `node:fs`
 territory.
 
 **A virtual directory renames as one node, its subtree with it, when every
-file under it can move as it is — not prepared, not compiled
-(`require.compile`, `fs.script.compile`), without `scriptOptions` or
-`meta` (`immovable`).** Every file keeps its node — its id and `ino` — its
+file under it can move as it is — not prepared, without
+`require.compile` cached data, without `scriptOptions` or `meta`
+(`immovable`); `fs.script.compile` cached data moves along.** Every file keeps its node — its id and `ino` — its
 payload, every representation and its version under the new prefix, in
 one publication that names one pair in `moved`: one `vfs-update` for SAB,
 one commit of its tree for a `map` place. Nothing is copied, prepared, compiled or
@@ -1855,11 +1855,15 @@ children it is `ENOTEMPTY`, onto a file `ENOTDIR`, into itself `EINVAL` —
 before anything changes; the place's own directory never moves. _Why:_ a
 prefix rename changes no content, extension or config, so every
 representation stays valid as it is. What depends on the key cannot be
-carried over — a preparer's input is not kept, bytecode was compiled under
-the old filename, metadata may name the old path — and running the
-pipeline again for a subtree is left for later; moving only the other
-files would split the tree. The node, and every `Representation` object
-with it, stays the same, so a pin on one keeps protecting its bytes.
+carried over — a preparer's input is not kept, require cached data was
+compiled under the old filename, metadata may name the old path — and
+running the pipeline again for a subtree is left for later; moving only
+the other files would split the tree. Script cached data is the bare
+source's, compiled under V8's defaults — the library gives it no
+filename — so it holds under the new prefix as it does after a file
+rename, which moves it as it is (`movesAsIs`). The node, and every
+`Representation` object with it, stays the same, so a pin on one keeps
+protecting its bytes.
 
 **`watch` of managed territory is `ENOTSUP` — a place directory, a
 published file, the strict `appRoot`, a recursive watch of a place or of a

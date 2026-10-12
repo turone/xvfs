@@ -505,8 +505,9 @@ const handler = script.runInThisContext();
   key are `ENOTSUP`: its raw input is not kept. Renaming or copying an
   unprepared entry onto an extension with a preparer publishes it through
   that preparer, once. A directory moves as one node only when no file
-  under it is prepared, compiled or holds path-dependent `scriptOptions` /
-  `meta`: files and compressed representations keep their bytes, ids,
+  under it is prepared, has `require.compile` cached data or holds
+  path-dependent `scriptOptions` / `meta`: files, compressed
+  representations and `fs.script` cached data keep their bytes, ids,
   versions and times, in one publication, and nothing is copied. In a
   disk-origin place mutations edit the raw file and the watcher
   re-prepares it; a copy or a rename hands on the raw file, never the

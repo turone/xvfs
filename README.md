@@ -1693,7 +1693,8 @@ read or written:
 - A directory renamed across a place's boundary — into, out of or between
   places, a place's root included: every descendant would change policy
   at once. And a virtual directory holding a file that cannot move as it
-  is: a prepared or compiled source, or one with path-dependent
+  is: a prepared source, one with `require.compile` cached data
+  (compiled under the file's path), or one with path-dependent
   `scriptOptions` / `meta`, cannot move without its pipeline running
   again.
 - A guarded mutation (below) in a virtual place, `open` with a flag that
@@ -1829,11 +1830,13 @@ A `rename` routes both paths as mutations and its source as a read:
   renamed onto itself changes nothing — no publication, no update — as
   with `node:fs`.
 - A virtual directory moves as one node, everything below it with it, when
-  every file under it can move as it is — no preparer, no bytecode
-  (`require.compile`, `fs.script.compile`), no path-dependent
-  `scriptOptions` / `meta`: files and their compressed representations
-  keep their bytes, ids, versions and times under the new prefix, in one
-  publication; nothing is copied, prepared, compiled or compressed again.
+  every file under it can move as it is — no preparer, no
+  `require.compile` cached data (compiled under the file's path), no
+  path-dependent `scriptOptions` / `meta`: files with their compressed
+  representations and their `fs.script.compile` cached data (the bare
+  source under V8's defaults, no filename) keep their bytes, ids,
+  versions and times under the new prefix, in one publication; nothing
+  is copied, prepared, compiled or compressed again.
   One file that cannot move refuses the whole move (`ENOTSUP`). Onto an
   empty directory it replaces it; onto one with children it is
   `ENOTEMPTY`, onto a file `ENOTDIR`, under a file `ENOTDIR`, into itself

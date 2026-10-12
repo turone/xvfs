@@ -3,6 +3,7 @@
 const { describe, it } = require('node:test');
 const assert = require('node:assert/strict');
 const path = require('node:path');
+const vm = require('node:vm');
 const {
   tmpDir,
   rm,
@@ -20,9 +21,11 @@ const {
 // prefix, in one publication that names the move. Nothing is copied,
 // prepared, compiled or compressed again, nothing retires, and the pool
 // needs no room. One source that cannot move as it is — a prepared one,
-// one with bytecode, one with path-dependent metadata — refuses the whole
-// subtree, and so do collisions and nesting: nothing changes before the
-// commit.
+// one with require cached data (compiled under the file's path), one with
+// path-dependent metadata — refuses the whole subtree, and so do
+// collisions and nesting: nothing changes before the commit. Script
+// cached data, compiled with no filename, moves along, as it does with a
+// file rename.
 
 const PROVIDERS = {
   sab: { origin: 'virtual', fs: { writable: true } },
@@ -127,11 +130,12 @@ describe('virtual subtree rename', () => {
           ...config,
           fs: { ...config.fs, prepare: { wrap: ['js'] } },
         },
-        'fs.script.compile': {
+        'require.compile': { ...config, require: { compile: ['js'] } },
+        'require.compile beside fs.script.compile': {
           ...config,
           fs: { ...config.fs, script: { compile: ['js'] } },
+          require: { compile: ['js'] },
         },
-        'require.compile': { ...config, require: { compile: ['js'] } },
       };
       const preparers = { wrap: (raw) => `(${raw})` };
       for (const [what, placeConfig] of Object.entries(unsupported)) {
@@ -151,6 +155,36 @@ describe('virtual subtree rename', () => {
           { preparers },
         );
       }
+    });
+
+    it(`${name}: a subtree whose files have script cached data moves whole, the cached data with it`, async () => {
+      const scripted = {
+        ...config,
+        fs: { ...config.fs, script: { compile: ['js'] } },
+      };
+      await withPlace(scripted, async (k, v) => {
+        const key = '/d/sub/deep/x.js';
+        await write(v, { ...TREE, [key]: 'globalThis.x = 1;' });
+        const { tree } = k.registry.get('v');
+        const repOf = (at) =>
+          tree.payloadOf(tree.get(at)).others.scriptBytecode;
+        const before = v.script(key);
+        assert.ok(before.cachedData, 'compiled');
+        const rep = repOf(key);
+        const id = v.idOf(key);
+        await v.rename('/d', '/e');
+        const moved = '/e/sub/deep/x.js';
+        const after = v.script(moved);
+        assert.equal(repOf(moved), rep, 'the same representation');
+        assert.deepEqual(after.cachedData, before.cachedData);
+        assert.equal(after.version, before.version);
+        assert.equal(v.idOf(moved), id);
+        assert.equal(v.exists(key), false);
+        const script = new vm.Script(after.source, {
+          cachedData: after.cachedData,
+        });
+        assert.equal(script.cachedDataRejected, false, 'V8 takes it');
+      });
     });
 
     it(`${name}: collisions and nesting are refused before anything changes`, async () => {
