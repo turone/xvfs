@@ -356,7 +356,7 @@ a class from before the removal could differ between threads, which apply
 the commit in their own steps; an error would wrap every call after an
 `await`.
 
-**A commit returns `{ delta, retired, dropped, version }` or refuses, and a refusal
+**A commit returns `{ delta, retired, dropped, placed, version }` or refuses, and a refusal
 changes nothing anyone can observe: an `Error` with a `code`, a numeric
 `index` — the refused op — and a `message`; no delta, no retirement, no
 version; the structure, the order of children, the payloads, the tree's
@@ -832,10 +832,11 @@ them.
 **Compaction copies the published representations of the segment it would
 empty and closes it; retired extents never move. It finds their owners in
 its books — segment → place → offset → node id, which every commit keeps
-(`#book`) — and names each by its node's id and kind — `['relocate', id,
-kind, extent]`, a commit like any other, in an epoch of its own that takes
-no version — never by key; the old extents retire like any replaced
-representation.** _Why:_ moving a retired extent would invalidate its
+from the owners its tree names (`placed`, `#book`): what it gave and the
+node that holds it after the commit, whatever keys its ops named — and
+names each by its node's id and kind — `['relocate', id, kind, extent]`,
+a commit like any other, in an epoch of its own that takes no version —
+never by key; the old extents retire like any replaced representation.** _Why:_ moving a retired extent would invalidate its
 readers; the closed segment returns to the pool when its last retired
 bytes are freed, and an extent placed there before it closed reopens it
 when it is committed. A key has to be built and parsed again, and a move

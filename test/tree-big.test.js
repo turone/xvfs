@@ -100,6 +100,24 @@ const run = (seed) => {
       [...m.dropped].sort(),
       where(ctx, main, 'dropped'),
     );
+    // placed: the owner by its key after the commit (a node the commit made
+    // has a provisional id in the model).
+    const extentOf = (e) => `${e.segmentId}:${e.offset}:${e.length}`;
+    assert.deepEqual(
+      r.placed
+        .map((p) => {
+          const key = main.tree.pathOf(main.tree.byId(p.id));
+          return `${key}|${p.kind}|${extentOf(p.extent)}`;
+        })
+        .sort(),
+      m.placed
+        .map((p) => {
+          const key = model.pathOf(model.byId.get(p.id));
+          return `${key}|${p.kind}|${p.extent}`;
+        })
+        .sort(),
+      where(ctx, main, 'placed'),
+    );
     if (r.delta !== null) {
       noSab(r.delta, where(ctx, main, 'delta'));
       for (const th of threads.slice(1))

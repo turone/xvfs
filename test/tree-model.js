@@ -596,7 +596,8 @@ class ModelTree {
   // Apply `ops` atomically. Throws a refusal ({ code, index, other? }) and
   // changes nothing; else returns the outcome:
   //   { delta: boolean, versioned, structure, policy,
-  //     retired: [{ id, kind, uid, extent }], dropped: [extent] }
+  //     retired: [{ id, kind, uid, extent }], dropped: [extent],
+  //     placed: [{ id, kind, extent }] }
   // where an extent is extentKey() of one.
   commit(ops, next, now) {
     this.#checkArgs(ops, next, now);
@@ -858,8 +859,10 @@ class ModelTree {
 
   // The common end of a successful commit: swap the state in, take the
   // version, set the numbers and the subtree versions, list what retired
-  // — published before, not after — and what dropped: what the commit
-  // made and the state after does not publish, published to no one.
+  // — published before, not after — what dropped: what the commit made
+  // and the state after does not publish, published to no one — and what
+  // it placed: what it made that the state after publishes, with the id
+  // of the node that holds it.
   #finish(st, before, f) {
     const after = ModelTree.published(st.root);
     const retired = [];
@@ -868,9 +871,13 @@ class ModelTree {
         retired.push({ id, kind: rep.kind, uid, extent: extentKey(rep) });
     }
     const dropped = [];
+    const placed = [];
     for (const rep of this.made) {
-      if (!isEmptyExtent(rep) && !after.has(rep.uid))
-        dropped.push(extentKey(rep));
+      if (isEmptyExtent(rep)) continue;
+      const owner = after.get(rep.uid);
+      if (owner === undefined) dropped.push(extentKey(rep));
+      else
+        placed.push({ id: owner.id, kind: rep.kind, extent: extentKey(rep) });
     }
     const delta = f.changed || f.relocated;
     if (f.changed) {
@@ -892,6 +899,7 @@ class ModelTree {
       policy: f.changed && f.policy,
       retired,
       dropped,
+      placed,
     };
   }
 

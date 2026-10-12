@@ -1959,6 +1959,26 @@ const runSeed = (seed) => {
       );
       for (const e of eres.dropped)
         assert.ok(given.has(e), what('a dropped extent the ops did not give'));
+      // placed: as a multiset of (owner, kind, extent) — the owner by its key
+      // after the commit in an FS tree, where a node the commit made has a
+      // provisional id in the model; each extent one the ops gave.
+      const ownerOf = (keyOf) => (id) => (model.fs ? keyOf(id) : String(id));
+      const modelOwner = ownerOf((id) => model.pathOf(model.byId.get(id)));
+      const engineOwner = ownerOf((id) => main.tree.pathOf(main.tree.byId(id)));
+      assert.deepEqual(
+        eres.placed
+          .map((p) => `${engineOwner(p.id)}|${p.kind}|${extentKey(p.extent)}`)
+          .sort(),
+        mres.placed
+          .map((p) => `${modelOwner(p.id)}|${p.kind}|${p.extent}`)
+          .sort(),
+        what('placed'),
+      );
+      for (const p of eres.placed)
+        assert.ok(
+          given.has(p.extent),
+          what('a placed extent the ops did not give'),
+        );
       const ids = new Set();
       for (const r of eres.retired) {
         assert.ok(

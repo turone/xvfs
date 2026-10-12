@@ -573,6 +573,51 @@ describe('nodes: compaction under leases', () => {
       rm(root);
     }
   });
+
+  // The books of compaction name the node that holds a representation after
+  // the commit (the tree's `placed`), not the key a write named: through the
+  // kernel's own seam, with an extent of its pool, a file written under one
+  // key and moved to another in one commit.
+  it('a node written and moved in one commit is booked as itself: compaction relocates it', async () => {
+    const KB = 1024;
+    const root = tmpDir('vfs-nodes');
+    const k = await kernel(
+      root,
+      { v: VIRTUAL },
+      {
+        memory: { limit: '16 kib', segmentSize: '4 kib', maxFileSize: '4 kib' },
+        compaction: { threshold: 0.5 },
+      },
+    );
+    try {
+      const v = k.fs('v');
+      await v.writeFile('/a', Buffer.alloc(2 * KB, 'a'));
+      await v.writeFile('/b', Buffer.alloc(2 * KB, 'b'));
+      const data = Buffer.alloc(200, 'c');
+      const stat = { size: data.length, mtimeMs: 1 };
+      const extent = k.cache.allocateSync({ data, stat });
+      assert.equal(extent.segmentId, 2);
+      const fail = (code) => Object.assign(new Error(code), { code });
+      const ops = [
+        ['write', '/c0', { ...stat, representations: [[0, extent]] }],
+        ['move', '/c0', '/c'],
+      ];
+      await k.changeVirtual(k.registry.get('v'), ops, fail);
+      assert.equal(fileOf(k, 'v', '/c').source.segmentId, 2);
+      // Freeing /a makes segment 2 the target: /c moves to segment 1.
+      await v.unlink('/a');
+      assert.ok(
+        await until(() => fileOf(k, 'v', '/c').source.segmentId === 1),
+        '/c relocated',
+      );
+      assert.equal(v.readFile('/c', 'utf8'), 'c'.repeat(200));
+      assert.ok(await until(() => k.retirements().length === 0));
+      assert.equal(leakedBytes(k), 0);
+    } finally {
+      k.close();
+      rm(root);
+    }
+  });
 });
 
 describe('nodes: a path through a file', () => {
