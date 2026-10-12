@@ -8,6 +8,7 @@ code: a change that alters a decision updates it in the same commit.
 
 Contents: [Purpose](#purpose) · [Module map](#module-map) ·
 [Places and configuration](#places-and-configuration) ·
+[Rules of subtrees](#rules-of-subtrees) ·
 [Storage](#storage) · [Node trees](#node-trees) ·
 [Publication](#publication) ·
 [Lifetime of shared bytes](#lifetime-of-shared-bytes) ·
@@ -72,47 +73,47 @@ SAB segments ──────────── one physical copy ────
 
 ## Module map
 
-| Module                          | Role                                                                                                                                                                                                                                                                                                           |
-| ------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `lib/config.js`                 | `VfsConfig`: raw → deep-frozen `{ global, places, trees }`; domains, `prepare` index, `fs.fallback` normalization; the trees of client ids                                                                                                                                                                     |
-| `lib/cache.js`                  | `Pool` + `SegmentRegistry` + `FilesystemCache`: the SAB allocator only — `allocate()` places bytes privately, `committed()` / `free()` settle them, `compactTarget()` / `relocate()` plan and copy a compaction; it knows extents, never keys                                                                  |
-| `lib/tree.js`                   | The node tree of a place: `createTree()`, `fromSnapshot()`; `commit()` on the main tree, `apply()` of its deltas on a replica; lookups, walks, `snapshot()`                                                                                                                                                    |
-| `lib/tree-plan.js`              | A commit's plan: every check against the tree and an overlay of the commit, then the log of steps that is its delta                                                                                                                                                                                            |
-| `lib/tree-node.js`              | The objects a tree hands out — nodes, payloads, representations — and the numeric columns of its encodings                                                                                                                                                                                                     |
-| `lib/kernel.js`                 | `VfsKernel`: lifecycle, init, the trees of its places, virtual publications, epochs and their commit to the trees (`#flush`), the trees of client ids and the publications of their intakes, freeing retired representations, compaction by node id, mutation queue, `link()`, worker side and its broken view |
-| `lib/epoch.js`                  | Epochs: what one publication gathers per place — the intents of a scan or a watcher epoch, the ops of a mutation or a compaction; `reconcile()` into the tree's ops, `eventsOf()` of what a commit changed in files                                                                                            |
-| `lib/pipeline.js`               | What a file is: `Preparers`, `prepareInput()`, `bytecodeFor()`                                                                                                                                                                                                                                                 |
-| `lib/publication.js`            | `inputOf()`: a source's canonical input, for either sink; the stateless SAB sink, `sharedPublish()`: the payload input and the extents it hands the kernel to stage                                                                                                                                            |
-| `lib/compressor.js`             | `Compressor`: codec work only                                                                                                                                                                                                                                                                                  |
-| `lib/pins.js`                   | `Pins`: per-thread direct consumers of shared representations, keyed by the `Representation` object; `break()` for a broken view                                                                                                                                                                               |
-| `lib/retirement.js`             | `Retirement`: the books of ACK-before-free and the counter of retireIds — retired representations, the ACKs they wait for, their holders; decides what is free, frees nothing                                                                                                                                  |
-| `lib/serial-queue.js`           | `SerialQueue`: one task at a time, arrival order                                                                                                                                                                                                                                                               |
-| `lib/pool.js`                   | `pool()`: a list worked through at most `limit` calls at a time, stopping at the first failure; `IO_LIMIT`                                                                                                                                                                                                     |
-| `lib/place.js`                  | `Place`: its tree (`tree`, `node()`, `file()`, `directory()`, `keyOf()`), its number (`dev`), the spellings of a caseless platform, `visible()`, `cached()`, `scripted()`, `prepared()`, `preparerOf()`, `compressible()`; the kinds of representation                                                         |
-| `lib/place-fs.js`               | `PlaceFs` facade, view leases, disk territory of `fs.fallback: 'disk'`                                                                                                                                                                                                                                         |
-| `lib/views.js`                  | `VfsReadStream` over one pinned representation, `rangeOf()`, the refusal of a closed kernel: what a facade over a tree hands out                                                                                                                                                                               |
-| `lib/client-tree.js`            | `ClientTree`: a tree of client ids in every thread — lookups, nodes, payloads without their bytes, bytes as copies, leases and streams; `submit` and `load`                                                                                                                                                    |
-| `lib/intake.js`                 | `Intake`: the batches of a source for one tree of client ids, on the main thread — numbers, window, parts, gaps, refusals, loads, bytes placed before the commit; `checkBatch()` / `checkLoad()`, in every thread                                                                                              |
-| `lib/registry.js`               | `PlaceRegistry` (path → place, key; `Containment` in `appRoot`) + `FsRouter` (read / mutate / copy / rename / link decisions)                                                                                                                                                                                  |
-| `lib/aliases.js`                | `Aliases` (strict): what the disk says, once each, about other spellings of `appRoot` — its real path, what a drive letter names                                                                                                                                                                               |
-| `lib/links.js`                  | `LinkIndex` (strict, `links: 'deny'`): the links known below the places' directories; whether a path as given passes through one                                                                                                                                                                               |
-| `lib/rules.js`                  | `PathTrie`: a trie of names whose attributes hold down a path — the links strict knows (`LinkIndex`); `foldName()`, how a disk that takes a name in any case compares names                                                                                                                                    |
-| `lib/virtual-store.js`          | `VirtualStore`: the semantics of a virtual place's mutations, once — checks, their order, refusals, the ops they commit (`checkHierarchy`, `mkdirOps`, `movesAsIs`, `immovable`); `KeysInFlight`                                                                                                               |
-| `lib/map-store.js`              | `MapStore` (a `VirtualStore`): mutations at once on the thread's own tree, the bytes in buffers of its own; the map sink of the pipeline                                                                                                                                                                       |
-| `lib/sab-store.js`              | `SabStore` (a `VirtualStore`): main-thread mutations of a `sab + virtual` place, each in its key's turn; keys in flight                                                                                                                                                                                        |
-| `lib/mutation-queue.js`         | `MutationQueue`: per-(place, key) ordering, exclusive place barrier                                                                                                                                                                                                                                            |
-| `lib/mutation-rpc.js`           | `OPS` for both ends; `MutationClient` + `RemoteStore`: worker → main mutations, and the batches and loads of a tree (`sendTree`); `serveMutation()`: the main end, checking each request again                                                                                                                 |
-| `lib/scanner.js`                | `scan()`: directory walk, then stats `IO_LIMIT` at a time → `Map<key, FileInput>` in the order of the walk, and every directory (`dirs`); `linksOf()`: the links below a directory                                                                                                                             |
-| `lib/watch-pipeline.js`         | `WatchPipeline`: watcher epochs into kernel epochs, one at a time (`SerialQueue`), their jobs `IO_LIMIT` at a time; rechecks                                                                                                                                                                                   |
-| `lib/watcher.js`                | `DirWatcher`: `fs.watch` over each place tree (recursive where native, else one per directory) → debounced epochs; `watchPath()`                                                                                                                                                                               |
-| `lib/disk.js`                   | the disk past the patch: `node:fs` captured at load; the native section (`native()`, `inNative()`) for calls that re-enter it; own `fs` for streams                                                                                                                                                            |
-| `lib/stats.js`, `lib/errors.js` | `VfsStats` (`ino`, `dev`, birthtime) / `VfsDirent`, a listing's result (`listing()`); node:fs-shaped errors, the broken view's (`brokenError()`)                                                                                                                                                               |
-| `lib/adapters/fs-patch.js`      | table-driven `node:fs` patch executing router decisions: the operation cores and their variants, guards, glob, watch, the strict root's listing, install                                                                                                                                                       |
-| `lib/adapters/fs-copy.js`       | the copy engine of the patch: a copy's options, the source's raw input, the write through the destination — its store or the disk                                                                                                                                                                              |
-| `lib/adapters/fs-surface.js`    | every export of `node:fs` and `node:fs/promises` the patch knows, and what it does with each: implemented, guarded, delegated, path-free                                                                                                                                                                       |
-| `lib/adapters/fs-dir.js`        | `VfsDir`: the `fs.Dir` of the patch's `opendir`, over a listing taken when the directory is opened, with the `node:fs` close semantics                                                                                                                                                                         |
-| `lib/adapters/module-hook.js`   | `module.registerHooks` resolve/load + `_compile` cached data + `_resolveFilename` (`require.resolve()`)                                                                                                                                                                                                        |
-| `lib/bootstrap/*`               | `register.mjs` (main thread, `--import`), `attach.js` (workers)                                                                                                                                                                                                                                                |
+| Module                          | Role                                                                                                                                                                                                                                                                                                                                 |
+| ------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `lib/config.js`                 | `VfsConfig`: raw → deep-frozen `{ global, places, trees }`; domains, `prepare` index, `fs.fallback` normalization; the trees of client ids                                                                                                                                                                                           |
+| `lib/cache.js`                  | `Pool` + `SegmentRegistry` + `FilesystemCache`: the SAB allocator only — `allocate()` places bytes privately, `committed()` / `free()` settle them, `compactTarget()` / `relocate()` plan and copy a compaction; it knows extents, never keys                                                                                        |
+| `lib/tree.js`                   | The node tree of a place: `createTree()`, `fromSnapshot()`; `commit()` on the main tree, `apply()` of its deltas on a replica; lookups, walks, `snapshot()`                                                                                                                                                                          |
+| `lib/tree-plan.js`              | A commit's plan: every check against the tree and an overlay of the commit, then the log of steps that is its delta                                                                                                                                                                                                                  |
+| `lib/tree-node.js`              | The objects a tree hands out — nodes, payloads, representations — and the numeric columns of its encodings                                                                                                                                                                                                                           |
+| `lib/kernel.js`                 | `VfsKernel`: lifecycle, init, the trees of its places, virtual publications, epochs and their commit to the trees (`#flush`), the trees of client ids and the publications of their intakes, freeing retired representations, compaction by node id, mutation queue, `link()`, worker side and its broken view                       |
+| `lib/epoch.js`                  | Epochs: what one publication gathers per place — the intents of a scan or a watcher epoch, the ops of a mutation or a compaction; `reconcile()` into the tree's ops, `eventsOf()` of what a commit changed in files                                                                                                                  |
+| `lib/pipeline.js`               | What a file is: `Preparers`, `prepareInput()`, `bytecodeFor()`                                                                                                                                                                                                                                                                       |
+| `lib/publication.js`            | `inputOf()`: a source's canonical input, for either sink; the stateless SAB sink, `sharedPublish()`: the payload input and the extents it hands the kernel to stage                                                                                                                                                                  |
+| `lib/compressor.js`             | `Compressor`: codec work only                                                                                                                                                                                                                                                                                                        |
+| `lib/pins.js`                   | `Pins`: per-thread direct consumers of shared representations, keyed by the `Representation` object; `break()` for a broken view                                                                                                                                                                                                     |
+| `lib/retirement.js`             | `Retirement`: the books of ACK-before-free and the counter of retireIds — retired representations, the ACKs they wait for, their holders; decides what is free, frees nothing                                                                                                                                                        |
+| `lib/serial-queue.js`           | `SerialQueue`: one task at a time, arrival order                                                                                                                                                                                                                                                                                     |
+| `lib/pool.js`                   | `pool()`: a list worked through at most `limit` calls at a time, stopping at the first failure; `IO_LIMIT`                                                                                                                                                                                                                           |
+| `lib/place.js`                  | `Place`: its tree (`tree`, `node()`, `file()`, `directory()`, `keyOf()`), its number (`dev`), the spellings of a caseless platform, its rules (`settingsAt()`, `visible()`, `writableAt()`, `rulesBelow()`, `makesParents()`), `cached()`, `scripted()`, `prepared()`, `preparerOf()`, `compressible()`; the kinds of representation |
+| `lib/place-fs.js`               | `PlaceFs` facade, view leases, disk territory of `fs.fallback: 'disk'`                                                                                                                                                                                                                                                               |
+| `lib/views.js`                  | `VfsReadStream` over one pinned representation, `rangeOf()`, the refusal of a closed kernel: what a facade over a tree hands out                                                                                                                                                                                                     |
+| `lib/client-tree.js`            | `ClientTree`: a tree of client ids in every thread — lookups, nodes, payloads without their bytes, bytes as copies, leases and streams; `submit` and `load`                                                                                                                                                                          |
+| `lib/intake.js`                 | `Intake`: the batches of a source for one tree of client ids, on the main thread — numbers, window, parts, gaps, refusals, loads, bytes placed before the commit; `checkBatch()` / `checkLoad()`, in every thread                                                                                                                    |
+| `lib/registry.js`               | `PlaceRegistry` (path → place, key; `Containment` in `appRoot`) + `FsRouter` (read / mutate / copy / rename / link decisions)                                                                                                                                                                                                        |
+| `lib/aliases.js`                | `Aliases` (strict): what the disk says, once each, about other spellings of `appRoot` — its real path, what a drive letter names                                                                                                                                                                                                     |
+| `lib/links.js`                  | `LinkIndex` (strict, `links: 'deny'`): the links known below the places' directories; whether a path as given passes through one                                                                                                                                                                                                     |
+| `lib/rules.js`                  | `PathTrie`: a trie of names whose attributes hold down a path — a place's rules (`PlaceRules`: the settings in force at a key, what the rules below a key restrict), the links strict knows (`LinkIndex`); `foldName()`, how a disk that takes a name in any case compares names                                                     |
+| `lib/virtual-store.js`          | `VirtualStore`: the semantics of a virtual place's mutations, once — checks, their order, refusals, the ops they commit (`checkHierarchy`, `mkdirOps`, `movesAsIs`, `immovable`); `KeysInFlight`                                                                                                                                     |
+| `lib/map-store.js`              | `MapStore` (a `VirtualStore`): mutations at once on the thread's own tree, the bytes in buffers of its own; the map sink of the pipeline                                                                                                                                                                                             |
+| `lib/sab-store.js`              | `SabStore` (a `VirtualStore`): main-thread mutations of a `sab + virtual` place, each in its key's turn; keys in flight                                                                                                                                                                                                              |
+| `lib/mutation-queue.js`         | `MutationQueue`: per-(place, key) ordering, exclusive place barrier                                                                                                                                                                                                                                                                  |
+| `lib/mutation-rpc.js`           | `OPS` for both ends; `MutationClient` + `RemoteStore`: worker → main mutations, and the batches and loads of a tree (`sendTree`); `serveMutation()`: the main end, checking each request again                                                                                                                                       |
+| `lib/scanner.js`                | `scan()`: directory walk, then stats `IO_LIMIT` at a time → `Map<key, FileInput>` in the order of the walk, and every directory (`dirs`); `linksOf()`: the links below a directory                                                                                                                                                   |
+| `lib/watch-pipeline.js`         | `WatchPipeline`: watcher epochs into kernel epochs, one at a time (`SerialQueue`), their jobs `IO_LIMIT` at a time; rechecks                                                                                                                                                                                                         |
+| `lib/watcher.js`                | `DirWatcher`: `fs.watch` over each place tree (recursive where native, else one per directory) → debounced epochs; `watchPath()`                                                                                                                                                                                                     |
+| `lib/disk.js`                   | the disk past the patch: `node:fs` captured at load; the native section (`native()`, `inNative()`) for calls that re-enter it; own `fs` for streams                                                                                                                                                                                  |
+| `lib/stats.js`, `lib/errors.js` | `VfsStats` (`ino`, `dev`, birthtime) / `VfsDirent`, a listing's result (`listing()`); node:fs-shaped errors, the broken view's (`brokenError()`)                                                                                                                                                                                     |
+| `lib/adapters/fs-patch.js`      | table-driven `node:fs` patch executing router decisions: the operation cores and their variants, guards, glob, watch, the strict root's listing, install                                                                                                                                                                             |
+| `lib/adapters/fs-copy.js`       | the copy engine of the patch: a copy's options, the source's raw input, the write through the destination — its store or the disk                                                                                                                                                                                                    |
+| `lib/adapters/fs-surface.js`    | every export of `node:fs` and `node:fs/promises` the patch knows, and what it does with each: implemented, guarded, delegated, path-free                                                                                                                                                                                             |
+| `lib/adapters/fs-dir.js`        | `VfsDir`: the `fs.Dir` of the patch's `opendir`, over a listing taken when the directory is opened, with the `node:fs` close semantics                                                                                                                                                                                               |
+| `lib/adapters/module-hook.js`   | `module.registerHooks` resolve/load + `_compile` cached data + `_resolveFilename` (`require.resolve()`)                                                                                                                                                                                                                              |
+| `lib/bootstrap/*`               | `register.mjs` (main thread, `--import`), `attach.js` (workers)                                                                                                                                                                                                                                                                      |
 
 ## Places and configuration
 
@@ -194,6 +195,75 @@ directory; the strings give the same names, which a test holds to
 `appRoot` list this way. The directory is resolved, not joined with each
 place's name: `path.join('C:', 'site')` is `C:\site`, which is not below
 what `path.resolve('C:')` is.
+
+## Rules of subtrees
+
+**A place's rules (`places.<name>.rules`) give a path of the place, and
+everything below it, settings of their own while the place serves it —
+`'/private': { fs: false }`, `'/static': { fs: { ext: ['html'] },
+require: false }`, `'/system': { fs: { writable: false } }`, `'/legacy':
+{ fs: { fallback: 'disk' } }`. A rule takes a domain off (`false`), gives
+it again below a rule that took it off (`true` or an object: from the
+settings it had there), or changes, within what the place declares, its
+extensions — fewer, never more — `fs.writable` and `fs.fallback`; the
+deepest rule on a path holds there. A rule belongs to a path, not to a
+node: it holds for a path nothing lies at yet, and again once a removed
+tree comes back. Places with a tree only.** _Why:_ a site keeps its
+private files, uploads and system files in one place — one scan, one
+pool, one config — rather than a place for each policy; a policy by path
+is what a web server's locations give. What a file is — its bytecode, its
+compression, its preparer — stays the place's: a rule that changed it
+would make a file's representations depend on where it lies, and a move
+rebuild them. A rule gives no extension the place does not declare,
+which would show a file the place does not hold in memory. A `disk` or
+`node-default` place serves its paths through `node:fs`, its listings
+too: a rule could refuse a read while the listing showed what it hides.
+
+**The settings in force at a key are settled once, from the config, in a
+trie of the rules' paths (`PlaceRules`, lib/rules.js): each node holds the
+place's settings overridden by every rule on the way down to it, and a
+lookup walks the names of a key while the trie has them. Names compare as
+the place compares keys: exactly in a virtual place, without case in a
+disk-origin one on Windows (`foldName`). Two paths of rules equal but for
+case are refused on every platform, as place names are.** _Why:_ a place
+without rules pays nothing — its settings at any key are its config — and
+one with rules a walk of the few names its rules share with a key, most
+often one lookup. On Windows the disk opens `/PRIVATE/x` as `/private/x`:
+a rule compared exactly would let the other spelling through. Kept in the
+nodes of the place's tree, a rule would need a node at a path where none
+lies, and would leave with a directory removed or moved.
+
+**Every decision that read the place's settings reads the key's: the
+routing — a domain off is the place without it (EACCES under strict, else
+`node:fs`), the extensions it sees, its fallback, its writability (EROFS);
+the facade — a path the fs domain does not see is not there: no file, no
+directory, no entry of a listing, which enters no such directory, and a
+write there is EACCES (`PlaceFs.writableAt` asks); the module hooks — a
+domain off where a module lies serves it no more than a place without
+that domain does (refused under strict, Node's own loader's otherwise);
+and the store of a
+virtual place, which checks again whoever routed the mutation — the
+facade, the patch, a worker's request on the main thread. What a place
+publishes, its scan and its watcher take no rule.** _Why:_ one function
+answers each question (`Place.settingsAt`, `visible`, `writableAt`), so no
+path serves by the place's settings what a rule holds otherwise; the
+store is where every mutation of a virtual place is decided, a worker's
+included, whose own checks the main thread does not trust. Rules hold
+while a file is served, not while it is made.
+
+**An operation on a whole tree — a recursive `rm`, a move of a directory
+at its source and at its destination — is refused before any change
+where a rule below its path hides what the settings above that rule show
+(a domain off, fewer extensions, the disk territory refused: EACCES) or
+forbids writes they let through (EROFS); so is a recursive `mkdir` that
+would make a directory its rules refuse above the path: a directory made
+is a write where it lies. What lies below a path is decided by the rules
+alone.** _Why:_ a tree moved takes no rule along — a rule belongs to its
+path — so the hidden part of a directory moved elsewhere would be shown
+there and its read-only part made writable; removed, it would go past
+what forbids its removal. Whether anything lies at a rule's path would
+be asked of the disk, which a disk-origin place's tree may not show yet:
+the rules answer at once, and only refuse more.
 
 ## Storage
 
@@ -2255,6 +2325,8 @@ workers call `attach()`.** _Why:_ preloads do not run in worker threads.
 | Synchronous worker mutations via `Atomics.wait()`                                                               | deadlock- and stall-prone                                                                   |
 | Workers allocating in SAB                                                                                       | one writer keeps the allocator lock-free                                                    |
 | Echoing file bytes in mutation responses                                                                        | the bytes are already in SAB; the update carries metadata                                   |
+| Rules in the nodes of a place's tree                                                                            | a rule holds where no node is; it would leave with a directory moved or removed             |
+| A rule that gives a domain, an extension, compression or a preparer the place lacks                             | what a file is would depend on where it lies                                                |
 | Provisional nodes or payloads in a tree                                                                         | snapshots and compaction would observe unpublished state                                    |
 | Parallel watcher epochs                                                                                         | an older epoch could publish over a newer one                                               |
 | Committing an epoch (`#flush`) outside the kernel                                                               | it commits the trees, retirement, pins and links the kernel owns                            |
@@ -2483,6 +2555,10 @@ length)` views made on each read; `readFile*` returns owned copies;
   it is applied.
 - A node id names one node until the counter wraps; a removed node is dead
   with its subtree.
+- A place serves a key by the settings in force there — its own or its
+  rules' — wherever the key is routed, read, listed, loaded or written; a
+  rule changes nothing a place publishes. An operation on a whole tree
+  that a rule below its path restricts changes nothing.
 - A tree of client ids is written by its intake only, on the main thread:
   its batches in the order of their numbers, a publication a continuous
   run of them, in one synchronous step — no thread sees a state between
@@ -2652,6 +2728,11 @@ payload     version, size, mtimeMs (+ birthtimeMs), scriptOptions?, meta?, and
   engine loads no module of the kernel. `test/nodes.test.js` tests the
   tree in the kernel: ids and `ino`, attributes, moves that copy nothing,
   compaction under leases, a broken view.
+- A place's rules are tested on their own (`test/rules.test.js`: the
+  settings at a key, what the rules below one restrict) and at the
+  boundaries (`test/rules-fs.test.js`): the facade, the patched `node:fs`
+  under strict, the module hooks, the store of a virtual place from either
+  thread.
 - The intake has a test of its own, deterministic (`test/intake.test.js`):
   a real tree of the engine under a clock, timers, a pool and a kernel of
   the test's — numbers, windows and parts, repeats, gaps, refusals, room

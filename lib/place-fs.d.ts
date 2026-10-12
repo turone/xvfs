@@ -145,8 +145,14 @@ export class PlaceFs {
   /** The place's directory: `appRoot/<name>`. */
   get root(): string;
   get provider(): IndexedProvider;
+  /** The place's own `fs.writable`; a key's: `writableAt()`. */
   get writable(): boolean;
   get zeroCopy(): boolean;
+  /**
+   * Whether the place takes writes at `key`: the fs domain on there and
+   * writable, by the settings in force at the key (`rules`).
+   */
+  writableAt(key: string): boolean;
   /** Absolute OS path of a key, also for entries that exist only in memory. */
   pathOf(key: string): string;
   /** A file, or a directory. */

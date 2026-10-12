@@ -26,6 +26,7 @@ expectType<string>()(files.name);
 expectType<string>()(files.root);
 expectType<'sab' | 'map' | 'sea'>()(files.provider);
 expectType<boolean>()(files.writable);
+expectType<boolean>()(files.writableAt('/uploads/a.png'));
 expectType<boolean>()(files.zeroCopy);
 expectType<string>()(files.pathOf('/index.html'));
 expectType<boolean>()(files.exists('/index.html'));

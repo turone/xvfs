@@ -528,7 +528,7 @@ describe('a rename onto itself', () => {
       }
       for (const place of [k.fs('ro'), w.kernel.fs('ro')]) {
         const err = await outcome(() => place.rename('/r.txt', '/r.txt'));
-        refusal(err, 'EROFS', at('ro', '/r.txt'), undefined);
+        refusal(err, 'EROFS', at('ro', '/r.txt'), at('ro', '/r.txt'));
       }
       assert.deepEqual(versions(), before, 'the same versions');
       for (const [i, [key, entry]] of versions().entries()) {

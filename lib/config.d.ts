@@ -164,6 +164,48 @@ export interface PlaceConfig {
   links?: Links | null;
   /** Indexed providers only (`sab`, `map`, `sea`). Both off by default. */
   stat?: StatConfig;
+  /**
+   * What holds from a path of the place down instead of its own settings,
+   * while it serves the path, by key: `'/private': { fs: false }`.
+   * Indexed providers only (`sab`, `map`, `sea`).
+   */
+  rules?: { [key: string]: RuleConfig };
+}
+
+/**
+ * A rule of a place's subtree: per domain `false` (off from its path
+ * down), `true` (on again, as it was before a rule above turned it off)
+ * or what it changes there — within what the place declares: fewer
+ * extensions, never more, and no domain the place lacks. The deepest rule
+ * on a path holds there.
+ */
+export interface RuleConfig {
+  fs?:
+    | boolean
+    | {
+        /** A subset of the place's `fs.ext`. */
+        ext?: readonly string[];
+        /** Not for `sea`. */
+        writable?: boolean;
+        /** Disk-origin places only. */
+        fallback?: Fallback;
+      };
+  /** `ext`: a subset of the place's `require.ext`. */
+  require?: boolean | { ext?: readonly string[] };
+  /** `ext`: a subset of the place's `import.ext`. */
+  import?: boolean | { ext?: readonly string[] };
+}
+
+export interface ResolvedRule {
+  readonly fs?:
+    | false
+    | {
+        readonly ext?: readonly string[];
+        readonly writable?: boolean;
+        readonly fallback?: Fallback;
+      };
+  readonly require?: false | { readonly ext?: readonly string[] };
+  readonly import?: false | { readonly ext?: readonly string[] };
 }
 
 /**
@@ -314,6 +356,8 @@ export interface ResolvedPlace {
   /** Under strict, for a place with a directory on disk; else null. */
   readonly links: Links | null;
   readonly stat: { readonly birthtime: boolean; readonly directories: boolean };
+  /** By key; null without rules. */
+  readonly rules: { readonly [key: string]: ResolvedRule } | null;
 }
 
 export interface ResolvedIntake {

@@ -10,6 +10,7 @@ import type {
   ResolvedFsDomain,
   ResolvedImportDomain,
   ResolvedRequireDomain,
+  ResolvedRule,
   ResolvedScript,
   VfsRawConfig,
 } from 'xvfs';
@@ -137,6 +138,7 @@ type Place = {
   readonly prepare: { readonly [ext: string]: string } | null;
   readonly links: 'deny' | 'verify' | null;
   readonly stat: { readonly birthtime: boolean; readonly directories: boolean };
+  readonly rules: { readonly [key: string]: ResolvedRule } | null;
 };
 expectType<Place[]>()(quickStart.places);
 expectType<Place[]>()(quickStart.allPlaces);
@@ -182,6 +184,26 @@ if (typeof staticFs === 'object') {
   expectType<readonly string[] | undefined>()(staticFs.ext);
 }
 
+// --- Rules of subtrees ---
+
+const ruled = new VfsConfig({
+  places: {
+    site: {
+      fs: { ext: ['html', 'js'], writable: true },
+      require: true,
+      rules: {
+        '/private': { fs: false },
+        '/private/public': { fs: true },
+        '/static': { fs: { ext: ['html'] }, require: false },
+        '/system': { fs: { writable: false } },
+        '/legacy': { fs: { fallback: 'disk' } },
+      },
+    },
+  },
+});
+const rule = ruled.place('site')?.rules?.['/static'];
+if (rule?.fs) expectType<readonly string[] | undefined>()(rule.fs.ext);
+
 // --- CLI overrides ---
 
 expectType<VfsConfig>()(VfsConfig.fromArgv(process.argv));
@@ -224,6 +246,12 @@ new VfsConfig({
 });
 // @ts-expect-error unknown fallback
 new VfsConfig({ places: { p: { fs: { fallback: 'never' } } } });
+new VfsConfig({
+  // @ts-expect-error a rule changes ext, writable and fallback only
+  places: { p: { fs: true, rules: { '/a': { fs: { zeroCopy: true } } } } },
+});
+// @ts-expect-error a rule's domain is a boolean or an object
+new VfsConfig({ places: { p: { fs: true, rules: { '/a': { fs: 'off' } } } } });
 // @ts-expect-error `links` is 'deny' or 'verify': no 'allow'
 new VfsConfig({ defaults: { strict: true, links: 'allow' } });
 // @ts-expect-error `links` is 'deny' or 'verify'

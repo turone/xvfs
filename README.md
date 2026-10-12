@@ -46,7 +46,8 @@ is unsupported.
 
 [Features](#features) · [Install](#install) · [Quick start](#quick-start) ·
 [Providers](#providers) · [Preparation](#preparation-prepare) ·
-[Compression](#compression) · [Strict routing](#strict-routing) ·
+[Compression](#compression) · [Rules of subtrees](#rules-of-subtrees) ·
+[Strict routing](#strict-routing) ·
 [Lifetime of shared bytes](#lifetime-of-shared-bytes) · [API](#api) ·
 [Patched `node:fs`](#patched-nodefs) · [Errors](#errors) ·
 [Protocol](#protocol) · [Examples](#examples) ·
@@ -620,6 +621,53 @@ place moves the file's node, its representations with it (see
 Failures are per representation: a codec that does not fit is skipped
 with a warning; `storedEncodings()` reports what actually exists.
 
+## Rules of subtrees
+
+A place serves a path, and everything below it, by its rules where it
+has them: `places.<name>.rules`, keyed by path.
+
+```js
+places: {
+  site: {
+    fs: { ext: ['html', 'css', 'js', 'txt'], writable: true },
+    require: true,
+    rules: {
+      '/private': { fs: false }, //            not there for node:fs
+      '/private/public': { fs: true }, //      there again below
+      '/static': { fs: { ext: ['html', 'css'] }, require: false },
+      '/system': { fs: { writable: false } },
+      '/legacy': { fs: { fallback: 'disk' } }, // disk-origin places only
+    },
+  },
+}
+```
+
+- A rule sets, per domain, `false` — off from its path down — `true`
+  — on again below a rule that turned it off, with the settings it had —
+  or what it changes: `fs: { ext, writable, fallback }`, `require:
+{ ext }`, `import: { ext }`. The deepest rule on a path holds there.
+- Within what the place declares: fewer extensions, never more, and no
+  domain the place lacks. What a file is — its bytecode, compression,
+  preparer — is the place's; a rule changes how the file is served, not
+  what is published, scanned or watched.
+- Where the fs domain is off, a path is not there: a read is `EACCES`
+  under strict (`node:fs` handles it otherwise, as for a place without
+  fs), the facade has no such file or directory, and a listing names no
+  entry there and enters no such directory; a write there is `EACCES`.
+  Where it may not write, a write is `EROFS` (`placeFs.writableAt(key)`
+  says). Where `require` or `import` is off, the hooks serve no module:
+  under strict it is refused, otherwise Node's own loader takes it, as
+  for a place without that domain.
+- A recursive `rm`, and the move of a directory — at its source and its
+  destination — are refused before any change when a rule below the path
+  hides something (`EACCES`) or forbids writes there (`EROFS`): a tree
+  moved takes no rule with it. A recursive `mkdir` makes no directory
+  where its rules refuse one.
+- Paths compare as the place's keys do: exactly in a virtual place,
+  without case in a disk-origin place on Windows; two rules that differ
+  only in case are a config error everywhere. Places with a tree only
+  (`sab`, `map`, `sea`).
+
 ## Strict routing
 
 ```js
@@ -1060,6 +1108,7 @@ also per place — in [Links on a place's disk](#links-on-a-places-disk-links).
 | `import`          | domain | off           | `true` or `{ ext, prepare }`                                                 |
 | `links`           | string | from defaults | Under strict, a place with a directory on disk: `deny` \| `verify`           |
 | `stat`            | object | both off      | `{ birthtime, directories }`: what the tree keeps; sab/map/sea only          |
+| `rules`           | object | none          | By path: what holds below it ([Rules of subtrees](#rules-of-subtrees))       |
 
 `stat` says what a place's tree keeps beyond a file's size, mtime and
 version: `birthtime`, each file's own — the disk's in a disk-origin
@@ -1461,6 +1510,7 @@ the patched `node:fs` lists with — in the same order, the keys'.
 | `withFileView(key, fn)`                      | Promise                                                        | `fn(view)` under a lease; `null` without calling `fn` when missing                                                                                                                     |
 | `stat(key, opts)`                            | `VfsStats` \| null                                             | Lazy; `{ bigint }` ok; `ino` the node's id, `dev` the place's number; times by `places.<name>.stat`                                                                                    |
 | `exists(key)`                                | bool                                                           | File or directory                                                                                                                                                                      |
+| `writableAt(key)`                            | bool                                                           | Whether the place takes writes at the key, by its rules; `writable` is the place's own `fs.writable`                                                                                   |
 | `version(key)`                               | number \| null                                                 | The commit that published the file ([Versions](#versions)); a directory's with `stat.directories`; null for a missing key, a directory without them, a `map` place, the disk territory |
 | `readdir(key, opts)`                         | string[] \| Buffer[] \| Dirent[]                               | Files and directories, empty ones too; lex order; `{ withFileTypes, recursive, encoding, sep }` or an encoding; recursive names `/`-separated unless `sep: path.sep`                   |
 | `createReadStream(key, opts)`                | `VfsReadStream` \| null                                        | `{ start, end }` inclusive, `zeroCopy`; `release()`                                                                                                                                    |
