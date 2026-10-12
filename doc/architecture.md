@@ -781,18 +781,22 @@ which the GC keeps alive while a view of them lives; no update reuses
 them.
 
 **Compaction copies the published representations of the segment it would
-empty and closes it; retired extents never move. It finds their owners by
-walking the trees and names each by its node's id and kind — `['relocate',
-id, kind, extent]`, a commit like any other, in an epoch of its own that
-takes no version — never by key; the old extents retire like any replaced
+empty and closes it; retired extents never move. It finds their owners in
+its books — segment → place → offset → node id, which every commit keeps
+(`#book`) — and names each by its node's id and kind — `['relocate', id,
+kind, extent]`, a commit like any other, in an epoch of its own that takes
+no version — never by key; the old extents retire like any replaced
 representation.** _Why:_ moving a retired extent would invalidate its
 readers; the closed segment returns to the pool when its last retired
 bytes are freed, and an extent placed there before it closed reopens it
 when it is committed. A key has to be built and parsed again, and a move
 of a directory changes the keys of its subtree: books by key go stale, and
 a relocation by an old key could move another file's representation
-(`rename a → b`, then `write a`). The walk comes first; books of extent →
-(place, id, kind) only if a measurement at 10⁶ files asks for them.
+(`rename a → b`, then `write a`); a move keeps a node's id, and so books
+by id. Found by a walk of the trees, the owners cost every free cycle that
+had a candidate 30 ms at 10⁵ files and 340–360 ms at 10⁶ (the flat index's
+scan: 4.8 and 27–75 ms); the books find them for the cost of one segment —
+2 ms at 10⁵ files and at 10⁶ — and take 37 B a file on the main thread.
 
 ## Preparation
 
@@ -2157,6 +2161,7 @@ workers call `attach()`.** _Why:_ preloads do not run in worker threads.
 | `updateId` checked in the engine; a new snapshot when a delta is missing                                        | a tree sees gaps in `updateId`; the port loses no delta                                     |
 | A two-phase commit across the trees of a publication                                                            | no source needs a transaction across places; a new API and rules between phases             |
 | Relocation, or the books of compaction, by key                                                                  | a key is built and parsed again; a directory move makes the books stale                     |
+| Compaction's owners found by a walk of the trees                                                                | every free cycle with a candidate pays for every file: 340–360 ms at 10⁶                    |
 | `null` or an error from a removed node's operations; its name before the removal                                | threads would disagree; every call after an `await` wrapped                                 |
 | Versions, retireIds and ACKs per tree                                                                           | a publication seen by halves; more messages; the books split                                |
 | A cache of paths and one of misses in the engine                                                                | a walk costs tenths of a µs; past its bound a cache is slower; its removals bred defects    |
