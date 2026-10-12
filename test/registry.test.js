@@ -905,6 +905,87 @@ describe('a published source named in another case, where the disk would answer'
     publish(exact, [['/a.txt', 'A']]);
     assert.equal(exact.spelling('/A.TXT'), null);
   });
+
+  // A map place on a caseless platform knows the spellings of what its
+  // store publishes, at once: its scan, and what the watcher brings.
+  it(
+    'a map + disk place knows the spellings of its files',
+    { skip: process.platform !== 'win32' && 'a caseless platform only' },
+    async () => {
+      const disk = require('node:fs');
+      const helpers = require('./helpers.js');
+      const dir = helpers.writeTree(helpers.tmpDir('vfs-spell'), {
+        'm/Read.ME': 'r',
+      });
+      const k = await helpers.kernel(
+        dir,
+        { m: { provider: 'map', fs: true } },
+        { watch: true, watchTimeout: 60000 },
+      );
+      try {
+        k.watcher.close();
+        const place = k.registry.get('m');
+        assert.equal(place.spelling('/read.me'), '/Read.ME');
+        const at = (name) => path.join(dir, 'm', name);
+        disk.writeFileSync(at('New.TXT'), 'n');
+        k.watcher.emit('epoch', new Map([[at('New.TXT'), 'change']]));
+        await k.watchQueue.idle;
+        assert.equal(place.spelling('/new.txt'), '/New.TXT');
+        disk.unlinkSync(at('Read.ME'));
+        k.watcher.emit('epoch', new Map([[at('Read.ME'), 'delete']]));
+        await k.watchQueue.idle;
+        assert.equal(place.spelling('/read.me'), null);
+      } finally {
+        k.close();
+        helpers.rm(dir);
+      }
+    },
+  );
+
+  // Where file systems take a name in any case, a worker knows the
+  // spellings of what its snapshot brings, and of what each update brings
+  // after it: its replica's own.
+  it(
+    'a worker knows the spellings of its snapshot and of every update',
+    { skip: process.platform !== 'win32' && 'a caseless platform only' },
+    async () => {
+      const disk = require('node:fs');
+      const helpers = require('./helpers.js');
+      const dir = helpers.writeTree(helpers.tmpDir('vfs-spell'), {
+        'site/Read.ME': 'r',
+      });
+      const k = await helpers.kernel(
+        dir,
+        { site: { fs: true } },
+        { watch: true, watchTimeout: 60000 },
+      );
+      const w = helpers.worker(k);
+      try {
+        k.watcher.close();
+        const site = (name) => path.join(dir, 'site', name);
+        const routed = (name) => w.kernel.routeRead(site(name));
+        const place = w.kernel.registry.get('site');
+        assert.deepEqual(routed('read.me'), {
+          kind: 'file',
+          place,
+          key: '/Read.ME',
+        });
+        disk.writeFileSync(site('New.TXT'), 'n');
+        k.watcher.emit('epoch', new Map([[site('New.TXT'), 'change']]));
+        await k.watchQueue.idle;
+        assert.ok(await helpers.until(() => w.kernel.version === k.version));
+        assert.deepEqual(routed('new.txt'), {
+          kind: 'file',
+          place,
+          key: '/New.TXT',
+        });
+      } finally {
+        w.kernel.close();
+        k.close();
+        helpers.rm(dir);
+      }
+    },
+  );
 });
 
 // Containment as path.relative computes it, for both flavors of node:path

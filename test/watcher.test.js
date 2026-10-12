@@ -295,6 +295,98 @@ describe('watcher: one epoch publishes a key once', () => {
 
 // A directory deleted on disk takes its whole subtree along — every
 // representation with its file — and nothing that merely shares its prefix.
+// The tree holds directories of their own (stage B): the scan publishes
+// every directory — an empty one, one holding only files the place does
+// not cache — and the watcher follows the disk, a directory made, gone, or
+// replaced by a file of its name. Epochs by hand.
+describe('watcher: directories', () => {
+  const setup = async () => {
+    const root = writeTree(tmpDir('watch-dirs'), {
+      'site/a.txt': 'a',
+      'site/raw/x.png': 'png',
+    });
+    fs.mkdirSync(path.join(root, 'site', 'empty'));
+    const k = await kernel(
+      root,
+      { site: { fs: { ext: ['txt'], fallback: 'deny' } } },
+      { watch: true, watchTimeout: 60000 },
+    );
+    k.watcher.close();
+    const at = (...p) => path.join(root, 'site', ...p);
+    const epoch = async (entries) => {
+      k.watcher.emit('epoch', new Map(entries));
+      await k.watchQueue.idle;
+    };
+    return {
+      k,
+      at,
+      epoch,
+      site: k.fs('site'),
+      done: () => (k.close(), rm(root)),
+    };
+  };
+
+  it('the scan publishes every directory, an empty one and one of files it does not cache', async () => {
+    const { site, done } = await setup();
+    try {
+      assert.deepEqual(site.readdir(''), ['a.txt', 'empty', 'raw']);
+      assert.deepEqual(site.readdir('/empty'), []);
+      assert.deepEqual(site.readdir('/raw'), [], 'its png is no file of it');
+      assert.ok(site.stat('/raw').isDirectory());
+    } finally {
+      done();
+    }
+  });
+
+  it('a directory made and removed on disk is made and removed in the tree', async () => {
+    const { k, at, epoch, site, done } = await setup();
+    try {
+      fs.mkdirSync(at('new', 'deep'), { recursive: true });
+      await epoch([[at('new'), 'scan']]);
+      assert.deepEqual(site.readdir('/new', { recursive: true }), ['deep']);
+      const version = k.version;
+      fs.rmSync(at('new'), { recursive: true });
+      fs.rmdirSync(at('empty'));
+      await epoch([
+        [at('new'), 'delete'],
+        [at('empty'), 'delete'],
+      ]);
+      assert.equal(site.exists('/new'), false);
+      assert.equal(site.exists('/empty'), false);
+      assert.equal(k.version, version + 1, 'one publication');
+    } finally {
+      done();
+    }
+  });
+
+  it('a directory replaced by a file of its name, and back', async () => {
+    const { at, epoch, site, done } = await setup();
+    try {
+      fs.mkdirSync(at('page.txt'));
+      await epoch([[at('page.txt'), 'scan']]);
+      assert.ok(site.stat('/page.txt').isDirectory());
+      fs.rmdirSync(at('page.txt'));
+      fs.writeFileSync(at('page.txt'), 'now a file');
+      await epoch([[at('page.txt'), 'change']]);
+      assert.equal(site.readFile('/page.txt', 'utf8'), 'now a file');
+      fs.unlinkSync(at('page.txt'));
+      fs.mkdirSync(at('page.txt'));
+      fs.writeFileSync(at('page.txt', 'in.txt'), 'in');
+      await epoch([[at('page.txt'), 'scan']]);
+      assert.ok(site.stat('/page.txt').isDirectory());
+      assert.equal(site.readFile('/page.txt/in.txt', 'utf8'), 'in');
+      // A file the place does not cache takes the name of a directory: the
+      // directory goes, and nothing takes its place.
+      fs.rmdirSync(at('empty'));
+      fs.writeFileSync(at('empty'), 'not cached');
+      await epoch([[at('empty'), 'change']]);
+      assert.equal(site.exists('/empty'), false);
+    } finally {
+      done();
+    }
+  });
+});
+
 describe('watcher: a deleted directory', () => {
   it('unpublishes its subtree and nothing else', async () => {
     const root = writeTree(tmpDir('watch-dir'), {
