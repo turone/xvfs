@@ -340,9 +340,9 @@ is 16–64 % faster and a rename copies nothing, while a lookup walks its
 names — 20–30 ns over the flat index's hit — and a commit plans, logs and
 applies its delta even with no link to send it to: 0.5–0.7 µs a write
 in a steady loop, 1.3 a one-file `writeFiles`, about 5 µs an update to a
-linked worker. A thread holds 407 B a file in its heap where the flat
+linked worker. A thread holds 415 B a file in its heap where the flat
 index held 535; the RSS of most scenarios stays within a few per cent,
-the main thread's under leases (`retain`) grows 17 %.
+the main thread's under leases (`retain`) grows up to 17 %.
 
 **A node is opaque: the engine answers through operations — `get`,
 `childOf`, `children`, `walk`, `countOf`, `pathOf`, `byId`, `nodeId`,

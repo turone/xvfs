@@ -830,11 +830,11 @@ representation: 1–2 ms in that nearly full pool of 10⁶ files.
 | `mem.views.rss`           | 304.7 | 192.2 |
 | `mem.read.rss`            | 201.5 | 255.6 |
 
-| figure, per file (probes)                              | flat | tree |
+| figure, per file (probes; the trees at `6fcddbc`)      | flat | tree |
 | ------------------------------------------------------ | ---: | ---: |
-| main thread, heap (10⁵ files of 100 B, books incl.)    |  535 |  407 |
-| a worker's replica (10⁵ files, `bench … --only tree`)  |    — |  408 |
-| a replica with `stat.birthtime` and `stat.directories` |    — |  438 |
+| main thread, heap (10⁵ files of 100 B, books incl.)    |  535 |  415 |
+| a worker's replica (10⁵ files, `bench … --only tree`)  |    — |  421 |
+| a replica with `stat.birthtime` and `stat.directories` |    — |  450 |
 | a snapshot on the port                                 |    — |   68 |
 
 The engine's code takes 0.4 MiB of every thread's heap
@@ -848,3 +848,57 @@ the rows above only `mem.retain.main.rss` passes the threshold in every
 pair (+17 %), `mem.ack.worker.rss` and `mem.publish.rss` grow 5–6 % in
 every pair without passing it; a run of 200 000 writes under a link
 keeps the heap after a collection flat — nothing grows with writes.
+
+## Trees of client ids and rules of subtrees
+
+The trees of client ids
+([architecture → Trees of client ids](architecture.md#trees-of-client-ids))
+and the rules of subtrees
+([→ Rules of subtrees](architecture.md#rules-of-subtrees)) came after the
+node trees. No scenario configures either but `intake`
+([above](#the-limit-of-a-part-of-an-intakes-run)), so the others measure
+what both cost the code that does not use them:
+`node bench/ab.js ad9f20f 6fcddbc --pairs 4` — the node trees before them
+against the branch's head — over every scenario, on the machine above,
+Node 24.20. Of its 618 figures none is better or worse beyond the
+threshold, 95 move the same way in every pair without passing it, 4
+disagree between pairs, and the others stay.
+
+- **Strict routing through a link is faster** in every pair, 15–24 % by
+  the medians: `router.strict.read.linked` 646 → 537 ns,
+  `router.strict.read.through` 855 → 647, `router.strict.mutate.linked`
+  637 → 539 — beyond the threshold in an earlier run of the same code
+  (633 → 532, 839 → 641, 631 → 516), not in this one, whose base runs
+  spread wider. The index of links walks a path name by name down a trie
+  (`PathTrie`, the rules' own), where it built the key of each directory
+  on the way and looked it up in a set.
+- **Their code** takes 0.26 MiB more of every thread's heap —
+  `memory.start.heap` 6.77 → 7.03 MiB, `pool.sab.8.workers.heap`
+  64.7 → 66.9 for eight workers — and 1.7 ms more of a `require` of the
+  kernel, 24.5 → 26.3 ms (a probe: a fresh process each time, 30 a side,
+  alternating), 1 ms of it `lib/intake.js` and `lib/client-tree.js`: a
+  worker pays it once, as it starts.
+- **Per call and per file, nothing measurable.** The leases (`views`),
+  8–10 % slower in every pair of the earlier run, stay in this one; run
+  alone, 8 pairs of `views` move within 8 % both ways. Per file the trees
+  hold what they did at `ad9f20f`: 415 B on the main thread, 421 B a
+  replica, 450 B with `stat.birthtime` and `stat.directories` (the table
+  above). `mem.compact.rss` grows in every pair of both runs, 86 → 100
+  and 86 → 105 MiB by the medians: it is taken right after one
+  collection, while the segments of the 103 kernels the scenario made and
+  closed before it may still wait for the OS; settled, a probe of the
+  same kernels finds 1 MiB between the two revisions and every closed
+  kernel collected.
+
+The branch as a whole against `main`,
+`node bench/ab.js main 6fcddbc --pairs 4` over every scenario: of 618
+figures 4 are better beyond the threshold, 63 worse, 137 move the same
+way in every pair without passing it, 4 disagree — the balance of the
+node trees' run above. Every figure of its tables but memory lies within
+9 % of this run's — the A/A band of an `ns/op` figure is 14 % — and of
+memory the heap is 0.26 MiB more a thread, while `mem.compact.rss` and
+`mem.views.rss` move with the collector; `mem.retain.main.rss`, 17 %
+above `main` in that run, is level with it in this one (88.6 against
+89.3 MiB: `main`'s own figure moved). The three strict figures of links,
+level with `main` there, are better than `main` here in every pair,
+15–23 % by the medians.

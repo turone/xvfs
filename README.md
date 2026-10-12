@@ -289,8 +289,8 @@ are never scanned and hold no VFS entries. `disk` differs from
 `node-default` only in being _managed_ — the router applies the fs
 domain's writable policy and strict routing to it.
 
-An indexed place costs every thread its tree — about 400 B a file in the
-main thread and in each worker, 440 B with `stat.birthtime` and
+An indexed place costs every thread its tree — about 420 B a file in the
+main thread and in each worker, 450 B with `stat.birthtime` and
 `stat.directories`, and about 100 B more for each representation the
 thread has read (its view, kept from the first read) — beside the bytes,
 which a `sab` or `sea` place keeps once, in shared memory
