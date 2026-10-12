@@ -143,25 +143,42 @@ describe('nodes: attributes', () => {
     }
   });
 
+  // The clock is the test's: a child added a few seconds later moves the
+  // directory's mtime, and its birthtime only where the place keeps one.
   it('directories: a directory has the version and times of its last change; without, 0', async () => {
     const root = tmpDir('vfs-nodes');
-    const k = await kernel(root, {
-      v: { ...VIRTUAL, stat: { directories: true } },
-      plain: VIRTUAL,
-    });
+    const realNow = Date.now;
+    let now = 1_000_000;
+    Date.now = () => now;
+    let k = null;
     try {
+      k = await kernel(root, {
+        v: { ...VIRTUAL, stat: { directories: true, birthtime: true } },
+        d: { ...VIRTUAL, stat: { directories: true } },
+        plain: VIRTUAL,
+      });
       const v = k.fs('v');
       await v.mkdir('/d');
       const made = v.stat('/d');
       assert.ok(made.isDirectory());
-      assert.ok(made.mtimeMs > 0);
-      assert.equal(made.birthtimeMs, made.mtimeMs);
+      assert.equal(made.mtimeMs, 1_000_000);
+      assert.equal(made.birthtimeMs, 1_000_000);
       const { tree } = k.registry.get('v');
       const before = tree.payloadOf(tree.get('/d')).version;
+      now += 5000;
       await v.writeFile('/d/a.txt', 'a');
       const after = tree.payloadOf(tree.get('/d')).version;
       assert.ok(after > before, 'a child added changes it');
-      assert.equal(v.stat('/d').birthtimeMs, made.birthtimeMs, 'kept');
+      const changed = v.stat('/d');
+      assert.equal(changed.mtimeMs, 1_005_000, 'its mtime, with its children');
+      assert.equal(changed.birthtimeMs, 1_000_000, 'its birthtime, kept');
+      const d = k.fs('d');
+      await d.mkdir('/d');
+      now += 5000;
+      await d.writeFile('/d/a.txt', 'a');
+      const own = d.stat('/d');
+      assert.equal(own.mtimeMs, 1_010_000);
+      assert.equal(own.birthtimeMs, own.mtimeMs, 'no birthtime kept: mtime');
       const plain = k.fs('plain');
       await plain.mkdir('/d');
       assert.equal(plain.stat('/d').mtimeMs, 0);
@@ -172,7 +189,8 @@ describe('nodes: attributes', () => {
         null,
       );
     } finally {
-      k.close();
+      Date.now = realNow;
+      k?.close();
       rm(root);
     }
   });
