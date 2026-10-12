@@ -772,17 +772,19 @@ describe('watcher: a job in flight at close()', () => {
     const at = path.join(root, 'site', 'a.txt');
     fs.writeFileSync(at, 'b');
     const calls = diskCalls();
+    // Its stat, the spelling of its name where the disk takes any case
+    // (realpath), then the open of its read.
+    const before = k.registry.get('site').caseless ? 3 : 2;
     try {
       const first = k.nextUpdateId;
       k.watcher.emit('epoch', new Map([[at, 'change']]));
-      // Its stat, then the open of its read.
-      await calls.started(2);
+      await calls.started(before);
       const idle = k.watchQueue.idle;
       closed = true;
       k.close();
       const atClose = calls.count;
       await within(idle, 'the epoch, closed');
-      assert.equal(atClose, 2);
+      assert.equal(atClose, before);
       assert.equal(calls.count - atClose, 4, 'the rest of the read only');
       assert.equal(prepared, 0, 'no preparer after close()');
       assert.deepEqual(logs, [], 'nothing logged');

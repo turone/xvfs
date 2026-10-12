@@ -942,6 +942,55 @@ describe('a published source named in another case, where the disk would answer'
     },
   );
 
+  // A rename that changes only the case: on such a disk the old spelling
+  // still stats — DirWatcher names it a change, or a rescan for a
+  // directory — but the disk spells it the new way, so the old key goes and
+  // the new one comes: the tree never holds both.
+  it(
+    'a rename that changes only the case leaves one spelling',
+    { skip: process.platform !== 'win32' && 'a caseless platform only' },
+    async () => {
+      const disk = require('node:fs');
+      const helpers = require('./helpers.js');
+      for (const provider of ['sab', 'map']) {
+        const dir = helpers.writeTree(helpers.tmpDir('vfs-case'), {
+          'p/Dir/File.js': '1',
+          'p/data.txt': 'd',
+        });
+        const k = await helpers.kernel(
+          dir,
+          { p: { provider, fs: true } },
+          { watch: true, watchTimeout: 60000 },
+        );
+        try {
+          k.watcher.close();
+          const p = k.fs('p');
+          const at = (...names) => path.join(dir, 'p', ...names);
+          const epoch = async (events) => {
+            k.watcher.emit('epoch', new Map(events));
+            await k.watchQueue.idle;
+          };
+          disk.renameSync(at('Dir', 'File.js'), at('Dir', 'FILE.js'));
+          await epoch([
+            [at('Dir', 'File.js'), 'change'],
+            [at('Dir', 'FILE.js'), 'change'],
+          ]);
+          assert.deepEqual(p.readdir('/Dir'), ['FILE.js'], provider);
+          disk.renameSync(at('Dir'), at('DIR'));
+          await epoch([
+            [at('Dir'), 'scan'],
+            [at('DIR'), 'scan'],
+          ]);
+          assert.deepEqual(p.readdir(''), ['DIR', 'data.txt'], provider);
+          assert.deepEqual(p.readdir('/DIR'), ['FILE.js'], provider);
+        } finally {
+          k.close();
+          helpers.rm(dir);
+        }
+      }
+    },
+  );
+
   // Where file systems take a name in any case, a worker knows the
   // spellings of what its snapshot brings, and of what each update brings
   // after it: its replica's own.

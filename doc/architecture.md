@@ -646,6 +646,14 @@ and missed new files, and from Node 26.10 a refusal reached it as an
 uncaught exception. One watch per directory is also what inotify costs at
 least.
 
+**On a disk that takes a name in any case the watcher asks the disk how
+it spells a name it is told of (`realpath`, `spelledSo`): spelled otherwise
+in its case alone, the key is gone, and the event of the new spelling
+publishes the file or rescans the directory.** _Why:_ such a disk stats a
+name in any case, so after a rename that changed only the case DirWatcher
+named the old spelling a change — or a rescan — and both spellings stayed
+in the tree, listed in every worker.
+
 **The watcher publishes no link the scan would not: a rescan starts only
 at a real directory (`scan()` lstats its `startPath`), and under strict a
 changed file is taken by its own stats — a link at a watched key is no
