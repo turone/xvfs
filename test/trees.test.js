@@ -595,3 +595,23 @@ describe('trees: what the source gives', () => {
     }
   });
 });
+
+describe('trees: the rule of containers', () => {
+  it('a thread sets its own, each class once', async () => {
+    const { k, done } = await treeKernel({ pages: PAGES });
+    try {
+      const t = k.tree('pages');
+      t.containers = [0, 1];
+      assert.deepEqual(t.containers, [0, 1]);
+      assert.throws(
+        () => {
+          t.containers = [1, 1];
+        },
+        { code: 'EINVAL' },
+      );
+      assert.deepEqual(t.containers, [0, 1], 'as it was');
+    } finally {
+      done();
+    }
+  });
+});
