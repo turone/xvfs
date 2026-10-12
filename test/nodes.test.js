@@ -25,7 +25,8 @@ const {
 } = require('./helpers.js');
 
 // What a place's tree gives the FS layer (lib/tree.js, stage B): a node per
-// file and per directory, its id the `ino` of its stats in every thread and
+// file and per directory, its id the `ino` of its stats — in every thread
+// for a shared place, a `map` place's tree being each thread's own — and
 // kept by a move; the attributes a place keeps; a move that copies
 // nothing; a worker whose view breaks when an update cannot be applied;
 // and the two pure steps of an epoch (lib/epoch.js).
@@ -33,7 +34,7 @@ const {
 const VIRTUAL = { origin: 'virtual', fs: { writable: true, zeroCopy: true } };
 
 describe('nodes: ids', () => {
-  it('ino is the node id, the same in every thread; dev the place; a move keeps both', async () => {
+  it('ino is the node id, the same in every thread of a shared place; dev the place; a move keeps both', async () => {
     const root = tmpDir('vfs-nodes');
     const k = await kernel(root, {
       v: VIRTUAL,

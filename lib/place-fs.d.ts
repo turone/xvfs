@@ -162,9 +162,10 @@ export class PlaceFs {
   version(key: string): number | null;
   /**
    * The id of the node `key` names — a directory, or a file the fs domain
-   * sees — as `stat().ino` gives it: the same in every thread, kept by a
-   * move, never another node's until the ids wrap. Null for nothing there
-   * and the disk territory.
+   * sees — as `stat().ino` gives it: kept by a move, never another node's
+   * until the ids wrap; the same in every thread for a shared place
+   * (`sab`, `sea`), the thread's own count for a `map` place, whose tree
+   * is the thread's. Null for nothing there and the disk territory.
    */
   idOf(key: string): number | null;
   /** The key of the node with this id now, `''` for the place's; or null. */

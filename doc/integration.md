@@ -28,7 +28,8 @@ Invariants:
   takes the commits; a worker's replica applies each commit's delta with
   the very code the main tree applied it with, so the two cannot drift
   apart. A directory is a node, a rename moves a node and copies
-  nothing, and `stat().ino` is the node's id in every thread.
+  nothing, and `stat().ino` is the node's id — in every thread, for a
+  shared place; a `map` place's tree is each thread's own.
 - Workers never write SAB directly; a `sab + virtual` write from a worker
   goes through the mutation RPC and is applied by the main kernel.
 - A virtual place keeps a filesystem's hierarchy: a write into a
@@ -583,8 +584,8 @@ never returned to the OS.
 **Why a tree of nodes.** A directory is a node, so a listing reads its
 children and an empty directory exists; a rename re-links one node — a
 file or a whole directory — copying no byte and retiring nothing; a
-node's id is its `ino` in every thread. The main tree and the replicas
-apply the same delta with the same code. Details:
+node's id is its `ino` in every thread of a shared place. The main tree
+and the replicas apply the same delta with the same code. Details:
 [architecture.md](architecture.md).
 
 **Why representations.** A file's node holds one payload: its source and

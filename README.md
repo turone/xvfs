@@ -69,7 +69,8 @@ Storage and origins:
 - **A tree of nodes** — every thread holds each place as a tree:
   directories are nodes of their own (`mkdir`, `rmdir`, an empty one
   listed), a rename moves a file or a whole directory without copying a
-  byte, and `stat().ino` is the node's id, the same in every thread.
+  byte, and `stat().ino` is the node's id — the same in every thread
+  for a shared place, the thread's own count for a `map` one.
 - **Worker-local places** — a `map` place keeps its files in each
   thread's own memory; with `origin: 'virtual'` it is that thread's own
   filesystem: synchronous writes, a filesystem's hierarchy, `require()` of
@@ -1474,7 +1475,7 @@ the patched `node:fs` lists with — in the same order, the keys'.
 | `writeFile` / `appendFile` / `unlink`        | void \| Promise                                                | Sync for map/disk; Promise for `sab + virtual`                                                                                                                                         |
 | `writeFiles(files, opts)`                    | void \| `Promise<number>`                                      | Several files of a virtual place as one publication, or none — [writeFiles](#several-files-as-one-writefiles); the version of its commit                                               |
 | `mkdir` / `rmdir` / `rm` / `rename`          | void \| Promise                                                | `mkdir` makes a directory, `rmdir` removes an empty one; `rename` moves a file or a directory, copying nothing; `ENOTSUP` for `appendFile` / moving a prepared key                     |
-| `idOf(key)` / `keyOf(id)`                    | number \| null / string \| null                                | The node's id — `stat().ino`, the same in every thread, kept by a move — and the key that has it now                                                                                   |
+| `idOf(key)` / `keyOf(id)`                    | number \| null / string \| null                                | The node's id — `stat().ino`, kept by a move; one in every thread but for `map` — and the key that has it now                                                                          |
 
 A virtual place keeps the hierarchy of a filesystem: a path is a file or a
 directory, never both, and a directory is a node of its own, as on disk:
