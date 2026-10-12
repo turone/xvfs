@@ -83,6 +83,12 @@ Storage and origins:
   `MessagePort` created by `kernel.link()` and attached with
   `attach({ link })`): generated code, fetched data, fixtures, with no
   file on disk.
+- **Trees of client ids** — an application's own tree — the pages of a
+  site, a catalogue — its nodes named by its source's ids, their bytes in
+  the same shared memory, the same in every thread: written only by the
+  batches of the source, in the order of their numbers, from any thread,
+  and read under policies (`allow`) —
+  [Trees of client ids](#trees-of-client-ids).
 
 Publication:
 
@@ -117,6 +123,10 @@ Control:
   read-only places stay read-only through every `node:fs` form, and
   `fs.fallback` and `links` decide what reaches a place's disk — a
   declared policy, not OS-level isolation.
+- **Rules of subtrees** — `places.<name>.rules` hide a path from a
+  domain, show fewer extensions there, make it read-only or writable, or
+  change its fallback, from that path down —
+  [Rules of subtrees](#rules-of-subtrees).
 - **Immutable published versions** — a reader finishes the version it
   started with; a failed preparation keeps the last good one; nothing is
   freed on a timeout.
