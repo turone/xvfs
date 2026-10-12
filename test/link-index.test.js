@@ -153,6 +153,19 @@ describe('LinkIndex, Windows paths', () => {
     },
   );
 
+  // NTFS equates a final sigma with a sigma, which lower-casing keeps apart
+  // by its place in the word.
+  it('without case as the disk compares: a final sigma is a sigma', () => {
+    for (const floor of [null, 'C:\\App']) {
+      const x = new LinkIndex(path.win32, { floor });
+      x.add('C:\\App\\d\\ΛΟΓΟΣ');
+      assert.equal(x.crosses('C:\\app\\d\\λογος\\x'), true);
+      assert.equal(x.crosses('C:\\app\\d\\λογοσ\\x'), true);
+      assert.equal(x.crosses('C:\\app\\d\\ΛΟΓΟΣ\\x'), true);
+      assert.equal(x.holds(x.key('C:\\app\\d\\λογος')), true);
+    }
+  });
+
   it('list gives the keys as kept; add takes them back', () => {
     const x = new LinkIndex(path.win32);
     x.add('C:\\App\\J');

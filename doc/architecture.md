@@ -96,6 +96,7 @@ SAB segments ──────────── one physical copy ────
 | `lib/registry.js`               | `PlaceRegistry` (path → place, key; `Containment` in `appRoot`) + `FsRouter` (read / mutate / copy / rename / link decisions)                                                                                                                                                                                  |
 | `lib/aliases.js`                | `Aliases` (strict): what the disk says, once each, about other spellings of `appRoot` — its real path, what a drive letter names                                                                                                                                                                               |
 | `lib/links.js`                  | `LinkIndex` (strict, `links: 'deny'`): the links known below the places' directories; whether a path as given passes through one                                                                                                                                                                               |
+| `lib/rules.js`                  | `PathTrie`: a trie of names whose attributes hold down a path — the links strict knows (`LinkIndex`); `foldName()`, how a disk that takes a name in any case compares names                                                                                                                                    |
 | `lib/virtual-store.js`          | `VirtualStore`: the semantics of a virtual place's mutations, once — checks, their order, refusals, the ops they commit (`checkHierarchy`, `mkdirOps`, `movesAsIs`, `immovable`); `KeysInFlight`                                                                                                               |
 | `lib/map-store.js`              | `MapStore` (a `VirtualStore`): mutations at once on the thread's own tree, the bytes in buffers of its own; the map sink of the pipeline                                                                                                                                                                       |
 | `lib/sab-store.js`              | `SabStore` (a `VirtualStore`): main-thread mutations of a `sab + virtual` place, each in its key's turn; keys in flight                                                                                                                                                                                        |
@@ -1499,17 +1500,22 @@ under strict, and without strict nothing is asked.
 **The index is asked about the path as the OS gets it — on Windows as
 `node:fs` resolves it first, a drive-relative or root-relative one
 included; on POSIX as given — name by name, each name before a `..` after
-it applies (`LinkIndex.crosses`), without case on Windows and macOS; a
+it applies (`LinkIndex.crosses`), without case on Windows and macOS —
+as their disks compare names, a final sigma as a sigma (`foldName`); a
 call that does not follow its last name — `lstat`, `readlink`, the `l*`
 forms, and the routing of `unlink`, `rmdir`, `rm`, `rename` and the path a
 `symlink` makes — leaves that name out (`own`), but not with a trailing
 separator, `.` or `..` after it. The index asks no disk and only grows: a
 known link stays refused until the kernel restarts, even once removed or
-replaced by another process; a directory with no known link below ends
-the check.** _Why:_ POSIX resolves `link/..` through the link, and the
-platforms resolve a last name's `.`, `..` and trailing separator
+replaced by another process. A link is an attribute of its path that
+holds down it, kept in a trie of names (`PathTrie`, lib/rules.js) as a
+place's rules are: a directory with no known link below has no node,
+and ends the check.** _Why:_ POSIX resolves `link/..` through the link,
+and the platforms resolve a last name's `.`, `..` and trailing separator
 differently, so they follow it. A key built from the path as given missed
-the OS's own reading of it (`C:d\jro\…`, `\Users\…\jro\…`). Nothing in the
+the OS's own reading of it (`C:d\jro\…`, `\Users\…\jro\…`).
+Lower-casing alone kept `λογος` and `λογοσ` apart, which NTFS equates:
+a link so named was crossed unseen. Nothing in the
 process changes a link on a place's disk (next), so there is nothing to
 forget but what another process removed — which only refuses more.
 
