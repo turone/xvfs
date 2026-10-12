@@ -474,6 +474,54 @@ describe('nodes: compaction under leases', () => {
   });
 });
 
+describe('nodes: a path through a file', () => {
+  // The node a path broke off at (Tree.match): past a file the fs domain
+  // sees, the patched node:fs answers ENOTDIR, as node:fs does, and so does
+  // readdir; past a file it does not see, strict refuses as for any path
+  // the place does not serve.
+  it('is ENOTDIR past a file the fs domain sees, as node:fs answers', async () => {
+    const root = writeTree(tmpDir('vfs-nodes'), {
+      'lib/a.txt': 'a',
+      'lib/m.js': 'module.exports = 1;',
+    });
+    const k = await kernel(
+      root,
+      {
+        v: VIRTUAL,
+        lib: { fs: { ext: ['txt'] }, require: { ext: ['js'] } },
+      },
+      { strict: true },
+    );
+    const fsPatch = require('../lib/adapters/fs-patch.js');
+    try {
+      await k.fs('v').writeFile('/a.txt', 'a');
+      fsPatch.install(k);
+      for (const under of [
+        path.join(root, 'v', 'a.txt', 'x'),
+        path.join(root, 'lib', 'a.txt', 'x', 'y'),
+      ]) {
+        for (const call of [
+          () => fs.statSync(under),
+          () => fs.readFileSync(under),
+          () => fs.readdirSync(under),
+        ]) {
+          assert.throws(call, { code: 'ENOTDIR' }, under);
+        }
+        assert.equal(fs.existsSync(under), false);
+      }
+      assert.throws(() => k.fs('v').readdir('/a.txt/sub'), {
+        code: 'ENOTDIR',
+      });
+      const hidden = path.join(root, 'lib', 'm.js', 'x');
+      assert.throws(() => fs.statSync(hidden), { code: 'EACCES' });
+    } finally {
+      fsPatch.uninstall();
+      k.close();
+      rm(root);
+    }
+  });
+});
+
 describe('nodes: a broken view', () => {
   // A delta a worker cannot apply breaks its view in the same step
   // (kernel.js, #break): every VFS call of the thread is the closed kernel

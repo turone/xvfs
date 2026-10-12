@@ -1560,6 +1560,15 @@ standing in for canonical (prepared) content or an unpublished version; a
 native listing of a disk-only directory showed such raw files. The
 non-strict default keeps its permissive reads.
 
+**A path through a file a place serves to the fs domain is `ENOTDIR`, as
+`node:fs` answers it — through the patched `node:fs` and the `readdir` of
+the facade: `Tree.match` names the node a path broke off at
+(`Place.throughFile`), one walk, on a miss alone. Past a file the domain
+does not see, the place answers as for any path it does not serve.**
+_Why:_ `stat`, `readFile` and `readdir` of `a.txt/x` said ENOENT, or
+EACCES under strict, where `node:fs` says ENOTDIR; a file the domain sees
+is no secret, one it does not see must not show through the code.
+
 **A key keeps its case — in the tree, in keys, in errors. Where the disk
 would answer a miss — the non-strict `'disk'` fallback, and Node's own
 loader behind the module hooks without strict — a path naming a published
