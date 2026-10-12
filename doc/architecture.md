@@ -77,7 +77,7 @@ SAB segments ──────────── one physical copy ────
 | `lib/tree-plan.js`              | A commit's plan: every check against the tree and an overlay of the commit, then the log of steps that is its delta                                                                                                                                    |
 | `lib/tree-node.js`              | The objects a tree hands out — nodes, payloads, representations — and the numeric columns of its encodings                                                                                                                                             |
 | `lib/kernel.js`                 | `VfsKernel`: lifecycle, init, the trees of its places, virtual publications, epochs and their commit to the trees (`#flush`), freeing retired representations, compaction by node id, mutation queue, `link()`, worker side and its broken view        |
-| `lib/epoch.js`                  | Epochs: what one publication gathers per place — the intents of a scan or a watcher epoch, the ops of a mutation or a compaction; `reconcile()` into the tree's ops, `survey()` of what they change in files                                           |
+| `lib/epoch.js`                  | Epochs: what one publication gathers per place — the intents of a scan or a watcher epoch, the ops of a mutation or a compaction; `reconcile()` into the tree's ops, `eventsOf()` of what a commit changed in files                                    |
 | `lib/pipeline.js`               | What a file is: `Preparers`, `prepareInput()`, `bytecodeFor()`                                                                                                                                                                                         |
 | `lib/publication.js`            | `inputOf()`: a source's canonical input, for either sink; the stateless SAB sink, `sharedPublish()`: the payload input and the extents it hands the kernel to stage                                                                                    |
 | `lib/compressor.js`             | `Compressor`: codec work only                                                                                                                                                                                                                          |
@@ -356,7 +356,7 @@ a class from before the removal could differ between threads, which apply
 the commit in their own steps; an error would wrap every call after an
 `await`.
 
-**A commit returns `{ delta, retired, dropped, placed, version }` or refuses, and a refusal
+**A commit returns `{ delta, retired, dropped, placed, changes, version }` or refuses, and a refusal
 changes nothing anyone can observe: an `Error` with a `code`, a numeric
 `index` — the refused op — and a `message`; no delta, no retirement, no
 version; the structure, the order of children, the payloads, the tree's
@@ -564,10 +564,13 @@ different version in each.
 `EventEmitter`, and a publication of a newer version is one `'publish'`
 event in every thread: its version and, by place, the keys of the files
 it created, replaced and removed and the `[from, to]` of each node it
-moved, deep-frozen — lists the main thread makes of the commit's ops
-(`survey()`, `lib/epoch.js`) and sends in the update, where a worker
-takes them. `#announce` emits it in a microtask of its own, which
-drops it once `close()` has come; `close()` emits `'close'` once, in a
+moved, deep-frozen — lists the main thread makes of what the tree says
+the commit did to its nodes (`changes`, `eventsOf()` in `lib/epoch.js`):
+the state after the commit, whatever the order of its ops — a key
+created and removed in one commit is named nowhere, a node written and
+moved is in `moved` and, under its new key, in `replaced` — and sends
+in the update, where a worker takes them. `#announce` emits it in a
+microtask of its own, which drops it once `close()` has come; `close()` emits `'close'` once, in a
 microtask, then drops every listener. The lists are built only when
 there is a listener. No `'error'` is ever emitted; what a listener throws
 is an uncaught exception.** _Why:_ an application reacts to what was
@@ -612,9 +615,10 @@ last word for a key winning — of which `reconcile()` makes the tree's ops
 against the tree as it is: removals first, then directories, every
 missing one down to a key, a file in the way unlinked, then files with
 their missing directories, a directory in the way removed. A mutation or
-a compaction gathers the ops themselves, in order. `survey()` says what a
-commit's ops change in files — created, replaced, removed, moved — before
-the tree takes them. Each place is a commit of its own, and a refusal of
+a compaction gathers the ops themselves, in order. The tree says what a
+commit did to its nodes (`changes`), and `eventsOf()` makes of it what
+changed in files — created, replaced, removed, moved — and the keys the
+nodes it killed had. Each place is a commit of its own, and a refusal of
 one tree is its source's: a watcher epoch drops the refused intent, frees
 its bytes, warns, rechecks the key and commits the rest; a compaction
 frees its copies and reopens its segment; init and a mutation fail.**

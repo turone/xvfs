@@ -79,12 +79,13 @@ const run = (seed) => {
     ctx.step++;
     ctx.now += 3;
     next += 1;
+    const options = { changes: true };
     const m = isLoad
-      ? model.load(ops, next, ctx.now)
-      : model.commit(ops, next, ctx.now);
+      ? model.load(ops, next, ctx.now, options)
+      : model.commit(ops, next, ctx.now, options);
     const r = isLoad
-      ? main.tree.load(ops, next, ctx.now)
-      : main.tree.commit(ops, next, ctx.now);
+      ? main.tree.load(ops, next, ctx.now, options)
+      : main.tree.commit(ops, next, ctx.now, options);
     assert.equal(r.version, model.version, where(ctx, main, 'version'));
     // retired as a multiset of (id, kind, extent), as the model test has it
     const want = m.retired.map((x) => `${x.id}|${x.kind}|${x.extent}`).sort();
@@ -117,6 +118,19 @@ const run = (seed) => {
         })
         .sort(),
       where(ctx, main, 'placed'),
+    );
+    // changes: what lives by its key after the commit, what moved or died by
+    // its key before.
+    const sideOf = (c, keyOf) => ({
+      created: c.created.map(keyOf).sort(),
+      changed: c.changed.map(keyOf).sort(),
+      moved: c.moved.map((x) => `${x.from}>${keyOf(x.id)}`).sort(),
+      removed: c.removed.map((x) => `${x.key}|${x.cls}`).sort(),
+    });
+    assert.deepEqual(
+      sideOf(r.changes, (id) => main.tree.pathOf(main.tree.byId(id))),
+      sideOf(m.changes, (id) => model.pathOf(model.byId.get(id))),
+      where(ctx, main, 'changes'),
     );
     if (r.delta !== null) {
       noSab(r.delta, where(ctx, main, 'delta'));

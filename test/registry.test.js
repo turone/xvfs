@@ -17,7 +17,7 @@ const { Place } = require('../lib/place.js');
 const { VfsConfig } = require('../lib/config.js');
 const { VfsKernel } = require('../lib/kernel.js');
 const { createTree } = require('../lib/tree.js');
-const { survey } = require('../lib/epoch.js');
+const { CHANGES, eventsOf } = require('../lib/epoch.js');
 const { quiet } = require('./helpers.js');
 
 // A place with a tree of its own over one small segment, and files
@@ -51,8 +51,9 @@ const publish = (place, files) => {
     };
     return ['write', key, input, { parents: true }];
   });
-  const changes = survey(place.tree, ops);
-  place.tree.commit(ops, (place.version = (place.version ?? 0) + 1), 0);
+  const version = (place.version = (place.version ?? 0) + 1);
+  const result = place.tree.commit(ops, version, 0, CHANGES);
+  const changes = eventsOf(place.tree, result.changes);
   place.spelled(changes.created, changes.removed, changes.moved);
 };
 

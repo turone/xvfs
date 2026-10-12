@@ -5,13 +5,13 @@ const assert = require('node:assert/strict');
 const path = require('node:path');
 const { Place, dirOf } = require('../lib/place.js');
 const { createTree } = require('../lib/tree.js');
-const { survey } = require('../lib/epoch.js');
+const { CHANGES, eventsOf } = require('../lib/epoch.js');
 const { VfsConfig } = require('../lib/config.js');
 
 // A place's spellings: on a case-insensitive disk a disk-origin place
 // finds a file it holds from any other spelling of its key (Place.spelling),
 // its index following the files every commit creates and removes
-// (Place.spelled, as the kernel calls it with what survey() tells).
+// (Place.spelled, as the kernel calls it with what eventsOf() tells).
 
 // Deterministic pseudo-random numbers (a linear congruential generator).
 const random = (seed) => () => {
@@ -22,7 +22,7 @@ const random = (seed) => () => {
 const SAB = new SharedArrayBuffer(16);
 
 // A place of its own tree, `caseless` or not, and a commit of ops to it as
-// the kernel's: survey() before, Place.spelled() after.
+// the kernel's: the tree's changes, eventsOf() and Place.spelled() after.
 const placeOf = (caseless = true, origin = 'disk') => {
   const config = new VfsConfig({
     places: {
@@ -36,8 +36,8 @@ const placeOf = (caseless = true, origin = 'disk') => {
   });
   let version = 0;
   const commit = (...ops) => {
-    const changes = survey(place.tree, ops);
-    place.tree.commit(ops, ++version, 0);
+    const result = place.tree.commit(ops, ++version, 0, CHANGES);
+    const changes = eventsOf(place.tree, result.changes);
     place.spelled(changes.created, changes.removed, changes.moved);
   };
   return { place, commit };

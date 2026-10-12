@@ -781,7 +781,7 @@ describe('nodes: a broken view', () => {
   });
 });
 
-describe('epoch: reconcile and survey', () => {
+describe('epoch: reconcile and the events of a commit', () => {
   const SAB = new SharedArrayBuffer(16);
   const treeOf = () =>
     createTree({ segments: new Map([[1, SAB]]), retireIds: { next: () => 1 } });
@@ -871,7 +871,18 @@ describe('epoch: reconcile and survey', () => {
     ]);
   });
 
-  it('survey names the files a commit changes, and the keys of the nodes it kills', () => {
+  // The events of a commit name the state after it, whatever the order of
+  // its ops: what lives by its key after, what moved or died by its key
+  // before.
+  const eventsAfter = (tree, ops, version) =>
+    epoch.eventsOf(tree, tree.commit(ops, version, 0, epoch.CHANGES).changes);
+  const sorted = (e) => ({
+    created: [...e.created].sort(),
+    replaced: [...e.replaced].sort(),
+    removed: [...e.removed].sort(),
+    moved: [...e.moved].sort(),
+  });
+  const seeded = () => {
     const tree = treeOf();
     tree.commit(
       [
@@ -884,27 +895,102 @@ describe('epoch: reconcile and survey', () => {
       1,
       0,
     );
+    return tree;
+  };
+
+  it('the events of a commit name the files it changed, and the keys of the nodes it killed', () => {
+    const tree = seeded();
     const id = (key) => tree.nodeId(tree.get(key));
-    const changes = epoch.survey(tree, [
-      ['write', '/f', input],
-      ['write', '/new', input],
-      ['unlink', '/g'],
-      ['move', '/f', '/h'],
-      ['write', '/h', input],
-      ['remove', '/d'],
-    ]);
-    assert.deepEqual(changes.created, ['/new']);
-    assert.deepEqual(changes.replaced, ['/f', '/h']);
-    assert.deepEqual(changes.removed, ['/g', '/d/x', '/d/y']);
-    assert.deepEqual(changes.moved, [['/f', '/h']]);
-    assert.deepEqual(
-      [...changes.keys].sort(),
+    const killed = ['/g', '/d', '/d/x', '/d/y'].map((k) => [id(k), k]);
+    const events = eventsAfter(
+      tree,
       [
-        [id('/g'), '/g'],
-        [id('/d/x'), '/d/x'],
-        [id('/d/y'), '/d/y'],
-      ].sort(),
+        ['write', '/f', input],
+        ['write', '/new', input],
+        ['unlink', '/g'],
+        ['move', '/f', '/h'],
+        ['write', '/h', input],
+        ['remove', '/d'],
+      ],
+      2,
     );
+    assert.deepEqual(sorted(events), {
+      created: ['/new'],
+      replaced: ['/h'],
+      removed: ['/d/x', '/d/y', '/g'],
+      moved: [['/f', '/h']],
+    });
+    assert.deepEqual([...events.keys].sort(), killed.sort());
+  });
+
+  it('a commit that takes back what it did names nothing of it', () => {
+    const tree = seeded();
+    const events = eventsAfter(
+      tree,
+      [
+        ['write', '/n', input],
+        ['unlink', '/n'],
+        ['mkdir', '/e'],
+        ['write', '/e/z', input],
+        ['remove', '/e'],
+        ['move', '/f', '/f2'],
+        ['move', '/f2', '/f'],
+      ],
+      2,
+    );
+    assert.deepEqual(sorted(events), {
+      created: [],
+      replaced: [],
+      removed: [],
+      moved: [],
+    });
+  });
+
+  it('a key written twice is named once; a new node moved is created where it ends', () => {
+    const tree = seeded();
+    const events = eventsAfter(
+      tree,
+      [
+        ['write', '/f', input],
+        ['write', '/f', input],
+        ['write', '/c0', input],
+        ['move', '/c0', '/c'],
+        ['write', '/c', input],
+      ],
+      2,
+    );
+    assert.deepEqual(sorted(events), {
+      created: ['/c'],
+      replaced: ['/f'],
+      removed: [],
+      moved: [],
+    });
+  });
+
+  it('a file replaced by another node, a directory moved with what changed in it', () => {
+    const tree = seeded();
+    const events = eventsAfter(
+      tree,
+      [
+        ['unlink', '/g'],
+        ['write', '/g', input],
+        ['unlink', '/f'],
+        ['move', '/d/y', '/f'],
+        ['move', '/d', '/e'],
+        ['write', '/e/x', input],
+        ['write', '/e/new', input],
+      ],
+      2,
+    );
+    assert.deepEqual(sorted(events), {
+      created: ['/e/new', '/g'],
+      replaced: ['/e/x'],
+      removed: ['/f', '/g'],
+      moved: [
+        ['/d', '/e'],
+        ['/d/y', '/f'],
+      ],
+    });
   });
 });
 

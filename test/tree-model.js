@@ -112,6 +112,8 @@ class ModelTree {
     this.nextUid = 1;
     this.nextId = 1; // the engine-mode counter (the model's own ids)
     this.made = []; // the representations the running commit made
+    this.wrote = new Set(); // uids of nodes of the state before its ops wrote
+    this.wantChanges = false; // whether the running commit asked for `changes`
     this.byId = new Map();
     this.root = null;
     if (this.fs) {
@@ -585,23 +587,37 @@ class ModelTree {
     return out;
   }
 
-  #checkArgs(ops, next, now) {
+  #checkArgs(ops, next, now, options) {
     if (!Array.isArray(ops)) throw refusal('EINVAL', -1);
     if (!Number.isSafeInteger(next) || next < this.version)
       throw refusal('EINVAL', -1);
     if (typeof now !== 'number' || !Number.isFinite(now))
       throw refusal('EINVAL', -1);
+    // options: nothing, or { changes: boolean }
+    let changes = false;
+    if (options !== undefined) {
+      if (options === null || typeof options !== 'object')
+        throw refusal('EINVAL', -1);
+      if (options.changes !== undefined) {
+        if (typeof options.changes !== 'boolean') throw refusal('EINVAL', -1);
+        changes = options.changes;
+      }
+    }
+    this.wantChanges = changes;
+    this.made = [];
+    this.wrote = new Set();
   }
 
   // Apply `ops` atomically. Throws a refusal ({ code, index, other? }) and
   // changes nothing; else returns the outcome:
   //   { delta: boolean, versioned, structure, policy,
   //     retired: [{ id, kind, uid, extent }], dropped: [extent],
-  //     placed: [{ id, kind, extent }] }
-  // where an extent is extentKey() of one.
-  commit(ops, next, now) {
-    this.#checkArgs(ops, next, now);
-    this.made = [];
+  //     placed: [{ id, kind, extent }], changes }
+  // where an extent is extentKey() of one, and `changes`, with `{ changes:
+  // true }` in `options`, what the commit did to its nodes (#changes) —
+  // else null.
+  commit(ops, next, now, options) {
+    this.#checkArgs(ops, next, now, options);
     const result = this.fs
       ? this.#commitFs(ops, next, now)
       : this.#commitClient(ops, next, now);
@@ -753,6 +769,7 @@ class ModelTree {
               n = d;
             }
             if (existing !== null) {
+              this.wrote.add(existing.uid);
               existing.payload = this.#newPayload(
                 op[2],
                 next,
@@ -863,7 +880,45 @@ class ModelTree {
   // and the state after does not publish, published to no one — and what
   // it placed: what it made that the state after publishes, with the id
   // of the node that holds it.
+  // What a commit did to its nodes, as the engine reports it when asked:
+  // the ids of the nodes it made that live after it; of the nodes that
+  // lived before and live after and got a payload of its ops; the nodes
+  // that lived before and live after under another parent or name, keyed
+  // as before; every node of the state before that dies, keyed as before,
+  // with its class. Before: this tree as it stands; after: `st`.
+  #changes(st) {
+    const was = new Map();
+    for (const n of this.nodes()) was.set(n.uid, n);
+    const created = [];
+    const changed = [];
+    const moved = [];
+    const live = new Set();
+    const stack = st.root === null ? [] : [st.root];
+    while (stack.length > 0) {
+      const n = stack.pop();
+      live.add(n.uid);
+      for (const k of n.kids) stack.push(k);
+      const before = was.get(n.uid);
+      if (before === undefined) {
+        created.push(n.id);
+        continue;
+      }
+      if (this.wrote.has(n.uid)) changed.push(n.id);
+      const from = before.parent === null ? null : before.parent.uid;
+      const to = n.parent === null ? null : n.parent.uid;
+      if (from !== to || before.name !== n.name)
+        moved.push({ id: n.id, from: this.pathOf(before) });
+    }
+    const removed = [];
+    for (const [uid, n] of was) {
+      if (!live.has(uid))
+        removed.push({ id: n.id, key: this.pathOf(n), cls: n.cls });
+    }
+    return { created, changed, moved, removed };
+  }
+
   #finish(st, before, f) {
+    const changes = this.wantChanges ? this.#changes(st) : null;
     const after = ModelTree.published(st.root);
     const retired = [];
     for (const [uid, { id, rep }] of before) {
@@ -900,6 +955,7 @@ class ModelTree {
       retired,
       dropped,
       placed,
+      changes,
     };
   }
 
@@ -1276,8 +1332,10 @@ class ModelTree {
           if (n.payload !== null) {
             n.payload = null;
             own = true;
+            this.wrote.add(n.uid);
           }
         } else {
+          this.wrote.add(n.uid);
           n.payload = this.#newPayload(
             p.fields.payload,
             next,
@@ -1313,10 +1371,9 @@ class ModelTree {
     });
   }
 
-  load(rows, next, now) {
+  load(rows, next, now, options) {
     if (!Array.isArray(rows)) throw refusal('EINVAL', -1);
-    this.#checkArgs([], next, now);
-    this.made = [];
+    this.#checkArgs([], next, now, options);
     if (this.fs) throw refusal('EINVAL', -1);
     const seen = new Set();
     const puts = [];

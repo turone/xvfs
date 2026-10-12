@@ -1850,12 +1850,17 @@ const runSeed = (seed) => {
       th.tree.containers = th.containers;
     }
     const saved = model.save();
+    // What the commit did to its nodes, asked now and then — and now and
+    // then in a malformed options, refused as an argument.
+    let options;
+    if (random.chance(0.6)) options = { changes: true };
+    else if (random.chance(0.02)) options = { changes: 1 };
     let mres = null;
     let merr = null;
     try {
       mres = isLoad
-        ? model.load(ops, next, ctx.now)
-        : model.commit(ops, next, ctx.now);
+        ? model.load(ops, next, ctx.now, options)
+        : model.commit(ops, next, ctx.now, options);
     } catch (err) {
       // a refusal has a code and an index; anything else is the model's own
       // failure, and an engine throwing anything must not match it
@@ -1870,8 +1875,8 @@ const runSeed = (seed) => {
     const lastBefore = retire.last;
     try {
       eres = isLoad
-        ? main.tree.load(ops, next, ctx.now)
-        : main.tree.commit(ops, next, ctx.now);
+        ? main.tree.load(ops, next, ctx.now, options)
+        : main.tree.commit(ops, next, ctx.now, options);
     } catch (err) {
       eerr = err;
     }
@@ -1979,6 +1984,24 @@ const runSeed = (seed) => {
           given.has(p.extent),
           what('a placed extent the ops did not give'),
         );
+      // changes, when asked: by the keys after the commit for what lives,
+      // as before it for what moved or died.
+      if (options?.changes !== true) {
+        assert.equal(eres.changes, null, what('changes not asked'));
+      } else {
+        const sides = [
+          [eres.changes, engineOwner],
+          [mres.changes, modelOwner],
+        ].map(([c, owner]) => ({
+          created: c.created.map(owner).sort(),
+          changed: c.changed.map(owner).sort(),
+          moved: c.moved.map((m) => `${m.from}>${owner(m.id)}`).sort(),
+          removed: c.removed
+            .map((r) => `${model.fs ? '' : r.id}|${r.key}|${r.cls}`)
+            .sort(),
+        }));
+        assert.deepEqual(sides[0], sides[1], what('changes'));
+      }
       const ids = new Set();
       for (const r of eres.retired) {
         assert.ok(
