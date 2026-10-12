@@ -1,6 +1,6 @@
 'use strict';
 
-// The runner of the tree engine's differential test (SPEC.md, "Correctness"). Random commits
+// The runner of the tree engine's differential test (doc/architecture.md, "Testing"). Random commits
 // go to the reference model (tree-model.js) and to the engine's main tree;
 // every delta goes, through structuredClone, to replicas built from
 // snapshots at random points. After each commit the main tree and every

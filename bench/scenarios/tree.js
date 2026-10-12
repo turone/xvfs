@@ -7,7 +7,7 @@ const { median } = require('../harness.js');
 const engine = require('../../test/tree-engine.js');
 const data = require('../../test/tree-data.js');
 
-// The tree engine (.work/stage1/SPEC.md, "Measurements"): test/tree-engine.js's,
+// The tree engine (doc/architecture.md, "Node trees"): test/tree-engine.js's,
 // TREE_ENGINE, else lib/tree.js. The index it replaced is gone from the
 // library with stage B; the library before it is measured against the one
 // on the tree by bench/ab.js, its scenarios.
@@ -156,7 +156,7 @@ const msSince = (t0) => Number(hr() - t0) / 1e6;
 // 14.6 (Node 26.10 on Windows) keeps a tree's former state alive past a
 // commit or an apply until a later turn of the loop, and gc() frees
 // nothing of it, while the collection of a heap snapshot does
-// (.work/stage1/probe26/; test/fixtures/tree-retention.js). A snapshot
+// (test/fixtures/tree-retention.js). A snapshot
 // costs time and memory with the heap — seconds at 10⁵ files — so only the
 // figures of the workers that commit, apply or read are exact; a replica
 // just built from a snapshot measures alike on 24 and 26 without it.

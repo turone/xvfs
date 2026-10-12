@@ -5,8 +5,8 @@ const assert = require('node:assert/strict');
 const path = require('node:path');
 const { execFile } = require('node:child_process');
 
-// Retention of the tree engine (.work/stage1/SPEC.md, "Snapshots and
-// deltas", "Correctness"): once fromSnapshot, apply, commit and load
+// Retention of the tree engine (doc/architecture.md, "Node trees",
+// "Testing"): once fromSnapshot, apply, commit and load
 // return, nothing of their input's encoding is reachable from the tree, and
 // its strings are its own flat ones. Each check runs
 // fixtures/tree-retention.js in a process of its own with --expose-gc, on

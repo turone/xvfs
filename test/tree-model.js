@@ -1,9 +1,9 @@
 'use strict';
 
-// The reference model of the tree engine (.work/stage1/SPEC.md): obviously
-// correct and slow. The differential test holds every engine, and every
-// replica it feeds, to it. The spec states the semantics; this file is their
-// executable form, and where the two disagree the spec wins.
+// The reference model of the tree engine (doc/architecture.md, "Node
+// trees"): obviously correct and slow. The differential test holds every
+// engine, and every replica it feeds, to it: this file is the engine's
+// semantics in executable form.
 //
 // State: nodes with a model-own `uid`, kept by a move, never reused, and the
 // tree's numbers. A commit works on a copy of the state and the copy replaces

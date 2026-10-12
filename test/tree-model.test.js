@@ -1,6 +1,6 @@
 'use strict';
 
-// The tree engine's differential test (SPEC.md, "Correctness"): random commits
+// The tree engine's differential test (doc/architecture.md, "Testing"): random commits
 // against the reference model, replicas fed every delta; the runner is
 // tree-run.js.
 //

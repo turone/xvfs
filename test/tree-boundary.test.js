@@ -1,6 +1,6 @@
 'use strict';
 
-// The engine's boundary (SPEC.md, "The engine and its clients"): the engine
+// The engine's boundary (doc/architecture.md, "Node trees"): the engine
 // imports nothing from the kernel. In a clean process, loading the engine —
 // lib/tree.js, or TREE_ENGINE — and the model test's runner pulls in no module
 // of lib/ but lib/tree.js and its own lib/tree-*.js.

@@ -1,6 +1,6 @@
 'use strict';
 
-// The tree engine on large trees (SPEC.md, "Correctness"): a catalog built in
+// The tree engine on large trees (doc/architecture.md, "Testing"): a catalog built in
 // compound commits and a replica fed from the very first delta; moves of
 // subtrees of every size — 21, ~420 and ~8000 nodes — after every key below
 // them was asked, and the former keys below them; a large batch refused at

@@ -66,10 +66,10 @@ const now = () => 1.7e12 + version * 1000 + 0.5;
 // 14.6 (Node 26.10 on Windows) keeps a replica's former state alive past
 // an apply until a later turn of the loop — gc() twice, or a major
 // last-resort one, frees nothing of it (−2109 B per removed node where
-// 24.20 frees 2535) — while the collection a heap snapshot makes frees it
-// (.work/stage1/probe26/). The cause is V8's; the figures need the exact
-// heap. Costs ~0.1–0.5 s a call. The WeakRef check does not use it: it
-// holds to one full GC, as the spec has it.
+// 24.20 frees 2535) — while the collection a heap snapshot makes frees it.
+// The cause is V8's; the figures need the exact heap. Costs ~0.1–0.5 s a
+// call. The WeakRef check does not use it: it holds to one full GC, as
+// the test of retention is designed.
 const heap = () => {
   v8.getHeapSnapshot().destroy();
   global.gc();

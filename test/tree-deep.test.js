@@ -8,13 +8,13 @@ const data = require('./tree-data.js');
 // Shapes the random tests never reach — a chain 50 000 deep, a parent with
 // 10⁵ children, a load of a long chain, a load that states the chain's rows
 // children first or turns the chain over — and the costs that must not grow
-// with them (.work/stage1/SPEC.md, "Correctness"; the reviews of step A
-// found each of them broken in one engine). Nothing may recurse by depth: a
+// with them (doc/architecture.md, "Testing"; the reviews of step A found
+// each of them broken in one engine). Nothing may recurse by depth: a
 // RangeError is no refusal but an engine's bug. A cost is held to a ratio,
 // not to a time, so that a slow machine passes and a path that grows with
-// the children or with rows × depth does not; the width test's power is
-// checked by a mutant of a fast engine (.work/stage1/harness-check/
-// run-wide.js), since the naive engine pays O(n) for any commit.
+// the children or with rows × depth does not; the width test's power was
+// checked with a mutant of a fast engine, since the naive engine pays
+// O(n) for any commit.
 
 const DEPTH = 50000;
 const WIDE = 100000;
