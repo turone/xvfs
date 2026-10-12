@@ -47,6 +47,7 @@ is unsupported.
 [Features](#features) · [Install](#install) · [Quick start](#quick-start) ·
 [Providers](#providers) · [Preparation](#preparation-prepare) ·
 [Compression](#compression) · [Rules of subtrees](#rules-of-subtrees) ·
+[Trees of client ids](#trees-of-client-ids) ·
 [Strict routing](#strict-routing) ·
 [Lifetime of shared bytes](#lifetime-of-shared-bytes) · [API](#api) ·
 [Patched `node:fs`](#patched-nodefs) · [Errors](#errors) ·
@@ -668,6 +669,140 @@ places: {
   only in case are a config error everywhere. Places with a tree only
   (`sab`, `map`, `sea`).
 
+## Trees of client ids
+
+Beside its places, a kernel keeps trees whose structure an application's
+source gives — the pages of a site, a catalogue, a menu: nodes named by
+the source's own ids, each with a class, a policy and a payload of
+bytes in the same pool as the places' files, the same in every thread.
+A tree is declared in the config, made empty by `initialize()`, written
+only by the batches of its source and read in every thread through
+`kernel.tree(name)`.
+
+```js
+const config = new VfsConfig({
+  places: { static: { fs: { ext: ['css', 'js'] } } },
+  trees: {
+    pages: {
+      ids: 'number', // the source's ids: 'number' | 'string'
+      containers: [0], // classes whose nodes hold others
+      compress: { encodings: ['br', 'gzip'], ext: ['html'] },
+      zeroCopy: true, // view() and borrowed stream chunks
+      intake: { seq: 'source' }, // the source numbers its batches
+    },
+  },
+});
+const kernel = new VfsKernel(config, {
+  trees: {
+    pages: {
+      onGap: ({ from, to }) => replay(from, to), // batches missing
+      onError: (err) => reload(err), // a refused batch or load
+    },
+  },
+});
+await kernel.initialize();
+
+const pages = kernel.tree('pages');
+await pages.load(await readPages(), lastSeq); // the source's state at lastSeq
+await pages.submit({
+  seq: lastSeq + 1,
+  ops: [
+    ['put', 42, 7, 'about', { class: 1, payload: { data: html } }],
+    ['remove', 13],
+  ],
+});
+
+const node = pages.get('/docs/about');
+if (node) res.end(pages.read(node));
+```
+
+| `trees.<name>.*`      | Type     | Default       | Description                                                         |
+| --------------------- | -------- | ------------- | ------------------------------------------------------------------- |
+| `ids`                 | string   | required      | `'number'` (safe integers) or `'string'`                            |
+| `containers`          | number[] | `[]`          | Classes that are containers, at first, in every thread              |
+| `birthtime`           | bool     | `false`       | Payloads keep a birthtime                                           |
+| `aggregates`          | object   | both off      | `{ classes, subtreeVersion }`: counts by class, a subtree's version |
+| `maxNodes`            | number   | 2^24          | Live nodes at most                                                  |
+| `maxFileSize`         | size     | from defaults | A payload's bytes at most (`EFBIG`)                                 |
+| `compress`            | object   | off           | As a place's, by the extension of a node's name; no `retainRaw`     |
+| `zeroCopy`            | bool     | `false`       | Leases and borrowed stream chunks                                   |
+| `intake.seq`          | string   | `'source'`    | Who numbers the batches: `'source'` or `'intake'`                   |
+| `intake.window`       | number   | 10            | How long batches gather, ms                                         |
+| `intake.limit`        | number   | 10000         | Ops of one publication at most; a run goes in parts                 |
+| `intake.gapTimeout`   | number   | 2000          | How long a gap is waited for before `onGap`, ms                     |
+| `intake.spaceTimeout` | number   | 2000          | How long a batch waits for room in the pool, ms                     |
+
+A tree takes no name of a place, in any case. The handlers of each
+tree's intake are kernel options of the main thread, both required:
+`initialize()` refuses a tree without them. What a handler throws is
+its own — an uncaught exception — and never stops the intake.
+
+**Batches.** `submit({ seq, ops })` from any thread: `ops` are `['put',
+id, parentId, name, { class, payload, policy }]` — a node made or
+changed under `parentId` (null: the root) — and `['remove', id]`, each
+id once. A `payload` is `{ data, mtimeMs?, meta?, scriptOptions? }`,
+`data` a `Uint8Array` or a string (UTF-8); `null` takes it off, an
+absent one keeps it; `policy` likewise. A wrong form throws `EINVAL` at
+once. The promise resolves `{ seq, status }` once the batch is
+published and this thread's tree shows it — `'committed'`,
+`'duplicate'` (a number applied or waiting already: a worker's batch
+and the same change read back from the source's log collapse) or
+`'superseded'` (a load past it) — and rejects with a refusal: the
+commit's (`ENOENT`, `EEXIST`, …), `EFBIG`, `ENOSPC` after
+`spaceTimeout`, each with `seq`, `index` and `id`.
+
+- Batches are applied strictly by number, from `last + 1`: those of a
+  window go in parts of at most `limit` ops, each part one publication
+  — no thread sees a state between two batches of it.
+- A batch past a gap waits; a gap older than `gapTimeout` is told once
+  (`onGap`), until the missing batches come or a load.
+- A refused batch is told to `onError`; the batches before it publish,
+  it and everything after it wait for a load.
+- `load(rows, seq)` replaces the tree's state with the source's at
+  `seq` — rows `{ id, parentId, name, class, payload, policy }` — in one
+  commit; the batches waiting up to `seq` are `'superseded'`, those
+  after it join its publication. A load older than the tree is
+  `ESTALE`. In `'source'` mode nothing applies before the first load —
+  an empty source loads `[]`.
+- `intake.seq: 'intake'` is for a single writer over one channel that
+  loses nothing: the intake numbers the batches as they come, there are
+  no gaps, no repeats and no `ESTALE`, and `load(rows)` takes no number
+  — the batches submitted after it wait for it.
+
+**Reading.** A node is opaque: `get(key)`, `match(key)`, `byId(id)`,
+`root`, then `nodeId`, `nameOf`, `parentOf`, `pathOf`, `trailOf`,
+`classOf`, `policyOf`, `isContainer`, `childOf`, `children`,
+`childNodesOf`, `countOf`, `walk`; with aggregates `classCountOf`,
+`leafCountOf`, `subtreeVersionOf`. `payloadOf(node)` is a frozen `{
+version, size, mtimeMs, birthtimeMs?, meta, scriptOptions, encodings }`;
+the bytes come as a copy (`read`, `readCompressed`), a lease (`view`,
+`viewCompressed`, with `zeroCopy`) or a stream (`createReadStream`,
+`createReadStreamCompressed`), pinned while they read, as `PlaceFs`'s
+are. `last` is the number of the last batch this thread's tree shows;
+`version`, `structureVersion` and `policyVersion` the publications that
+last changed it, its structure, its policies.
+
+**Policies.** A lookup with `{ allow, context }` passes each policy on
+its way, from the root down, to `allow(policy, node, context)`: `true`
+lets it through, anything else is a `Denied` — `{ node, decision }`, the
+uppermost refusal — and `match` gives a `NotFound` — `{ node, rest }` —
+for a miss past them. `check(node, { allow, context })` asks the same of
+a node in hand.
+
+```js
+const { Denied, NotFound } = require('xvfs');
+const allow = (policy, node, user) => user.roles.includes(policy.role);
+const found = pages.match(url.pathname, { allow, context: user });
+if (found instanceof Denied) return redirect('/login');
+if (found instanceof NotFound) return notFound(pages.pathOf(found.node));
+```
+
+**Events.** A publication that changed a tree names it in `'publish'`:
+`trees: [{ tree, seqFrom, seqTo, loaded }]` — the numbers of the batches
+it shows, `loaded` when it began with a load, which replaced the state
+whole. A batch that changes nothing publishes nothing, and still moves
+`last` in every thread.
+
 ## Strict routing
 
 ```js
@@ -1217,6 +1352,7 @@ JSON file and flags that say the same resolve to one config.
 | `console`   | `globalThis.console` | Logger                                                                                                                      |
 | `seaModule` | `node:sea` if any    | Inject for tests                                                                                                            |
 | `preparers` | `{}`                 | `{ name: (raw, file) => ... }` named by the domains' `prepare` — synchronous; every name an enabled place uses must be here |
+| `trees`     | —                    | `{ name: { onGap, onError } }`: the handlers of each tree's intake ([Trees of client ids](#trees-of-client-ids))            |
 
 States: `new → initializing → ready → closed` (final). `fs()`,
 `snapshot()`, `watch()`, `link()` require `ready`. `initialize()`
@@ -1231,10 +1367,11 @@ published.
 | -------------------- | ------------------------------------------------------------------------------------------------------------------------------------ |
 | `await initialize()` | Scan / SEA / map through the publication pipeline: preparers, bytecode, compression                                                  |
 | `fs(name)`           | `PlaceFs` for an indexed fs place                                                                                                    |
+| `tree(name)`         | `ClientTree` of a tree of client ids, in every thread ([Trees of client ids](#trees-of-client-ids))                                  |
 | `on('publish', fn)`  | What each publication changed, after its commit — [Publication events](#publication-events); `'close'` once, last                    |
 | `version`            | The version of the last publication this thread committed or applied; 0 before the first — [Versions](#versions)                     |
 | `instance`           | The main kernel's random id, the same in every thread linked to it                                                                   |
-| `snapshot()`         | `{ segments, places, version, instance }` — each shared place's tree, as committed                                                   |
+| `snapshot()`         | `{ segments, places, trees, version, instance }` — each shared place's tree and each tree of client ids, as committed                |
 | `link()`             | `{ vfs, transferList }` for a worker — the only worker transport                                                                     |
 | `watch()`            | Start `DirWatcher` (also auto if writable disk-origin)                                                                               |
 | `diagnostics()`      | Read-only picture of the shared memory: pool, bytes waiting to be freed, each worker's ACKs and holds — [Diagnostics](#diagnostics)  |
@@ -1308,7 +1445,7 @@ kernel.version; // 9: the last publication this thread has seen
 (`attach()` returns the worker's kernel):
 
 ```js
-kernel.on('publish', ({ version, places }) => {
+kernel.on('publish', ({ version, places, trees }) => {
   for (const [name, changes] of Object.entries(places)) {
     const { created, replaced, removed, moved } = changes;
     // the keys of the files of place `name` this publication created,
@@ -1341,6 +1478,9 @@ kernel.on('publish', ({ version, places }) => {
   be newer already — compare `files.version(key)` with `event.version`.
 - **Shared places only.** A `map` place is each thread's own: its writes
   publish nothing and announce nothing.
+- **Trees of client ids.** `trees` names each tree the publication
+  changed: `[{ tree, seqFrom, seqTo, loaded }]`, empty when it changed
+  none ([Trees of client ids](#trees-of-client-ids)).
 - **Errors.** What a listener throws is an uncaught exception, as from any
   emitter; the publication, its ACK and the mutation's promise are done by
   then. An async listener's rejection is its own. The kernel never emits
@@ -1942,15 +2082,20 @@ places is `ERR_VFS_CLOSED` with the failure as its `cause`
 vfs-snapshot { name: 'vfs-snapshot', snapshot }                               main → worker
             the first message of a link
 snapshot    { segments: [{ id, sab }], places: { <name>: tree },
+              trees: { <name>: { snapshot: tree, last } },
               version, instance, links?: { known: [path], generation } }
 vfs-update  { name, updateId, version, places: { <name>: { delta, created,
-              replaced, removed, moved } }, newSegments: [{ id, sab }] }      main → worker
+              replaced, removed, moved } }, trees: { <name>: { deltas,
+              seq: { from, to, loaded } | null } }, newSegments: [{ id,
+              sab }] }                                                        main → worker
 vfs-ack     { name: 'vfs-ack', updateId, retained?: [retireId] }              worker → main
 vfs-release { name: 'vfs-release', retireIds: [retireId] }                    worker → main
 vfs-mutate  { name, id, place, op, key, to?, options?, data? }                worker → main
             writeFiles: { name, id, place, op, keys, sizes, options, data }
-vfs-mutated { name, id, error?: { code, message, syscall, path, dest },
-              version? }                                                      main → worker
+            a tree's: { name, id, tree, op: 'submit' | 'load', seq,
+              ops | rows }, each payload's bytes transferred
+vfs-mutated { name, id, error?: { code, message, syscall, path, dest,
+              seq, index, id, other }, version?, result? }                    main → worker
 vfs-links   { name: 'vfs-links', add: [path], generation }                    main → worker
 tree        the place's tree in pre-order as columns — ids, parents, names,
             classes, payloads — typed arrays and arrays of strings, no SAB
@@ -1981,7 +2126,12 @@ worker has ACKed (or exited) and no thread holds them. An update's
 file's payload carries the version of the commit that published it. A worker's
 `writeFiles` is one `vfs-mutate`: its keys, the size of each file and
 their bytes one after another in `data`; its answer carries the version
-of the commit. Under strict with `links: 'deny'` a snapshot carries the
+of the commit. A tree of client ids rides the same messages: its
+snapshot and `last` in the snapshot; in an update, the deltas of one
+part of its intake's run in order and the numbers of the batches they
+show — `seq: null` for a compaction's relocation — applied in one step
+with the places'; a worker's batch or load is a `vfs-mutate` naming the
+tree, answered with what the intake resolved once the update is posted. Under strict with `links: 'deny'` a snapshot carries the
 links the main kernel knows and its index's `generation` — how many it
 has come to know; `vfs-links` hands the links its watcher finds after to
 every linked worker, with the generation they bring the index to, and a

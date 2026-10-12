@@ -1,7 +1,7 @@
 // Types of kernel.js: VfsKernel, the orchestrator of the main thread and
 // the replicas of a worker. README, "VfsKernel (main thread)",
-// "Versions", "Publication events", "Diagnostics", "Adapter API" and
-// "VfsKernel (worker)".
+// "Versions", "Publication events", "Diagnostics", "Adapter API",
+// "VfsKernel (worker)" and "Trees of client ids".
 
 import { EventEmitter } from 'node:events';
 import type { MessagePort } from 'node:worker_threads';
@@ -13,6 +13,7 @@ import type {
   VfsConfig,
   VfsRawConfig,
 } from './config.js';
+import type { ClientTree, TreeRefusal } from './client-tree.js';
 import type { PreparerTable } from './pipeline.js';
 import type { FilePayload, Place } from './place.js';
 import type { PlaceFs } from './place-fs.js';
@@ -48,6 +49,25 @@ export interface VfsKernelOptions {
    * uses must be here.
    */
   preparers?: PreparerTable;
+  /**
+   * The handlers of the intake of each tree of `trees.<name>`, main
+   * thread: both required — `initialize()` refuses a tree without them.
+   */
+  trees?: { [name: string]: TreeHandlers };
+}
+
+/**
+ * What the intake of a tree of client ids tells its source, on the main
+ * thread; what a handler throws is its own, an uncaught exception.
+ */
+export interface TreeHandlers {
+  /**
+   * A gap older than `intake.gapTimeout`: the numbers of the batches
+   * missing, once per gap.
+   */
+  onGap(gap: { readonly from: number; readonly to: number }): void;
+  /** A batch or a load refused: as its promise rejects. */
+  onError(err: TreeRefusal): void;
 }
 
 export interface FromSnapshotOptions extends VfsKernelOptions {
@@ -215,6 +235,20 @@ export interface PlaceChanges {
 export interface PublishEvent {
   readonly version: number;
   readonly places: { readonly [name: string]: PlaceChanges };
+  /** The trees of client ids it changed; empty when none. */
+  readonly trees: readonly TreePublication[];
+}
+
+/**
+ * What one publication shows of a tree of client ids: the numbers of the
+ * batches of its source from `seqFrom` to `seqTo`; `loaded` when it
+ * began with a load, which replaced the tree's state whole.
+ */
+export interface TreePublication {
+  readonly tree: string;
+  readonly seqFrom: number;
+  readonly seqTo: number;
+  readonly loaded: boolean;
 }
 
 /**
@@ -294,6 +328,8 @@ export class VfsKernel extends EventEmitter<VfsKernelEvents> {
   close(): void;
   /** The `PlaceFs` of an indexed place with an fs domain; throws otherwise. */
   fs(name: string): PlaceFs;
+  /** A tree of client ids of the config, in every thread; throws otherwise. */
+  tree(name: string): ClientTree;
   /** The trees as published, with `version` and `instance`; main thread. */
   snapshot(): VfsSnapshot;
   /**

@@ -108,6 +108,12 @@ const onPublish = (event: PublishEvent) => {
         readonly moved: readonly (readonly [string, string])[];
       };
     };
+    readonly trees: readonly {
+      readonly tree: string;
+      readonly seqFrom: number;
+      readonly seqTo: number;
+      readonly loaded: boolean;
+    }[];
   }>()(event);
   for (const [name, changes] of Object.entries(event.places)) {
     expectType<string>()(name);

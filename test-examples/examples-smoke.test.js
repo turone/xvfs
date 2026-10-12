@@ -20,6 +20,7 @@ const PREPARED_SCRIPTS_MS = 10000;
 const ETAG_MS = 15000;
 const SSR_MS = 10000;
 const ASYNC_WORKER_MS = 10000;
+const URL_TREE_MS = 10000;
 
 const httpRequest = (url) =>
   new Promise((resolve, reject) => {
@@ -691,6 +692,42 @@ describe('examples smoke', () => {
         );
         assert.ok(mainLine, stdout);
         assert.match(mainLine, /html=2 json=2 render\.js=2/);
+      } finally {
+        await stopChild(child);
+      }
+    },
+  );
+
+  it(
+    'url-tree loads a tree of client ids, takes batches from a worker and the log, resolves URLs under policies',
+    { timeout: URL_TREE_MS },
+    async () => {
+      const child = spawn(process.execPath, ['examples/url-tree/run.js'], {
+        cwd: REPO,
+        env: { ...process.env },
+        stdio: ['ignore', 'pipe', 'pipe'],
+        windowsHide: true,
+      });
+      const output = attachOutput(child);
+      try {
+        const exited = await waitForExit(child, URL_TREE_MS - 1000);
+        const stdout = output.stdout();
+        assert.equal(exited, true, `url-tree example timed out\n${stdout}`);
+        assert.equal(child.exitCode, 0, output.stderr() || stdout);
+        assert.equal(output.stderr(), '');
+        assert.deepEqual(stdout.trim().split(/\r?\n/), [
+          'main: loaded seq=3 last=3',
+          'reader: guest /docs/intro: <h1>Intro</h1>',
+          'reader: guest /admin/stats: denied by /admin',
+          'reader: admin /admin/stats: <h1>Stats</h1>',
+          'reader: guest /docs/missing: not found past /docs (/missing)',
+          'editor: seq=4 committed; /docs/news reads <h1>News</h1>',
+          'reader: publish seq=4..4 /docs: intro, news',
+          'main: seq=4 again duplicate',
+          'main: gap 5..5',
+          'main: seq=5 committed, seq=6 committed',
+          'reader: publish seq=5..6 /docs: intro, news, guide, faq',
+        ]);
       } finally {
         await stopChild(child);
       }

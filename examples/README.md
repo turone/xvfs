@@ -13,6 +13,7 @@ is self-contained — no extra build steps unless explicitly noted.
 | [etag/](etag/)                           | `prepare` computes a per-file ETag in `meta`, identical in every worker; a framework-free `node:http` server answers `If-None-Match` with 304 / 200, live-updated over `sab + virtual`.                                                                                              |
 | [ssr/](ssr/)                             | A tiny template compiler in a `prepare` preparer, `fs.script.compile` cached data, `vm.Script` in workers; a live template update reaches already-running workers.                                                                                                                   |
 | [async-worker/](async-worker/)           | A worker does a heavy async transformation (async crypto, async zlib) and publishes several related artifacts with one atomic `writeFiles`, through its own RPC; reader workers learn of it only through `kernel.on('publish')` and see one consistent version, never a partial set. |
+| [url-tree/](url-tree/)                   | A tree of client ids — the pages of a site: loaded on the main thread, a batch submitted from a worker and read back at once, URLs resolved under policies (`Denied`, `NotFound`) in another worker, a repeat and a gap of the source's log.                                         |
 
 These examples are docs-grade and are also covered by the automated smoke suite
 in `test-examples/`, run with `npm run test:examples`. That suite is not part of
