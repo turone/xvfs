@@ -61,7 +61,7 @@ describe('publish: mutations of a virtual place', () => {
       const events = record(k);
       await v.writeFile('/a.txt', 'a');
       assert.deepEqual(events, [
-        { version: 1, places: { v: changes(['/a.txt']) } },
+        { version: 1, places: { v: changes(['/a.txt']) }, trees: [] },
       ]);
       const [event] = events;
       assert.ok(isDeepFrozen(event), 'frozen, all the way down');
@@ -74,18 +74,20 @@ describe('publish: mutations of a virtual place', () => {
       await v.rename('/c.txt', '/a.txt');
       await v.unlink('/a.txt');
       assert.deepEqual(events.slice(1), [
-        { version: 2, places: { v: changes([], ['/a.txt']) } },
-        { version: 3, places: { v: changes([], ['/a.txt']) } },
-        { version: 4, places: { v: changes(['/b.txt']) } },
+        { version: 2, places: { v: changes([], ['/a.txt']) }, trees: [] },
+        { version: 3, places: { v: changes([], ['/a.txt']) }, trees: [] },
+        { version: 4, places: { v: changes(['/b.txt']) }, trees: [] },
         {
           version: 5,
           places: { v: changes([], [], [], [['/b.txt', '/c.txt']]) },
+          trees: [],
         },
         {
           version: 6,
           places: { v: changes([], [], ['/a.txt'], [['/c.txt', '/a.txt']]) },
+          trees: [],
         },
-        { version: 7, places: { v: changes([], [], ['/a.txt']) } },
+        { version: 7, places: { v: changes([], [], ['/a.txt']) }, trees: [] },
       ]);
       assert.equal(k.version, 7);
     } finally {
@@ -112,12 +114,17 @@ describe('publish: mutations of a virtual place', () => {
       await v.rm('/e', { recursive: true });
       await v.writeFile('/s.js', 'exports.s = 2;');
       assert.deepEqual(events, [
-        { version: 3, places: { v: changes([], [], [], [['/d', '/e']]) } },
+        {
+          version: 3,
+          places: { v: changes([], [], [], [['/d', '/e']]) },
+          trees: [],
+        },
         {
           version: 4,
           places: { v: changes([], [], ['/e/a.txt', '/e/b.txt']) },
+          trees: [],
         },
-        { version: 5, places: { v: changes([], ['/s.js']) } },
+        { version: 5, places: { v: changes([], ['/s.js']) }, trees: [] },
       ]);
       const named = events.flatMap(({ places }) =>
         Object.values(places).flatMap((c) => Object.values(c).flat(2)),
@@ -152,9 +159,9 @@ describe('publish: mutations of a virtual place', () => {
       await v.rmdir('/n');
       await v.unlink('/a.txt');
       assert.deepEqual(events, [
-        { version: 3, places: { v: changes() } },
-        { version: 4, places: { v: changes() } },
-        { version: 5, places: { v: changes([], [], ['/a.txt']) } },
+        { version: 3, places: { v: changes() }, trees: [] },
+        { version: 4, places: { v: changes() }, trees: [] },
+        { version: 5, places: { v: changes([], [], ['/a.txt']) }, trees: [] },
       ]);
     } finally {
       k.close();
@@ -266,6 +273,7 @@ describe('publish: init, the watcher, compaction', () => {
         {
           version: 2,
           places: { site: changes(['/n/x.txt'], ['/a.txt'], ['/b.txt']) },
+          trees: [],
         },
       ]);
       // A read that fails keeps the version and schedules one recheck,
@@ -287,6 +295,7 @@ describe('publish: init, the watcher, compaction', () => {
       assert.deepEqual(events.at(-1), {
         version: 3,
         places: { site: changes([], ['/a.txt']) },
+        trees: [],
       });
       assert.equal(k.fs('site').readFile('/a.txt', 'utf8'), 'AA');
     } finally {
@@ -319,7 +328,7 @@ describe('publish: init, the watcher, compaction', () => {
       assert.equal(k.nextUpdateId, updates + 1, 'the relocation');
       assert.equal(fileOf(k, 'v', '/c').source.segmentId, 1);
       assert.deepEqual(events, [
-        { version: 4, places: { v: changes([], [], ['/a']) } },
+        { version: 4, places: { v: changes([], [], ['/a']) }, trees: [] },
       ]);
     } finally {
       k.close();
@@ -343,6 +352,7 @@ describe('publish: workers', () => {
       assert.deepEqual(applied, {
         version: 1,
         places: { v: changes(['/a.txt']) },
+        trees: [],
       });
       assert.equal(ack.name, 'vfs-ack');
       // A worker's own write: the update comes before the response, and its
@@ -355,6 +365,7 @@ describe('publish: workers', () => {
       assert.deepEqual(seen, {
         version: 2,
         places: { v: changes(['/b.txt']) },
+        trees: [],
       });
     } finally {
       w.kernel.close();
@@ -396,7 +407,7 @@ describe('publish: workers', () => {
       await turn();
       assert.equal(w.version, 2);
       assert.deepEqual(events, [
-        { version: 2, places: { v: changes(['/b.txt']) } },
+        { version: 2, places: { v: changes(['/b.txt']) }, trees: [] },
       ]);
     } finally {
       w?.close();

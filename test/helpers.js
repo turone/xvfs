@@ -160,6 +160,23 @@ const publishedReps = function* (place) {
   }
 };
 
+// The representations a tree of client ids publishes: the payload of any
+// node, the root's included.
+const treeReps = function* (tree) {
+  const root = tree.get('');
+  if (root === null) return;
+  const nodes = [root];
+  for (const [node] of tree.walk(root)) nodes.push(node);
+  for (const node of nodes) {
+    const payload = tree.payloadOf(node);
+    if (payload === null) continue;
+    if (payload.source) yield payload.source;
+    for (const field in payload.others) {
+      if (payload.others[field]) yield payload.others[field];
+    }
+  }
+};
+
 // The bytes of a main kernel's pool in allocations that neither a published
 // representation nor a retired one accounts for: what a failed publication
 // left behind. 0 whenever no publication is in flight, whatever the ACKs
@@ -172,6 +189,10 @@ const leakedBytes = (k) => {
   for (const place of k.registry.all()) {
     if (place.provider !== 'sab' && place.provider !== 'sea') continue;
     for (const rep of publishedReps(place)) used -= rep.length;
+  }
+  for (const host of k.trees.values()) {
+    if (host.tree !== null)
+      for (const rep of treeReps(host.tree)) used -= rep.length;
   }
   for (const record of k.retired.values()) used -= record.extent.length;
   return used;

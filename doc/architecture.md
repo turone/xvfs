@@ -13,6 +13,7 @@ Contents: [Purpose](#purpose) · [Module map](#module-map) ·
 [Lifetime of shared bytes](#lifetime-of-shared-bytes) ·
 [Preparation](#preparation) ·
 [Virtual places and worker mutations](#virtual-places-and-worker-mutations) ·
+[Trees of client ids](#trees-of-client-ids) ·
 [Routing and strict mode](#routing-and-strict-mode) ·
 [Patched `node:fs`](#patched-nodefs) ·
 [Hooks and bootstrap](#hooks-and-bootstrap) ·
@@ -41,7 +42,9 @@ threads atomically; V8 cached data and compressed representations are
 built once and shared the same way. The same places serve what one thread
 keeps to itself — an agent's or a session's workspace (`map` +
 `virtual`), code generated at run time — through the same pipeline, hooks
-and routing.
+and routing. Beside the places, trees of client ids hold an application's
+own structure — the pages of a site, a catalogue — and their bytes in the
+same pool, written by the batches of a source and read in every thread.
 
 It is deliberately **not** a general-purpose virtual filesystem (see
 [alternatives.md](alternatives.md) for `node:vfs`), not a sandbox for
@@ -69,44 +72,46 @@ SAB segments ──────────── one physical copy ────
 
 ## Module map
 
-| Module                          | Role                                                                                                                                                                                                                                                   |
-| ------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| `lib/config.js`                 | `VfsConfig`: raw → deep-frozen `{ global, places }`; domains, `prepare` index, `fs.fallback` normalization                                                                                                                                             |
-| `lib/cache.js`                  | `Pool` + `SegmentRegistry` + `FilesystemCache`: the SAB allocator only — `allocate()` places bytes privately, `committed()` / `free()` settle them, `compactTarget()` / `relocate()` plan and copy a compaction; it knows extents, never keys          |
-| `lib/tree.js`                   | The node tree of a place: `createTree()`, `fromSnapshot()`; `commit()` on the main tree, `apply()` of its deltas on a replica; lookups, walks, `snapshot()`                                                                                            |
-| `lib/tree-plan.js`              | A commit's plan: every check against the tree and an overlay of the commit, then the log of steps that is its delta                                                                                                                                    |
-| `lib/tree-node.js`              | The objects a tree hands out — nodes, payloads, representations — and the numeric columns of its encodings                                                                                                                                             |
-| `lib/kernel.js`                 | `VfsKernel`: lifecycle, init, the trees of its places, virtual publications, epochs and their commit to the trees (`#flush`), freeing retired representations, compaction by node id, mutation queue, `link()`, worker side and its broken view        |
-| `lib/epoch.js`                  | Epochs: what one publication gathers per place — the intents of a scan or a watcher epoch, the ops of a mutation or a compaction; `reconcile()` into the tree's ops, `eventsOf()` of what a commit changed in files                                    |
-| `lib/pipeline.js`               | What a file is: `Preparers`, `prepareInput()`, `bytecodeFor()`                                                                                                                                                                                         |
-| `lib/publication.js`            | `inputOf()`: a source's canonical input, for either sink; the stateless SAB sink, `sharedPublish()`: the payload input and the extents it hands the kernel to stage                                                                                    |
-| `lib/compressor.js`             | `Compressor`: codec work only                                                                                                                                                                                                                          |
-| `lib/pins.js`                   | `Pins`: per-thread direct consumers of shared representations, keyed by the `Representation` object; `break()` for a broken view                                                                                                                       |
-| `lib/retirement.js`             | `Retirement`: the books of ACK-before-free and the counter of retireIds — retired representations, the ACKs they wait for, their holders; decides what is free, frees nothing                                                                          |
-| `lib/serial-queue.js`           | `SerialQueue`: one task at a time, arrival order                                                                                                                                                                                                       |
-| `lib/pool.js`                   | `pool()`: a list worked through at most `limit` calls at a time, stopping at the first failure; `IO_LIMIT`                                                                                                                                             |
-| `lib/place.js`                  | `Place`: its tree (`tree`, `node()`, `file()`, `directory()`, `keyOf()`), its number (`dev`), the spellings of a caseless platform, `visible()`, `cached()`, `scripted()`, `prepared()`, `preparerOf()`, `compressible()`; the kinds of representation |
-| `lib/place-fs.js`               | `PlaceFs` facade, view leases, disk territory of `fs.fallback: 'disk'`                                                                                                                                                                                 |
-| `lib/views.js`                  | `VfsReadStream` over one pinned representation, `rangeOf()`, the refusal of a closed kernel: what a facade over a tree hands out                                                                                                                       |
-| `lib/registry.js`               | `PlaceRegistry` (path → place, key; `Containment` in `appRoot`) + `FsRouter` (read / mutate / copy / rename / link decisions)                                                                                                                          |
-| `lib/aliases.js`                | `Aliases` (strict): what the disk says, once each, about other spellings of `appRoot` — its real path, what a drive letter names                                                                                                                       |
-| `lib/links.js`                  | `LinkIndex` (strict, `links: 'deny'`): the links known below the places' directories; whether a path as given passes through one                                                                                                                       |
-| `lib/virtual-store.js`          | `VirtualStore`: the semantics of a virtual place's mutations, once — checks, their order, refusals, the ops they commit (`checkHierarchy`, `mkdirOps`, `movesAsIs`, `immovable`); `KeysInFlight`                                                       |
-| `lib/map-store.js`              | `MapStore` (a `VirtualStore`): mutations at once on the thread's own tree, the bytes in buffers of its own; the map sink of the pipeline                                                                                                               |
-| `lib/sab-store.js`              | `SabStore` (a `VirtualStore`): main-thread mutations of a `sab + virtual` place, each in its key's turn; keys in flight                                                                                                                                |
-| `lib/mutation-queue.js`         | `MutationQueue`: per-(place, key) ordering, exclusive place barrier                                                                                                                                                                                    |
-| `lib/mutation-rpc.js`           | `OPS` for both ends; `MutationClient` + `RemoteStore`: worker → main mutations; `serveMutation()`: the main end, checking each request again                                                                                                           |
-| `lib/scanner.js`                | `scan()`: directory walk, then stats `IO_LIMIT` at a time → `Map<key, FileInput>` in the order of the walk, and every directory (`dirs`); `linksOf()`: the links below a directory                                                                     |
-| `lib/watch-pipeline.js`         | `WatchPipeline`: watcher epochs into kernel epochs, one at a time (`SerialQueue`), their jobs `IO_LIMIT` at a time; rechecks                                                                                                                           |
-| `lib/watcher.js`                | `DirWatcher`: `fs.watch` over each place tree (recursive where native, else one per directory) → debounced epochs; `watchPath()`                                                                                                                       |
-| `lib/disk.js`                   | the disk past the patch: `node:fs` captured at load; the native section (`native()`, `inNative()`) for calls that re-enter it; own `fs` for streams                                                                                                    |
-| `lib/stats.js`, `lib/errors.js` | `VfsStats` (`ino`, `dev`, birthtime) / `VfsDirent`, a listing's result (`listing()`); node:fs-shaped errors, the broken view's (`brokenError()`)                                                                                                       |
-| `lib/adapters/fs-patch.js`      | table-driven `node:fs` patch executing router decisions: the operation cores and their variants, guards, glob, watch, the strict root's listing, install                                                                                               |
-| `lib/adapters/fs-copy.js`       | the copy engine of the patch: a copy's options, the source's raw input, the write through the destination — its store or the disk                                                                                                                      |
-| `lib/adapters/fs-surface.js`    | every export of `node:fs` and `node:fs/promises` the patch knows, and what it does with each: implemented, guarded, delegated, path-free                                                                                                               |
-| `lib/adapters/fs-dir.js`        | `VfsDir`: the `fs.Dir` of the patch's `opendir`, over a listing taken when the directory is opened, with the `node:fs` close semantics                                                                                                                 |
-| `lib/adapters/module-hook.js`   | `module.registerHooks` resolve/load + `_compile` cached data + `_resolveFilename` (`require.resolve()`)                                                                                                                                                |
-| `lib/bootstrap/*`               | `register.mjs` (main thread, `--import`), `attach.js` (workers)                                                                                                                                                                                        |
+| Module                          | Role                                                                                                                                                                                                                                                                                                           |
+| ------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `lib/config.js`                 | `VfsConfig`: raw → deep-frozen `{ global, places, trees }`; domains, `prepare` index, `fs.fallback` normalization; the trees of client ids                                                                                                                                                                     |
+| `lib/cache.js`                  | `Pool` + `SegmentRegistry` + `FilesystemCache`: the SAB allocator only — `allocate()` places bytes privately, `committed()` / `free()` settle them, `compactTarget()` / `relocate()` plan and copy a compaction; it knows extents, never keys                                                                  |
+| `lib/tree.js`                   | The node tree of a place: `createTree()`, `fromSnapshot()`; `commit()` on the main tree, `apply()` of its deltas on a replica; lookups, walks, `snapshot()`                                                                                                                                                    |
+| `lib/tree-plan.js`              | A commit's plan: every check against the tree and an overlay of the commit, then the log of steps that is its delta                                                                                                                                                                                            |
+| `lib/tree-node.js`              | The objects a tree hands out — nodes, payloads, representations — and the numeric columns of its encodings                                                                                                                                                                                                     |
+| `lib/kernel.js`                 | `VfsKernel`: lifecycle, init, the trees of its places, virtual publications, epochs and their commit to the trees (`#flush`), the trees of client ids and the publications of their intakes, freeing retired representations, compaction by node id, mutation queue, `link()`, worker side and its broken view |
+| `lib/epoch.js`                  | Epochs: what one publication gathers per place — the intents of a scan or a watcher epoch, the ops of a mutation or a compaction; `reconcile()` into the tree's ops, `eventsOf()` of what a commit changed in files                                                                                            |
+| `lib/pipeline.js`               | What a file is: `Preparers`, `prepareInput()`, `bytecodeFor()`                                                                                                                                                                                                                                                 |
+| `lib/publication.js`            | `inputOf()`: a source's canonical input, for either sink; the stateless SAB sink, `sharedPublish()`: the payload input and the extents it hands the kernel to stage                                                                                                                                            |
+| `lib/compressor.js`             | `Compressor`: codec work only                                                                                                                                                                                                                                                                                  |
+| `lib/pins.js`                   | `Pins`: per-thread direct consumers of shared representations, keyed by the `Representation` object; `break()` for a broken view                                                                                                                                                                               |
+| `lib/retirement.js`             | `Retirement`: the books of ACK-before-free and the counter of retireIds — retired representations, the ACKs they wait for, their holders; decides what is free, frees nothing                                                                                                                                  |
+| `lib/serial-queue.js`           | `SerialQueue`: one task at a time, arrival order                                                                                                                                                                                                                                                               |
+| `lib/pool.js`                   | `pool()`: a list worked through at most `limit` calls at a time, stopping at the first failure; `IO_LIMIT`                                                                                                                                                                                                     |
+| `lib/place.js`                  | `Place`: its tree (`tree`, `node()`, `file()`, `directory()`, `keyOf()`), its number (`dev`), the spellings of a caseless platform, `visible()`, `cached()`, `scripted()`, `prepared()`, `preparerOf()`, `compressible()`; the kinds of representation                                                         |
+| `lib/place-fs.js`               | `PlaceFs` facade, view leases, disk territory of `fs.fallback: 'disk'`                                                                                                                                                                                                                                         |
+| `lib/views.js`                  | `VfsReadStream` over one pinned representation, `rangeOf()`, the refusal of a closed kernel: what a facade over a tree hands out                                                                                                                                                                               |
+| `lib/client-tree.js`            | `ClientTree`: a tree of client ids in every thread — lookups, nodes, payloads without their bytes, bytes as copies, leases and streams; `submit` and `load`                                                                                                                                                    |
+| `lib/intake.js`                 | `Intake`: the batches of a source for one tree of client ids, on the main thread — numbers, window, parts, gaps, refusals, loads, bytes placed before the commit; `checkBatch()` / `checkLoad()`, in every thread                                                                                              |
+| `lib/registry.js`               | `PlaceRegistry` (path → place, key; `Containment` in `appRoot`) + `FsRouter` (read / mutate / copy / rename / link decisions)                                                                                                                                                                                  |
+| `lib/aliases.js`                | `Aliases` (strict): what the disk says, once each, about other spellings of `appRoot` — its real path, what a drive letter names                                                                                                                                                                               |
+| `lib/links.js`                  | `LinkIndex` (strict, `links: 'deny'`): the links known below the places' directories; whether a path as given passes through one                                                                                                                                                                               |
+| `lib/virtual-store.js`          | `VirtualStore`: the semantics of a virtual place's mutations, once — checks, their order, refusals, the ops they commit (`checkHierarchy`, `mkdirOps`, `movesAsIs`, `immovable`); `KeysInFlight`                                                                                                               |
+| `lib/map-store.js`              | `MapStore` (a `VirtualStore`): mutations at once on the thread's own tree, the bytes in buffers of its own; the map sink of the pipeline                                                                                                                                                                       |
+| `lib/sab-store.js`              | `SabStore` (a `VirtualStore`): main-thread mutations of a `sab + virtual` place, each in its key's turn; keys in flight                                                                                                                                                                                        |
+| `lib/mutation-queue.js`         | `MutationQueue`: per-(place, key) ordering, exclusive place barrier                                                                                                                                                                                                                                            |
+| `lib/mutation-rpc.js`           | `OPS` for both ends; `MutationClient` + `RemoteStore`: worker → main mutations, and the batches and loads of a tree (`sendTree`); `serveMutation()`: the main end, checking each request again                                                                                                                 |
+| `lib/scanner.js`                | `scan()`: directory walk, then stats `IO_LIMIT` at a time → `Map<key, FileInput>` in the order of the walk, and every directory (`dirs`); `linksOf()`: the links below a directory                                                                                                                             |
+| `lib/watch-pipeline.js`         | `WatchPipeline`: watcher epochs into kernel epochs, one at a time (`SerialQueue`), their jobs `IO_LIMIT` at a time; rechecks                                                                                                                                                                                   |
+| `lib/watcher.js`                | `DirWatcher`: `fs.watch` over each place tree (recursive where native, else one per directory) → debounced epochs; `watchPath()`                                                                                                                                                                               |
+| `lib/disk.js`                   | the disk past the patch: `node:fs` captured at load; the native section (`native()`, `inNative()`) for calls that re-enter it; own `fs` for streams                                                                                                                                                            |
+| `lib/stats.js`, `lib/errors.js` | `VfsStats` (`ino`, `dev`, birthtime) / `VfsDirent`, a listing's result (`listing()`); node:fs-shaped errors, the broken view's (`brokenError()`)                                                                                                                                                               |
+| `lib/adapters/fs-patch.js`      | table-driven `node:fs` patch executing router decisions: the operation cores and their variants, guards, glob, watch, the strict root's listing, install                                                                                                                                                       |
+| `lib/adapters/fs-copy.js`       | the copy engine of the patch: a copy's options, the source's raw input, the write through the destination — its store or the disk                                                                                                                                                                              |
+| `lib/adapters/fs-surface.js`    | every export of `node:fs` and `node:fs/promises` the patch knows, and what it does with each: implemented, guarded, delegated, path-free                                                                                                                                                                       |
+| `lib/adapters/fs-dir.js`        | `VfsDir`: the `fs.Dir` of the patch's `opendir`, over a listing taken when the directory is opened, with the `node:fs` close semantics                                                                                                                                                                         |
+| `lib/adapters/module-hook.js`   | `module.registerHooks` resolve/load + `_compile` cached data + `_resolveFilename` (`require.resolve()`)                                                                                                                                                                                                        |
+| `lib/bootstrap/*`               | `register.mjs` (main thread, `--import`), `attach.js` (workers)                                                                                                                                                                                                                                                |
 
 ## Places and configuration
 
@@ -486,9 +491,9 @@ running out is a loud refusal, never a wrap or a repeat.
 `createTree`, the arguments of `commit` and `apply`, and gives back the
 delta, the retired representations and the version. It also has trees whose
 ids a client gives — `put` and `remove` by id, `load` of a whole state, a
-class per node and a policy checked on the way down — for a URL tree of an
-application; xvfs uses the FS tree only, and the engine has no public API
-until such a client connects.** _Why:_ one engine for the files of a place
+class per node and a policy checked on the way down — which the kernel
+hosts as [trees of client ids](#trees-of-client-ids), for a URL tree of an
+application.** _Why:_ one engine for the files of a place
 and the pages of a site; a clean boundary lets the reference model
 (`test/tree-model.js`) test it without loading the kernel
 (`test/tree-boundary.test.js`).
@@ -529,7 +534,8 @@ the pool or the compressor would outlive `close()` and serve a later
 kernel from the old pool; one that kept a function — the reader, a free, a
 codec — would miss the one a test puts on the kernel's objects.
 
-**One `vfs-update` per epoch or accepted mutation; a file's payload is
+**One `vfs-update` per epoch, accepted mutation or part of an intake's
+run; a file's payload is
 replaced whole — its source and every representation in one delta — and
 one that failed to rebuild is missing from the new payload.** _Why:_ V8
 accepts cached data by source length, not content — a same-length edit
@@ -538,7 +544,8 @@ next to stale bytecode would run the old code silently.
 **A commit that publishes takes a version: the next number of the main
 kernel's count of publications (`#version`), which `#flush` hands each
 tree's commit (`commit(ops, next, now)`) — the tree stamps it into every
-payload the commit makes — and sends in its `vfs-update`; every snapshot
+payload the commit makes; an intake, every commit of its part — and sends
+in its `vfs-update`; every snapshot
 carries the kernel's, and each thread takes it with the update: the main
 thread in `#flush`, a worker update by update (`#applyUpdate`). A commit
 that publishes nothing — an empty epoch, a mutation that changes nothing —
@@ -1178,6 +1185,129 @@ another as its directory or as its file, whichever came first. Files
 prepared one at a time let a failure stop the rest, and nothing stage
 after the set is abandoned. The disk has no commit of a set of files to
 offer.
+
+## Trees of client ids
+
+**A tree of client ids is a tree of the engine whose structure an
+application's source gives — the pages of a site, a catalogue — rather than
+a directory: its ids, names, classes, policies and payloads are the
+source's. It is declared in the config (`trees.<name>`), made empty by
+`initialize()`, carried by every snapshot, read in every thread through
+`kernel.tree(name)` (`ClientTree`, `lib/client-tree.js`) and written only by
+the batches of its source, which the intake of the main thread
+(`lib/intake.js`) applies in the order of their numbers. Its bytes lie in
+the pool of the places, under the same books — pins, retirement,
+ACK-before-free, compaction; it has no path, no disk and no `node:fs`
+surface.** _Why:_ the engine had such trees from its first stage — `put`
+and `remove` by id, `load` of a whole state, a class per node, a policy
+checked on the way down — and an application that keeps a URL tree beside
+its files would otherwise build a second pool, a second protocol and
+second books of frees. Declared in advance, a tree is known to every
+worker from its snapshot and checked with the config; a tree made at run
+time would need a message of its own and a lifetime per tree, and nothing
+asks for one.
+
+**`trees.<name>`: `ids` (`'number'` or `'string'`, required),
+`containers`, `birthtime`, `aggregates`, `maxNodes`, `maxFileSize`
+(`defaults.memory.maxFileSize` unless given), `compress` (as a place's, by the extension of a node's
+name, without `retainRaw`), `zeroCopy` and `intake: { seq, window, limit,
+gapTimeout, spaceTimeout }` — `'source'`, 10 ms, 10 000 ops, 2 s, 2 s by
+default. A tree takes no name of a place, in any case. The handlers of an
+intake are kernel options of the main thread, `trees: { <name>: { onGap,
+onError } }`, both required: `initialize()` refuses a tree without them.
+What a handler throws is its own — an uncaught exception, as from any
+emitter — and never stops the intake.** _Why:_ one name names one owner
+of shared bytes — in the books of compaction, the records of retirement,
+diagnostics. Functions cannot cross to a worker in the config, which
+structured clone carries; a gap has no caller to tell, and a refusal
+nobody receives is lost.
+
+**A node is the engine's and opaque: the facade hands it out and takes it
+back, and `payloadOf(node)` is a frozen `{ version, size, mtimeMs,
+birthtimeMs?, meta, scriptOptions, encodings }`. A `Representation` never
+leaves the facade: bytes come as a copy (`read`, `readCompressed`), a lease
+(`view`, `viewCompressed` — `{ view, version, release, [Symbol.dispose]
+}`, with `zeroCopy` only) or a stream (`createReadStream`,
+`createReadStreamCompressed`), each pinned while it reads, by the
+thread's `Pins`, as `PlaceFs` pins. A closed kernel refuses every call
+with `ERR_VFS_CLOSED`, a broken worker view with what broke it.** _Why:_ a
+representation's `data` is a view over shared memory without a pin: kept
+past its free, it would read whatever the pool put there next. The
+stream, the range it reads and the refusal of a closed kernel are the
+facades' common code (`lib/views.js`).
+
+**The intake numbers a batch as its mode says: in `'source'` the source
+does — densely, in the order it commits — and a number applied or
+waiting already is a repeat (`'duplicate'`), so a worker's batch and the
+same change read back from the source's log collapse; in `'intake'` the
+intake numbers batches as they arrive, for a single writer over one
+channel that loses nothing. In `'source'` mode nothing applies before the
+first load — an empty source loads `[]`; in `'intake'` mode an empty tree
+starts with the `put` of its root. Batches gather for a window; at its end the
+continuous run from `last + 1` goes in parts of at most `limit` ops — a
+batch is never cut — and each part is placed, then committed batch by
+batch in one synchronous step, every commit with the kernel's next
+version, and published as one `vfs-update`: the tree's deltas in order
+and the numbers they show, `seq: { from, to, loaded }`. The next part
+goes after a turn of the event loop. A batch's bytes are placed when its
+part is, not at `submit`; the first batch of a part waits for room in the
+pool, up to `spaceTimeout`, and a later one that finds none ends its
+part, so the batches before it publish first.** _Why:_ one publication
+for a run keeps every thread from seeing a state between two of its
+batches and costs one update and one round of ACKs for all of them; the
+limit bounds the synchronous step a run takes from the main thread.
+Batches that wait hold no bytes, and a catch-up after a break does not
+allocate its whole tail at once. What the batches before a full pool
+replace is retired by their publication — it may be the very room the
+next one needs, which waiting before them would never see.
+
+**A batch past a gap waits; a gap older than `gapTimeout` is told once,
+`onGap({ from, to })`, and lasts until the missing batches come or a
+load. A refused batch — a commit's refusal, a payload larger than
+`maxFileSize` (`EFBIG`), no room for `spaceTimeout` (`ENOSPC`) — is told
+to `onError` and rejects its promise, with its `seq`, `index` and `id`;
+the batches before it publish, and it holds everything after it until a
+load. `load(rows, seq)` replaces the whole state in one commit: the
+batches waiting up to `seq` are `'superseded'`, those after it join its
+publication, and in `'source'` mode a load older than the tree is
+`ESTALE`. A load that
+fails leaves the tree as it was: in `'source'` mode the batches go on by
+their numbers; in `'intake'` mode those the writer submitted after it
+were made for its state, and wait for a load. A batch that changes
+nothing publishes nothing — no delta, no version, no event — and its
+update moves `last` in every thread: the tree shows it too.** _Why:_ the
+numbers are the order of the source's commits, and a batch applied out
+of it would build a state the source never had; a source finds a lost
+batch by its gap, and the loss of its last one by comparing its counter
+with `last`. A refusal past which batches went on would leave the tree in
+a state the source never had either: only the source's snapshot repairs
+it.
+
+**A worker's `submit` and `load` are checked at once, as on the main
+thread (`EINVAL`), then sent over its link as a `vfs-mutate` naming the
+tree, every payload's bytes copied and transferred; the answer comes
+after the publication, so the worker's replica shows the batch by the
+time its promise resolves. A replica applies the deltas of a tree in an
+update in one step, with those of the places, and takes `seq.to` for its
+`last`.** _Why:_ a port delivers the update before the answer, which
+gives read-your-writes for the writer's own batches with no wait of its
+own; a batch from another process reaches the threads in a publication
+like any other, and how a thread waits for one is the interface of a
+client that has several processes.
+
+**A tree's publication goes through the tail of the places': what a
+commit placed is committed, what it took back freed at once, what it
+retired recorded — by `#<id>`, a node a commit kills having no key after
+it — and the books of compaction follow its `placed`. The `'publish'`
+event carries `trees: [{ tree, seqFrom, seqTo, loaded }]`, always an
+array, empty when a publication touched no tree; `loaded` says it began
+with a load, which replaced the state whole. A compaction relocates a
+tree's representations by id, in a commit of its own that keeps their
+versions; its update carries `seq: null`, and no event.** _Why:_ one
+path for every publication keeps ACK-before-free, pins and compaction
+the same for files and nodes. A consumer that caches by id drops
+everything after a load, a range otherwise; an entry of an object leaves
+room for the ids a publication changed, without a change of protocol.
 
 ## Routing and strict mode
 
@@ -2253,7 +2383,9 @@ length)` views made on each read; `readFile*` returns owned copies;
   `Representation`.
 - The config is deep-frozen and never mutated at runtime.
 - A tree holds published payloads only; every publication commits the
-  trees it changes in one synchronous `#flush`, one commit per tree.
+  trees it changes in one synchronous step: a place's in `#flush`, one
+  commit per tree; a tree of client ids in its intake's part, one commit
+  per batch.
 - A retired version is freed only after all linked workers ACKed its update
   and no thread holds it; nothing is freed on a timeout.
 - `diagnostics()` reads: it frees, settles, compacts and publishes
@@ -2345,6 +2477,13 @@ length)` views made on each read; `readFile*` returns owned copies;
   it is applied.
 - A node id names one node until the counter wraps; a removed node is dead
   with its subtree.
+- A tree of client ids is written by its intake only, on the main thread:
+  its batches in the order of their numbers, a publication a continuous
+  run of them, in one synchronous step — no thread sees a state between
+  two batches of one publication.
+- A batch of a tree never resolves without its commit: one whose kernel
+  closes before it rejects as the closed kernel; a worker's resolves once
+  its replica shows it.
 - Disk territory never leaves its place (`PlaceFs.#within`) and, under
   strict, never serves or lists a cached extension.
 - On Windows under strict, the patch and the module hooks pass no UNC or
@@ -2376,15 +2515,21 @@ length)` views made on each read; `readFile*` returns owned copies;
 vfs-snapshot { name: 'vfs-snapshot', snapshot }                               main → worker
             the first message of a link
 snapshot    { segments: [{ id, sab }], places: { <name>: tree },
+              trees: { <name>: { snapshot: tree, last } },
               version, instance, links?: { known: [path], generation } }
 vfs-update  { name, updateId, version, places: { <name>: { delta, created,
-              replaced, removed, moved } }, newSegments: [{ id, sab }] }      main → worker
+              replaced, removed, moved } }, trees: { <name>: { deltas,
+              seq: { from, to, loaded } | null } }, newSegments: [{ id,
+              sab }] }                                                        main → worker
 vfs-ack     { name: 'vfs-ack', updateId, retained?: [retireId] }              worker → main
 vfs-release { name: 'vfs-release', retireIds: [retireId] }                    worker → main
 vfs-mutate  { name, id, place, op, key, to?, options?, data? }                worker → main
             writeFiles: { name, id, place, op, keys, sizes, options, data }
-vfs-mutated { name, id, error?: { code, message, syscall, path, dest },
-              version? }                                                      main → worker
+            a tree's: { name, id, tree, op: 'submit' | 'load', seq, ops |
+              rows }, each payload's data a Uint8Array over a transferred
+              buffer
+vfs-mutated { name, id, error?: { code, message, syscall, path, dest,
+              seq, index, id, other }, version?, result? }                    main → worker
 vfs-links   { name: 'vfs-links', add: [path], generation }                    main → worker
 tree        the place's tree in pre-order as columns — ids, parents, names,
             classes, payloads — typed arrays and arrays of strings, no SAB
@@ -2501,6 +2646,13 @@ payload     version, size, mtimeMs (+ birthtimeMs), scriptOptions?, meta?, and
   engine loads no module of the kernel. `test/nodes.test.js` tests the
   tree in the kernel: ids and `ino`, attributes, moves that copy nothing,
   compaction under leases, a broken view.
+- The intake has a test of its own, deterministic (`test/intake.test.js`):
+  a real tree of the engine under a clock, timers, a pool and a kernel of
+  the test's — numbers, windows and parts, repeats, gaps, refusals, room
+  in the pool, loads in both modes, close. `test/trees.test.js` tests the
+  trees of client ids in the kernel: reads, leases and retirement,
+  compression, compaction, a worker's replica, its batches and their
+  refusals.
 - Prove V8 cached-data acceptance in a worker: the per-isolate compilation
   cache masks `cachedDataRejected` in the compiling thread.
 - `npm ci` must work without git or SSH access: git dependencies are pinned

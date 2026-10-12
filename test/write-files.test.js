@@ -100,6 +100,7 @@ describe('writeFiles: one publication', () => {
           places: {
             v: { created: keys, replaced: [], removed: [], moved: [] },
           },
+          trees: [],
         },
       ]);
       // An object, a Map; replaced and created keys in one set.
