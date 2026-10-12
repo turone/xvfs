@@ -4,7 +4,6 @@ const { describe, it, before, after } = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
-const { bytecodeKey, compressedKey } = require('../lib/companion.js');
 const { IO_LIMIT } = require('../lib/pool.js');
 const fsPatch = require('../lib/adapters/fs-patch.js');
 const {
@@ -19,6 +18,14 @@ const {
   diskCalls,
   within,
 } = require('./helpers.js');
+const { fileOf } = require('./helpers.js');
+
+// The keys of every file a place's tree holds.
+const filesOf = (k, name) => {
+  const { tree } = k.registry.get(name);
+  const files = tree.walk(tree.get(''), { containers: 'skip' });
+  return [...files].map(([node]) => tree.pathOf(node)).sort();
+};
 
 // The disk behind the patch, captured before any install. Not rmSync: on
 // Node 22 its recursive walk calls the public, patched node:fs.
@@ -75,34 +82,40 @@ describe('watcher pipeline', () => {
   });
 
   it('changed file: new source, bytecode and gzip in one vfs-update; old bytes wait for ACK', async () => {
-    const oldEntry = k.cache.entry('site', '/a.js');
+    const old = fileOf(k, 'site', '/a.js');
     fs.writeFileSync(at('a.js'), 'module.exports = 2; // changed');
     await flushed(1);
     const msg = lastUpdate();
     assert.equal(msg.name, 'vfs-update');
     assert.deepEqual(Object.keys(msg.places), ['site']);
-    const keys = msg.places.site.entries.map(([key]) => key).sort();
-    assert.deepEqual(
-      keys,
-      ['/a.js', bytecodeKey('/a.js'), compressedKey('/a.js', 'gzip')].sort(),
-    );
-    assert.deepEqual(msg.places.site.removals, []);
+    assert.deepEqual(msg.places.site.replaced, ['/a.js']);
+    assert.deepEqual(msg.places.site.removed, []);
     assert.ok(msg.newSegments.length >= 1);
     assert.equal(
       site.readFile('/a.js', 'utf8'),
       'module.exports = 2; // changed',
     );
-    assert.ok(place().files.has(bytecodeKey('/a.js')));
+    assert.ok(place().file('/a.js').others.requireBytecode);
     assert.deepEqual(site.storedEncodings('/a.js'), ['raw', 'gzip']);
     const ack = k.acks.get(msg.updateId);
+    const { segmentId, offset } = old.source;
     assert.ok(
-      ack && ack.retired.some((record) => record.entry === oldEntry),
+      ack &&
+        ack.retired.some(
+          (r) =>
+            r.kind === 0 &&
+            r.extent.segmentId === segmentId &&
+            r.extent.offset === offset,
+        ),
       'old source tracked until ACK',
     );
     assert.deepEqual(
-      msg.places.site.retired.map(([key]) => key).sort(),
-      keys,
-      'source and both companions retired',
+      k
+        .retirements()
+        .map((r) => `${r.key} ${r.representation}`)
+        .sort(),
+      ['/a.js fs:gzip', '/a.js require:bytecode', '/a.js source'],
+      'the source and both representations retired',
     );
     k.handleAck(msg.updateId, w.id);
     assert.equal(k.acks.size, 0);
@@ -118,8 +131,9 @@ describe('watcher pipeline', () => {
       () => site.exists('/mod/deep/x.js') && site.exists('/mod/y.html'),
       4000,
     );
-    assert.ok(place().files.has(bytecodeKey('/mod/deep/x.js')));
+    assert.ok(place().file('/mod/deep/x.js').others.requireBytecode);
     assert.deepEqual(site.storedEncodings('/mod/y.html'), ['raw', 'gzip']);
+    assert.ok(site.stat('/mod/deep').isDirectory(), 'its directories');
     for (const m of msgs.slice(n)) k.handleAck(m.updateId, w.id);
   });
 
@@ -127,49 +141,34 @@ describe('watcher pipeline', () => {
   // those, not for the projection: #flush applies an update to the main
   // thread's projection before it posts it, and the port delivers it later.
 
-  it('syntax error: source published, stale bytecode removed in the same message', async () => {
+  it('syntax error: source published, stale bytecode gone with the old payload', async () => {
     const n = msgs.length;
     const source = 'module.exports = (;';
     fs.writeFileSync(at('a.js'), source);
-    // The update of this source: the first to carry it — an epoch that
-    // publishes it again (one more event) removes nothing.
-    const publishes = (m) =>
-      m.places.site?.entries.some(
-        ([key, entry]) => key === '/a.js' && entry.stat.size === source.length,
-      );
-    const arrived = await until(() => msgs.slice(n).some(publishes), 4000);
-    assert.ok(arrived, 'the update of /a.js arrived');
-    const msg = msgs.slice(n).find(publishes);
-    assert.ok(msg.places.site.removals.includes(bytecodeKey('/a.js')));
+    const published = () => fileOf(k, 'site', '/a.js').size === source.length;
+    assert.ok(await until(published, 4000), 'the new /a.js published');
+    await until(() => msgs.slice(n).length > 0, 4000);
+    assert.ok(
+      msgs.slice(n).some((m) => m.places.site?.replaced.includes('/a.js')),
+    );
     assert.equal(site.readFile('/a.js', 'utf8'), source);
-    assert.ok(!place().files.has(bytecodeKey('/a.js')));
+    const { others } = place().file('/a.js');
+    assert.equal(others.requireBytecode, null, 'it does not parse');
     assert.deepEqual(site.storedEncodings('/a.js'), ['raw', 'gzip']);
     for (const m of msgs.slice(n)) k.handleAck(m.updateId, w.id);
   });
 
-  it('deleting a directory removes sources and companions in one message', async () => {
+  it('deleting a directory removes its subtree, its files named in the update', async () => {
     const n = msgs.length;
     fs.rmSync(at('mod'), { recursive: true });
-    // Each source, and the message that removes it.
+    // Each file, and the message that removes it.
     const removing = (key) =>
-      msgs.slice(n).find((m) => m.places.site?.removals.includes(key));
+      msgs.slice(n).find((m) => m.places.site?.removed.includes(key));
     const sources = ['/mod/deep/x.js', '/mod/y.html'];
     const arrived = await until(() => sources.every(removing), 4000);
-    assert.ok(arrived, 'the removals of both sources arrived');
-    const companions = {
-      '/mod/deep/x.js': [
-        bytecodeKey('/mod/deep/x.js'),
-        compressedKey('/mod/deep/x.js', 'gzip'),
-      ],
-      '/mod/y.html': [compressedKey('/mod/y.html', 'gzip')],
-    };
-    for (const source of sources) {
-      const { removals } = removing(source).places.site;
-      for (const companion of companions[source]) {
-        assert.ok(removals.includes(companion), `${companion} with ${source}`);
-      }
-    }
-    assert.ok(!place().files.has(bytecodeKey('/mod/deep/x.js')));
+    assert.ok(arrived, 'the removals of both files arrived');
+    assert.equal(place().file('/mod/deep/x.js'), null);
+    assert.equal(site.exists('/mod'), false, 'the directory with them');
     assert.deepEqual(site.readdir('/'), ['a.js', 'page.html']);
     for (const m of msgs.slice(n)) k.handleAck(m.updateId, w.id);
   });
@@ -197,11 +196,7 @@ describe('watcher pipeline', () => {
       );
       await k2.watchQueue.idle;
       await delivered;
-      assert.equal(
-        k2.cache.entry('site', '/ignored.bin'),
-        null,
-        'never cached',
-      );
+      assert.equal(fileOf(k2, 'site', '/ignored.bin'), null, 'never cached');
       assert.equal(
         k2.fs('site').exists('/ignored.bin'),
         true,
@@ -209,7 +204,7 @@ describe('watcher pipeline', () => {
       );
       const keys = t
         .updates()
-        .flatMap((m) => m.places.site.entries.map(([key]) => key));
+        .flatMap((m) => [...m.places.site.created, ...m.places.site.replaced]);
       assert.deepEqual(keys, ['/b.html']);
     } finally {
       k2.close();
@@ -284,17 +279,13 @@ describe('watcher: one epoch publishes a key once', () => {
       await delivered;
       const [update, ...more] = t.updates();
       assert.deepEqual(more, [], 'one vfs-update');
-      const keys = update.places.site.entries.map(([key]) => key);
-      assert.deepEqual(
-        keys.sort(),
-        [
-          '/mod/deep/x.js',
-          bytecodeKey('/mod/deep/x.js'),
-          compressedKey('/mod/deep/x.js', 'gzip'),
-          '/mod/y.html',
-          compressedKey('/mod/y.html', 'gzip'),
-        ].sort(),
-      );
+      assert.deepEqual(update.places.site.created.slice().sort(), [
+        '/mod/deep/x.js',
+        '/mod/y.html',
+      ]);
+      const { others } = fileOf(k, 'site', '/mod/deep/x.js');
+      assert.ok(others.requireBytecode && others.gzip, 'in its payload');
+      assert.ok(fileOf(k, 'site', '/mod/y.html').others.gzip);
     } finally {
       k.close();
       rm(root);
@@ -302,8 +293,8 @@ describe('watcher: one epoch publishes a key once', () => {
   });
 });
 
-// A directory deleted on disk takes its whole subtree along — companions
-// included — and nothing that merely shares its prefix.
+// A directory deleted on disk takes its whole subtree along — every
+// representation with its file — and nothing that merely shares its prefix.
 describe('watcher: a deleted directory', () => {
   it('unpublishes its subtree and nothing else', async () => {
     const root = writeTree(tmpDir('watch-dir'), {
@@ -326,11 +317,10 @@ describe('watcher: a deleted directory', () => {
       await k.watchQueue.idle;
       assert.equal(site.exists('/d'), false);
       assert.deepEqual(site.readdir('/'), ['dx.css', 'other.css']);
-      const keys = [...k.cache.index('site').entries.keys()];
       assert.deepEqual(
-        keys.filter((key) => key.startsWith('/d/')),
+        filesOf(k, 'site').filter((key) => key.startsWith('/d/')),
         [],
-        'no source or companion left under /d',
+        'no file left under /d',
       );
       assert.deepEqual(site.storedEncodings('/dx.css'), ['raw', 'gzip']);
     } finally {
@@ -436,12 +426,12 @@ describe('watcher: epoch ordering', () => {
     const log = (m) => errors.push(m);
     const ctx = await setup({ ...quiet, warn: log, error: log });
     const { k, abs, gate, entered } = ctx;
-    const { cache } = k;
-    const put = cache.put.bind(cache);
+    const { tree } = k.registry.get('site');
+    const commit = tree.commit.bind(tree);
     let commits = 0;
-    cache.put = (...args) => {
+    tree.commit = (...args) => {
       commits++;
-      return put(...args);
+      return commit(...args);
     };
     try {
       ctx.gateFirst(false);
@@ -556,10 +546,7 @@ describe('watcher: a bounded epoch', () => {
       await delivered;
       const [update] = t.updates();
       const keys = rels.map((rel) => rel.slice('site'.length));
-      assert.deepEqual(
-        update.places.site.entries.map(([key]) => key).sort(),
-        keys.sort(),
-      );
+      assert.deepEqual(update.places.site.replaced.slice().sort(), keys.sort());
       const site = k.fs('site');
       for (const key of keys) {
         assert.equal(site.readFile(key, 'utf8'), `v2 site${key}`);
@@ -898,7 +885,8 @@ describe('watcher: a map + disk place', () => {
       await k.watchQueue.idle;
       assert.equal(m.readFile('/a.txt', 'utf8'), 'a2');
       assert.equal(m.exists('/sub/b.txt'), false);
-      assert.deepEqual([...k.registry.get('m').files.keys()], ['/a.txt']);
+      assert.deepEqual(filesOf(k, 'm'), ['/a.txt']);
+      assert.ok(m.stat('/sub').isDirectory(), 'the directory stays on disk');
     } finally {
       k.close();
       rm(root);

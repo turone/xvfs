@@ -1,12 +1,23 @@
 // Types of stats.js: the stat and dirent facades of virtual entries.
-// Created per call from an entry's `{ size, mtimeMs }`, never cached.
+// Created per call from a payload's attributes, never cached.
 
 import type { BigIntStats, StatsBase } from 'node:fs';
 
-/** A `fs.Stats`-shaped stat of a virtual file or implicit directory. */
+/**
+ * A `fs.Stats`-shaped stat of a virtual file or directory: `ino` its
+ * node's id, `dev` its place's number; ctime and atime equal mtime, and
+ * birthtime does where the place keeps none.
+ */
 export class VfsStats implements StatsBase<number> {
   #private;
-  constructor(size: number, mtimeMs: number, directory?: boolean);
+  constructor(
+    size: number,
+    mtimeMs: number,
+    directory?: boolean,
+    ino?: number,
+    dev?: number,
+    birthtimeMs?: number,
+  );
   size: number;
   /** `0o100644` for a file, `0o040755` for a directory. */
   mode: number;

@@ -63,6 +63,7 @@ describe('write flags', () => {
         ]) {
           const key = (file) => `/${label}/${file}`;
           const read = (file) => k.fs(name).readFile(key(file), 'utf8');
+          await place.mkdir(key('d'), { recursive: true });
           await place.writeFile(key('f.txt'), 'one');
           await place.writeFile(key('f.txt'), 'two', { flag: 'a' });
           assert.equal(read('f.txt'), 'onetwo', label);

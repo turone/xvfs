@@ -4,7 +4,6 @@ const { describe, it } = require('node:test');
 const assert = require('node:assert/strict');
 const path = require('node:path');
 const { VfsKernel, takeSnapshot } = require('../lib/kernel.js');
-const { bytecodeKey, compressedKey } = require('../lib/companion.js');
 const {
   tmpDir,
   writeTree,
@@ -15,13 +14,14 @@ const {
   nextEvent,
   nextMessage,
 } = require('./helpers.js');
+const { fileOf } = require('./helpers.js');
 
 // The version of a publication: one number per commit that publishes
-// something, counted by the main kernel — stamped into every entry the
-// commit publishes, carried by its update and by every snapshot after it,
-// the same in every thread. A commit that changes nothing, and a
-// relocation, take none. Map places and the disk territory publish no
-// version.
+// something, counted by the main kernel — the version of every payload the
+// commit makes, carried by its update and by every snapshot after it, the
+// same in every thread. A commit that changes nothing, and a relocation,
+// take none; a move takes one, and the file it moves keeps its own. Map
+// places and the disk territory publish no version.
 
 const seaModule = (assets) => ({
   isSea: () => true,
@@ -32,11 +32,14 @@ const seaModule = (assets) => ({
   },
 });
 
-// Every entry the index holds, companions included: [place, key, entry].
-const indexed = (k) => {
+// Every file the shared places publish: [place, key, payload].
+const published = (k) => {
   const all = [];
-  for (const [name, { entries }] of k.cache.indexes) {
-    for (const [key, entry] of entries) all.push([name, key, entry]);
+  for (const { name, provider, tree } of k.registry.all()) {
+    if (provider !== 'sab' && provider !== 'sea') continue;
+    for (const [node] of tree.walk(tree.get(''), { containers: 'skip' })) {
+      all.push([name, tree.pathOf(node), tree.payloadOf(node)]);
+    }
   }
   return all;
 };
@@ -44,7 +47,7 @@ const indexed = (k) => {
 const VIRTUAL = { v: { origin: 'virtual', fs: { writable: true } } };
 
 describe('version: init', () => {
-  it('init is one publication: every entry of every shared place, companions included, is version 1', async () => {
+  it('init is one publication: every file of every shared place, its representations with it, is version 1', async () => {
     const root = writeTree(tmpDir('vfs-version'), {
       'site/a.js': 'module.exports = 1;',
       'site/b.css': 'b{}',
@@ -66,23 +69,17 @@ describe('version: init', () => {
     );
     try {
       assert.equal(k.version, 1);
-      const entries = indexed(k);
-      assert.deepEqual(
-        entries.map(([name, key]) => `${name}:${key}`).sort(),
-        [
-          'pub:/p.txt',
-          'site:/a.js',
-          `site:${bytecodeKey('/a.js')}`,
-          `site:${compressedKey('/a.js', 'gzip')}`,
-          'site:/b.css',
-          `site:${compressedKey('/b.css', 'gzip')}`,
-        ].sort(),
-      );
-      for (const [name, key, entry] of entries) {
-        assert.equal(entry.version, 1, `${name}:${key} in the index`);
-        const projected = k.registry.get(name).files.get(key);
-        assert.equal(projected.version, 1, `${name}:${key} projected`);
+      const files = published(k);
+      assert.deepEqual(files.map(([name, key]) => `${name}:${key}`).sort(), [
+        'pub:/p.txt',
+        'site:/a.js',
+        'site:/b.css',
+      ]);
+      for (const [name, key, payload] of files) {
+        assert.equal(payload.version, 1, `${name}:${key}`);
       }
+      const { others } = fileOf(k, 'site', '/a.js');
+      assert.ok(others.requireBytecode && others.gzip, 'in the one payload');
       assert.equal(k.fs('site').version('/a.js'), 1);
       assert.equal(k.fs('pub').version('/p.txt'), 1);
       assert.equal(k.fs('m').version('/c.txt'), null, 'a map place');
@@ -111,7 +108,7 @@ describe('version: init', () => {
 });
 
 describe('version: mutations', () => {
-  it('each publication takes the next version, companions and every key of it alike', async () => {
+  it('each publication takes the next version, every file of it alike; a moved file keeps its own', async () => {
     const root = tmpDir('vfs-version');
     const k = await kernel(root, {
       v: {
@@ -122,13 +119,11 @@ describe('version: mutations', () => {
     });
     try {
       const v = k.fs('v');
-      const place = k.registry.get('v');
-      const at = (key) => place.files.get(key)?.version ?? null;
       assert.equal(await v.writeFile('/a.js', 'exports.a = 1;'), undefined);
       assert.equal(k.version, 1);
       assert.equal(v.version('/a.js'), 1);
-      assert.equal(at(bytecodeKey('/a.js')), 1, 'its bytecode');
-      assert.equal(at(compressedKey('/a.js', 'gzip')), 1, 'its gzip');
+      const { others } = fileOf(k, 'v', '/a.js');
+      assert.ok(others.requireBytecode && others.gzip, 'in the one payload');
       await v.writeFile('/b.js', 'exports.b = 1;');
       assert.equal(v.version('/b.js'), 2);
       assert.equal(v.version('/a.js'), 1, 'a key keeps its own');
@@ -138,24 +133,30 @@ describe('version: mutations', () => {
       await v.unlink('/a.js');
       assert.equal(k.version, 4, 'a removal is a publication');
       assert.equal(v.version('/a.js'), null);
+      // Compiled under its path, a .js file renamed is published anew.
       await v.rename('/b.js', '/c.js');
       assert.equal(k.version, 5, 'a rename is one publication');
       assert.equal(v.version('/c.js'), 5);
-      assert.equal(at(bytecodeKey('/c.js')), 5);
+      assert.ok(fileOf(k, 'v', '/c.js').others.requireBytecode);
       assert.equal(v.version('/b.js'), null);
-      await v.writeFile('/d/x.txt', 'x');
-      await v.writeFile('/d/y.txt', 'y');
+      await v.writeFiles({ '/d/x.txt': 'x', '/d/y.txt': 'y' });
+      assert.equal(v.version('/d/x.txt'), 6);
       await v.rename('/d', '/e');
-      assert.equal(k.version, 8, 'a subtree move is one publication');
-      assert.equal(v.version('/e/x.txt'), 8);
-      assert.equal(v.version('/e/y.txt'), 8);
-      assert.equal(at(compressedKey('/e/x.txt', 'gzip')), 8);
+      assert.equal(k.version, 7, 'a subtree move is one publication');
+      assert.equal(v.version('/e/x.txt'), 6, 'a moved file keeps its own');
+      assert.equal(v.version('/e/y.txt'), 6);
+      assert.ok(fileOf(k, 'v', '/e/x.txt').others.gzip);
+      await v.rename('/e/x.txt', '/e/z.txt');
+      assert.equal(k.version, 8, 'a file moved as it is');
+      assert.equal(v.version('/e/z.txt'), 6);
       await v.rm('/e', { recursive: true });
       assert.equal(k.version, 9, 'a subtree removal is one publication');
       await v.writeFile('/empty.txt', '');
       assert.equal(v.version('/empty.txt'), 10, 'an empty file');
+      await v.mkdir('/n');
+      assert.equal(k.version, 11, 'a directory made is one publication');
       // A version is not the retireId of anything: each replaced file here
-      // retired its source and its companions under ids of their own.
+      // retired its source and its representations under ids of their own.
       assert.ok(k.nextRetireId > k.version, `${k.nextRetireId}`);
     } finally {
       k.close();
@@ -175,12 +176,11 @@ describe('version: mutations', () => {
       k.watcher.close();
       const v = k.fs('v');
       await v.writeFile('/a.txt', 'a');
-      await v.writeFile('/d/b.txt', 'b');
+      await v.writeFiles({ '/d/b.txt': 'b' });
       const version = k.version;
       const updates = k.nextUpdateId;
       await v.rename('/a.txt', '/a.txt');
       await v.rename('/d', '/d');
-      await v.mkdir('/n');
       await v.mkdir('/d', { recursive: true });
       await v.rm('/gone', { force: true });
       // A change of a file that is gone and was never published, and a
@@ -218,7 +218,7 @@ describe('version: mutations', () => {
       await v.writeFile('/a', Buffer.alloc(2 * KB, 'a'));
       await v.writeFile('/b', Buffer.alloc(2 * KB, 'b'));
       await v.writeFile('/c', Buffer.alloc(200, 'c'));
-      assert.equal(k.cache.entry('v', '/c').segmentId, 2);
+      assert.equal(fileOf(k, 'v', '/c').source.segmentId, 2);
       const moved = v.version('/c');
       const w = tap(k, { ack: false });
       await v.unlink('/a');
@@ -227,11 +227,11 @@ describe('version: mutations', () => {
       const closed = nextEvent(k.links.get(w.id), 'close');
       w.port.close();
       await closed;
-      assert.equal(k.cache.entry('v', '/c').segmentId, 1, '/c relocated');
+      assert.equal(fileOf(k, 'v', '/c').source.segmentId, 1, '/c relocated');
       assert.equal(k.nextUpdateId, updates + 1, 'one update: the relocation');
       assert.equal(k.version, version, 'the kernel keeps its version');
       assert.equal(v.version('/c'), moved, 'the entry keeps its version');
-      assert.equal(k.cache.entry('v', '/c').version, moved);
+      assert.equal(fileOf(k, 'v', '/c').version, moved);
       assert.equal(v.version('/b'), 2);
       // Updates and versions part here: a snapshot, and a worker made from
       // one, carry the version.
@@ -364,13 +364,13 @@ describe('version: reads', () => {
     });
     try {
       const big = k.fs('big');
-      assert.equal(k.cache.entry('big', '/large.bin').kind, 'disk');
+      assert.equal(fileOf(k, 'big', '/large.bin').source, null);
       assert.equal(big.version('/large.bin'), 1, 'larger than maxFileSize');
       assert.equal(big.version('/small.bin'), 1);
-      assert.equal(k.cache.entry('gz', '/a.css').kind, 'disk');
+      assert.equal(fileOf(k, 'gz', '/a.css').source, null);
       assert.equal(k.fs('gz').version('/a.css'), 1, 'retainRaw: false');
       const mix = k.fs('mix');
-      assert.equal(k.cache.entry('mix', '/r.js').version, 1, 'for require');
+      assert.equal(fileOf(k, 'mix', '/r.js').version, 1, 'for require');
       assert.equal(mix.exists('/r.js'), false);
       assert.equal(mix.version('/r.js'), null, 'not for fs');
       assert.equal(mix.version('/s.css'), 1);

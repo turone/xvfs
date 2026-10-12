@@ -69,6 +69,7 @@ describe('listing names follow the requested encoding', () => {
       { strict: true },
     );
     writeDisk(at('site', 'late.html'), 'unpublished');
+    k.fs('mem').mkdir('/ö');
     k.fs('mem').writeFile('/ö/ü.txt', 'u');
     fsPatch.install(k);
   });

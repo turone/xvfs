@@ -8,17 +8,14 @@ import type { MessagePort } from 'node:worker_threads';
 import { VfsConfig, VfsKernel } from 'xvfs';
 import pkg = require('xvfs');
 import type {
-  CacheEntry,
   DeepReadonly,
-  FileStat,
+  FilePayload,
   Place,
   PlaceChanges,
   Preparer,
   PreparerFile,
-  ProjectedFile,
   PublishEvent,
   ResolvedPlace,
-  ScriptOptions,
   VfsRawConfig,
 } from 'xvfs';
 import { expectType } from './expect.js';
@@ -108,6 +105,7 @@ const onPublish = (event: PublishEvent) => {
         readonly created: readonly string[];
         readonly replaced: readonly string[];
         readonly removed: readonly string[];
+        readonly moved: readonly (readonly [string, string])[];
       };
     };
   }>()(event);
@@ -137,7 +135,7 @@ void listen;
 expectType<{
   readonly segments: { readonly id: number; readonly sab: SharedArrayBuffer }[];
   readonly places: {
-    readonly [name: string]: { readonly entries: [string, CacheEntry][] };
+    readonly [name: string]: object;
   };
   readonly version: number;
   readonly instance: string;
@@ -283,6 +281,9 @@ if (read.kind === 'file') {
     readonly origin: 'disk' | 'virtual' | null;
     readonly root: string;
     readonly virtual: boolean;
+    readonly dev: number;
+    file(key: string): FilePayload | null;
+    isDirectory(key: string): boolean;
     pathOf(key: string): string;
   }>()(read.place);
   expectType<string>()(read.key);
@@ -292,20 +293,19 @@ expectType<
   | {
       readonly place: Place;
       readonly key: string;
-      readonly file: ProjectedFile;
+      readonly payload: FilePayload;
     }
   | { readonly denied: true }
   | null
 >()(found);
 if (found && !('denied' in found)) {
-  expectType<{
-    readonly data: Buffer | null;
-    readonly stat: FileStat;
-    readonly meta?: object;
-    readonly scriptOptions?: ScriptOptions;
-    readonly version?: number;
-    readonly path?: string | null;
-  }>()(found.file);
+  const { payload } = found;
+  expectType<number>()(payload.version);
+  expectType<number>()(payload.size);
+  expectType<number>()(payload.mtimeMs);
+  expectType<number | undefined>()(payload.birthtimeMs);
+  if (payload.source) expectType<Buffer>()(payload.source.data);
+  expectType<object | null | undefined>()(payload.extras?.meta);
 }
 kernel.resolveModule('/abs/path', 'import');
 expectType<Buffer | null>()(kernel.bytecode('/abs/path'));

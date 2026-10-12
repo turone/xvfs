@@ -1,16 +1,9 @@
-// The worker side: attach(); FilesystemCache, the engine index.js exports,
+// The worker side: attach(); FilesystemCache, the pool index.js exports,
 // leaf by leaf; the error shape.
 
 import { workerData } from 'node:worker_threads';
 import { attach, FilesystemCache, VfsKernel } from 'xvfs';
-import type {
-  CacheEntry,
-  FileInput,
-  FileStat,
-  ScriptOptions,
-  VfsError,
-  VfsLink,
-} from 'xvfs';
+import type { Extent, FileInput, VfsError, VfsLink } from 'xvfs';
 import { expectType } from './expect.js';
 
 // --- attach() ---
@@ -45,48 +38,23 @@ new FilesystemCache({
   maxFileSize: 1,
   reader: async () => {},
 });
-type Shared = {
-  readonly kind: 'shared';
-  readonly segmentId: number;
-  readonly offset: number;
-  readonly length: number;
-  readonly stat: FileStat;
-  readonly meta?: object;
-  readonly scriptOptions?: ScriptOptions;
-  readonly version?: number;
-};
-type Disk = {
-  readonly kind: 'disk';
-  readonly path: string | null;
-  readonly stat: FileStat;
-  readonly meta?: object;
-  readonly scriptOptions?: ScriptOptions;
-  readonly version?: number;
-};
-type Projected = {
-  readonly data: Buffer | null;
-  readonly stat: FileStat;
-  readonly meta?: object;
-  readonly scriptOptions?: ScriptOptions;
-  readonly version?: number;
-  readonly path?: string | null;
-};
 const fill = async () => {
   const input: FileInput = {
     data: Buffer.from('x'),
     stat: { size: 1, mtimeMs: 0 },
   };
-  expectType<Promise<Shared | Disk | null>>()(cache.allocate(input));
-  const entry = await cache.allocate(input, { fallback: false });
-  if (entry?.kind === 'shared') expectType<number>()(entry.segmentId);
-  if (entry?.kind === 'disk') expectType<string | null>()(entry.path);
-  if (entry) {
-    expectType<CacheEntry | null>()(cache.put('static', '/x', entry));
-    expectType<Shared | Disk | null>()(cache.remove('static', '/x'));
-    expectType<void>()(cache.free(entry));
-    expectType<Projected>()(FilesystemCache.projectEntry(entry, new Map()));
+  expectType<Promise<Extent | null>>()(cache.allocate(input));
+  const extent = await cache.allocate(input, { maxFileSize: 2 });
+  if (extent) {
+    expectType<number>()(extent.segmentId);
+    expectType<number>()(extent.offset);
+    expectType<number>()(extent.length);
+    expectType<void>()(cache.committed(extent));
+    expectType<void>()(cache.free(extent));
   }
-  expectType<Shared | null>()(
+  expectType<void>()(cache.free(null));
+  expectType<void>()(cache.reopen(1));
+  expectType<Extent | null>()(
     cache.allocateSync({
       data: Buffer.from('x'),
       stat: { size: 1, mtimeMs: 0 },
@@ -95,32 +63,11 @@ const fill = async () => {
   expectType<{ readonly id: number; readonly sab: SharedArrayBuffer } | null>()(
     cache.getSegment(1),
   );
-  expectType<{ readonly entries: Map<string, CacheEntry> }>()(
-    cache.index('static'),
+  expectType<number | null>()(cache.compactTarget(0.3));
+  expectType<Extent[] | null>()(cache.relocate(2, extent ? [extent] : []));
+  expectType<{ readonly id: number; readonly sab: SharedArrayBuffer }[]>()(
+    cache.snapshot(),
   );
-  expectType<Shared | Disk | null>()(cache.entry('static', '/x'));
-  expectType<{ name: string; key: string; entry: Shared }[] | null>()(
-    cache.compact(0.3),
-  );
-  expectType<Map<string, Projected>>()(
-    FilesystemCache.project(cache.index('static'), new Map()),
-  );
-  expectType<Map<string, Projected>>()(
-    FilesystemCache.project(
-      cache.snapshot().places['static'],
-      new Map(),
-      new Map(),
-    ),
-  );
-  expectType<{
-    readonly segments: {
-      readonly id: number;
-      readonly sab: SharedArrayBuffer;
-    }[];
-    readonly places: {
-      readonly [name: string]: { readonly entries: [string, CacheEntry][] };
-    };
-  }>()(cache.snapshot());
   expectType<{
     readonly limit: number;
     readonly segmentSize: number;
@@ -170,5 +117,5 @@ attach({ hooks: false });
 new FilesystemCache();
 // @ts-expect-error `allocateSync` takes in-memory bytes
 cache.allocateSync({ path: '/x', stat: { size: 1, mtimeMs: 0 } });
-// @ts-expect-error a cache entry, not a projected file
-cache.put('static', '/x', { data: null, stat: { size: 0, mtimeMs: 0 } });
+// @ts-expect-error the pool knows extents, never keys
+cache.free('/x');

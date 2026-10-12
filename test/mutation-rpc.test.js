@@ -134,9 +134,11 @@ describe('mutation RPC', () => {
     w.main.on('message', (msg) => {
       if (msg?.name === 'vfs-mutate') sent.push([msg.op, msg.options]);
     });
+    await k.fs('v').mkdir('/d');
+    await k.fs('v').mkdir('/e');
     const store = k.registry.get('v').store;
     const taken = [];
-    const ops = ['write', 'append', 'unlink', 'mkdir', 'rm', 'rename'];
+    const ops = ['write', 'append', 'unlink', 'mkdir', 'rmdir', 'rm', 'rename'];
     for (const op of [...ops, 'writeFiles']) {
       const original = store[op];
       store[op] = function (...args) {
@@ -149,6 +151,7 @@ describe('mutation RPC', () => {
       await v.writeFile('/d/a.txt', 'a', { flag: 'wx', mode: 0o600 });
       await v.appendFile('/d/a.txt', 'b', { mode: 0o600 });
       await v.mkdir('/n', { recursive: 1, mode: 0o700 });
+      await v.rmdir('/n', { recursive: 1 });
       await v.rename('/d/a.txt', '/d/b.txt');
       await v.unlink('/d/b.txt');
       await v.writeFile('/e/c.txt', 'c');
@@ -159,6 +162,7 @@ describe('mutation RPC', () => {
         ['write', { exclusive: true }],
         ['append', {}],
         ['mkdir', { recursive: true }],
+        ['rmdir', {}],
         ['rename', { directory: false }],
         ['unlink', { directory: false }],
         ['write', { exclusive: false }],
@@ -316,11 +320,30 @@ describe('mutation RPC', () => {
         key: '/d/a.txt',
         data: bytes('a'),
       });
+      refusal(reply, {
+        code: 'ENOENT',
+        syscall: 'open',
+        path: v.pathOf('/d/a.txt'),
+      });
+      reply = await request(link, { place: 'v', op: 'mkdir', key: '/d' });
+      assert.equal(reply.error, null, 'mkdir');
+      reply = await request(link, {
+        place: 'v',
+        op: 'write',
+        key: '/d/a.txt',
+        data: bytes('a'),
+      });
       assert.equal(reply.error, null);
       reply = await request(link, { place: 'v', op: 'mkdir', key: '/d' });
       refusal(reply, {
         code: 'EEXIST',
         syscall: 'mkdir',
+        path: v.pathOf('/d'),
+      });
+      reply = await request(link, { place: 'v', op: 'rmdir', key: '/d' });
+      refusal(reply, {
+        code: 'ENOTEMPTY',
+        syscall: 'rmdir',
         path: v.pathOf('/d'),
       });
       reply = await request(link, {

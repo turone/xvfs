@@ -5,7 +5,6 @@ const assert = require('node:assert/strict');
 const { Worker } = require('node:worker_threads');
 const os = require('node:os');
 const path = require('node:path');
-const { bytecodeKey } = require('../lib/companion.js');
 const {
   tmpDir,
   writeTree,
@@ -18,7 +17,7 @@ const {
 
 // Bytecode flavors: fs.script.compile (bare vm.Script, PlaceFs.script()) and
 // require.compile (Module.wrap flavor, consumed by the _compile hook) are
-// two independent companions of the same canonical source
+// two independent representations of the same canonical source
 // (doc/architecture.md, "Preparation").
 
 const wrap = {
@@ -39,7 +38,7 @@ const runInWorker = (code, workerData, transferList) =>
   );
 
 describe('bytecode flavors: coexistence', () => {
-  it('only fs.script.compile is configured: only the script companion exists', async () => {
+  it('only fs.script.compile is configured: only the script flavor exists', async () => {
     const root = tmpDir('bc-script-only');
     const k = await kernel(
       root,
@@ -61,14 +60,14 @@ describe('bytecode flavors: coexistence', () => {
       const place = k.registry.get('v');
       assert.notEqual(place.bytecode('/h.js', 'script'), null);
       assert.equal(place.bytecode('/h.js', 'require'), null);
-      assert.equal(place.files.has(bytecodeKey('/h.js', 'require')), false);
+      assert.equal(place.file('/h.js').others.requireBytecode, null);
     } finally {
       k.close();
       rm(root);
     }
   });
 
-  it('only require.compile is configured: only the require companion exists', async () => {
+  it('only require.compile is configured: only the require flavor exists', async () => {
     const root = tmpDir('bc-require-only');
     const k = await kernel(root, {
       v: {
@@ -82,14 +81,14 @@ describe('bytecode flavors: coexistence', () => {
       const place = k.registry.get('v');
       assert.equal(place.bytecode('/h.js', 'script'), null);
       assert.notEqual(place.bytecode('/h.js', 'require'), null);
-      assert.equal(place.files.has(bytecodeKey('/h.js', 'script')), false);
+      assert.equal(place.file('/h.js').others.scriptBytecode, null);
     } finally {
       k.close();
       rm(root);
     }
   });
 
-  it('both flags on one prepared source: two distinct companions, one canonical entry', async () => {
+  it('both flags on one prepared source: two distinct representations, one source', async () => {
     const root = tmpDir('bc-both');
     const k = await kernel(
       root,
@@ -119,10 +118,9 @@ describe('bytecode flavors: coexistence', () => {
         false,
         'script and require bytecode are different bytes',
       );
-      const sourceKeys = [...place.files.keys()].filter(
-        (key) => key === '/h.js',
-      );
-      assert.equal(sourceKeys.length, 1, 'canonical source stored once');
+      const { source, others } = place.file('/h.js');
+      assert.ok(source, 'canonical source stored once');
+      assert.notEqual(others.scriptBytecode, others.requireBytecode);
 
       // Both cached data are accepted by their own consumer in another isolate.
       const bundle = k.fs('v').script('/h.js');
@@ -176,7 +174,7 @@ describe('bytecode flavors: coexistence', () => {
   // not a content check, and it is masked entirely once the same isolate has
   // already compiled the source. Such a test would therefore assert V8's
   // behaviour, not the library's. The real guard is structural: the flavors
-  // are separate companions (`\0script:bytecode` / `\0require:bytecode`) and
+  // are separate representations (`scriptBytecode` / `requireBytecode`) and
   // `PlaceFs.script()` / the `_compile` hook each read only their own,
   // proven above ("only … exists", "both flags").
 });
@@ -228,16 +226,19 @@ describe('bytecode flavors: compile lists', () => {
         assert.deepEqual(prepared, [`${name}:/view.dhtml`], 'prepared once');
         prepared.length = 0;
         const place = k.registry.get(name);
-        const companions = [...place.files.keys()].filter((key) =>
-          key.includes('\0'),
-        );
+        const flavors = Object.keys(FILES).flatMap((key) => {
+          const others = place.file(key).others ?? {};
+          return ['requireBytecode', 'scriptBytecode']
+            .filter((field) => others[field])
+            .map((field) => `${key} ${field}`);
+        });
         const compiled = ['/a.js', '/b.cjs', '/view.dhtml'];
         assert.deepEqual(
-          companions.sort(),
+          flavors.sort(),
           compiled
             .flatMap((key) => [
-              bytecodeKey(key, 'require'),
-              bytecodeKey(key, 'script'),
+              `${key} requireBytecode`,
+              `${key} scriptBytecode`,
             ])
             .sort(),
         );
@@ -272,13 +273,12 @@ describe('bytecode flavors: compile lists', () => {
     try {
       await k.fs('v').writeFile('/c.js', 'module.exports = 3;');
       for (const name of ['lib', 'app', 'v']) {
-        const keys = [...k.registry.get(name).files.keys()];
-        assert.ok(keys.length > 0, name);
-        assert.deepEqual(
-          keys.filter((key) => key.includes('\0')),
-          [],
-          `${name}: no companion`,
-        );
+        const { tree } = k.registry.get(name);
+        const files = [...tree.walk(tree.get(''), { containers: 'skip' })];
+        assert.ok(files.length > 0, name);
+        for (const [node] of files) {
+          assert.equal(tree.payloadOf(node).others, null, `${name}: no flavor`);
+        }
       }
       assert.equal(k.bytecode(path.join(root, 'lib', 'a.js')), null);
       assert.equal(k.fs('app').script('/s.js').source, '1 + 1');
@@ -427,10 +427,10 @@ describe('bytecode flavors: failure and rollback', () => {
       const { source, cachedData } = place.script('/h.js');
       return { source, cachedData: Buffer.from(cachedData) };
     };
-    // The published version: the entries of the source and its companion.
+    // The published version: the payload of the source and its flavor.
     const version = (name) => {
-      const { files } = k.registry.get(name);
-      return [files.get('/h.js'), files.get(bytecodeKey('/h.js', 'script'))];
+      const payload = k.registry.get(name).file('/h.js');
+      return [payload, payload.others.scriptBytecode];
     };
     await k.fs('v').writeFile('/h.js', 'x => x');
     k.fs('m').writeFile('/h.js', 'x => x');
@@ -457,7 +457,7 @@ describe('bytecode flavors: failure and rollback', () => {
         assert.deepEqual(bundle(k.fs(name)), before[name], label);
         const [source, companion] = version(name);
         assert.equal(source, versions[name][0], `${label}: the same version`);
-        assert.equal(companion, versions[name][1], `${label}: its companion`);
+        assert.equal(companion, versions[name][1], `${label}: its flavor`);
       }
       assert.deepEqual(bundle(w.kernel.fs('v')), before.v, 'worker projection');
       assert.equal(k.nextUpdateId, updates, 'nothing published');
@@ -495,16 +495,14 @@ describe('bytecode flavors: failure and rollback', () => {
       const v = k.fs('v');
       await v.writeFile('/h.js', 'module.exports = 1;');
       await v.writeFile('/r.txt', 'module.exports = 2;');
-      const { files } = k.registry.get('v');
-      const version = () =>
-        [
-          '/h.js',
-          bytecodeKey('/h.js'),
-          bytecodeKey('/h.js', 'script'),
-          '/r.txt',
-        ].map((key) => files.get(key));
+      const place = k.registry.get('v');
+      const version = () => ['/h.js', '/r.txt'].map((key) => place.file(key));
       const before = version();
-      assert.ok(before.every(Boolean), 'the sources and both flavors');
+      const { others } = before[0];
+      assert.ok(
+        others.requireBytecode && others.scriptBytecode,
+        'both flavors',
+      );
       const { cache } = k;
       const { allocate } = cache;
       const allocated = [];
@@ -551,7 +549,7 @@ describe('bytecode flavors: failure and rollback', () => {
         }
       }
       assert.deepEqual(version(), before, 'the published version stays');
-      assert.equal(files.has('/r.js'), false, 'nothing moved');
+      assert.equal(place.file('/r.js'), null, 'nothing moved');
       assert.equal(k.nextUpdateId, updates, 'nothing published');
       assert.equal(leakedBytes(k), 0, 'the source and require flavor freed');
     } finally {
@@ -562,7 +560,7 @@ describe('bytecode flavors: failure and rollback', () => {
   });
 
   // Distinct from the case above (a mocked, transient "pool is full"): a
-  // companion that is larger than one segment can never fit, whatever the
+  // flavor that is larger than one segment can never fit, whatever the
   // pool's state — EFBIG, not ENOSPC. A segment of 64 bytes forces this
   // for any real script: even the smallest source's V8 cached data is a
   // few hundred bytes (fixed format overhead), no oversized source needed.
@@ -668,8 +666,8 @@ describe('bytecode flavors: failure and rollback', () => {
         ['map', 'm', k.fs('m')],
         ['worker', 'v', w.kernel.fs('v')],
       ]) {
-        const { files } = k.registry.get(name);
-        const version = files.get('/a.txt');
+        const own = k.registry.get(name);
+        const version = own.file('/a.txt');
         let err = null;
         try {
           await place.rename('/a.txt', '/a.js');
@@ -693,8 +691,8 @@ describe('bytecode flavors: failure and rollback', () => {
           },
           label,
         );
-        assert.equal(files.get('/a.txt'), version, `${label}: the source`);
-        assert.equal(files.has('/a.js'), false, `${label}: no destination`);
+        assert.equal(own.file('/a.txt'), version, `${label}: the source`);
+        assert.equal(own.file('/a.js'), null, `${label}: no destination`);
       }
       assert.equal(w.kernel.fs('v').exists('/a.js'), false, 'worker');
       assert.equal(k.nextUpdateId, updates, 'nothing published');

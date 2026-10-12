@@ -16,7 +16,45 @@ const {
 const { Place } = require('../lib/place.js');
 const { VfsConfig } = require('../lib/config.js');
 const { VfsKernel } = require('../lib/kernel.js');
+const { createTree } = require('../lib/tree.js');
+const { survey } = require('../lib/epoch.js');
 const { quiet } = require('./helpers.js');
+
+// A place with a tree of its own over one small segment, and files
+// published into it as the kernel publishes them: `[key, text]`, a text
+// null for a file read from disk; the place's spellings follow.
+const SAB = new SharedArrayBuffer(256);
+const SEGMENTS = new Map([[1, SAB]]);
+let tail = 0;
+const plant = (place) => {
+  place.tree = createTree({ segments: SEGMENTS, retireIds: { next: () => 1 } });
+  return place;
+};
+const publish = (place, files) => {
+  const ops = files.map(([key, text]) => {
+    if (text === null) {
+      return [
+        'write',
+        key,
+        { size: 1, mtimeMs: 0, representations: [] },
+        { parents: true },
+      ];
+    }
+    const bytes = Buffer.from(text);
+    new Uint8Array(SAB, tail, bytes.length).set(bytes);
+    const extent = { segmentId: 1, offset: tail, length: bytes.length };
+    tail += bytes.length;
+    const input = {
+      size: bytes.length,
+      mtimeMs: 0,
+      representations: [[0, extent]],
+    };
+    return ['write', key, input, { parents: true }];
+  });
+  const changes = survey(place.tree, ops);
+  place.tree.commit(ops, (place.version = (place.version ?? 0) + 1), 0);
+  place.spelled(changes.created, changes.removed, changes.moved);
+};
 
 // Lexical containment: only a real `..` component leaves appRoot. Names that
 // merely start with dots are ordinary names routed by the usual Place rules.
@@ -757,11 +795,7 @@ describe('PlaceRegistry: short (8.3) names', () => {
 describe('a published source named in another case, where the disk would answer', () => {
   const root = path.resolve('/srv/app');
   const at = (...parts) => path.join(root, ...parts);
-  const file = (text) => ({
-    data: Buffer.from(text),
-    stat: { size: text.length, mtimeMs: 0 },
-  });
-  // A kernel never initialized, its places projected by hand, each as a
+  // A kernel never initialized, its places' trees filled by hand, each as a
   // case-insensitive platform builds it.
   const kernelOf = (strict) => {
     const config = new VfsConfig({
@@ -775,17 +809,20 @@ describe('a published source named in another case, where the disk would answer'
     });
     const k = new VfsKernel(config, { appRoot: root, console: quiet });
     for (const pc of config.places) {
-      k.registry.register(new Place(pc, root, true));
+      k.registry.register(plant(new Place(pc, root, true)));
     }
-    const files = (name) => k.registry.get(name).files;
-    files('site').set('/a.txt', file('A'));
-    files('site').set('/Sub/B.txt', file('B'));
-    const big = { size: 1, mtimeMs: 0 };
-    files('site').set('/big.txt', { data: null, path: at('big'), stat: big });
-    files('locked').set('/a.txt', file('A'));
-    files('v').set('/a.txt', file('A'));
-    files('v').set('/a.js', file('module.exports = 1;'));
-    files('lib').set('/m.js', file('module.exports = 1;'));
+    const place = (name) => k.registry.get(name);
+    publish(place('site'), [
+      ['/a.txt', 'A'],
+      ['/Sub/B.txt', 'B'],
+      ['/big.txt', null],
+    ]);
+    publish(place('locked'), [['/a.txt', 'A']]);
+    publish(place('v'), [
+      ['/a.txt', 'A'],
+      ['/a.js', 'module.exports = 1;'],
+    ]);
+    publish(place('lib'), [['/m.js', 'module.exports = 1;']]);
     return k;
   };
 
@@ -858,14 +895,14 @@ describe('a published source named in another case, where the disk would answer'
       },
     });
     const places = (caseless) =>
-      config.places.map((pc) => new Place(pc, root, caseless));
+      config.places.map((pc) => plant(new Place(pc, root, caseless)));
     const [site, v] = places(true);
-    site.files.set('/a.txt', file('A'));
-    v.files.set('/a.txt', file('A'));
+    publish(site, [['/a.txt', 'A']]);
+    publish(v, [['/a.txt', 'A']]);
     assert.equal(site.spelling('/A.TXT'), '/a.txt');
     assert.equal(v.spelling('/A.TXT'), null);
     const [exact] = places(false);
-    exact.files.set('/a.txt', file('A'));
+    publish(exact, [['/a.txt', 'A']]);
     assert.equal(exact.spelling('/A.TXT'), null);
   });
 });

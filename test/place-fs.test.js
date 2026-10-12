@@ -8,6 +8,7 @@ const { VfsStats, VfsBigIntStats, VfsDirent } = require('../lib/stats.js');
 const { fsError } = require('../lib/errors.js');
 const { PlaceFs } = require('../lib/place-fs.js');
 const { tmpDir, writeTree, rm, kernel, drain } = require('./helpers.js');
+const { fileOf } = require('./helpers.js');
 
 describe('VfsStats / VfsDirent / fsError', () => {
   it('file stats expose size, times and type predicates', () => {
@@ -114,7 +115,7 @@ describe('PlaceFs: reads', () => {
     // Outside fs.ext: disk territory, served from disk by the non-strict
     // default `fs.fallback: 'disk'`, never cached.
     assert.deepEqual(pub.readFile('/skip.bin'), Buffer.from([0, 1]));
-    assert.equal(k.cache.entry('pub', '/skip.bin'), null);
+    assert.equal(fileOf(k, 'pub', '/skip.bin'), null);
     assert.equal(pub.readFile('/empty.txt').length, 0);
   });
 
@@ -447,15 +448,26 @@ describe('PlaceFs: memory mutations', () => {
     assert.equal(mem.stat('/log.txt').size, 2);
   });
 
-  it('mkdir is a no-op; directories are implicit', () => {
+  it('mkdir makes a directory, empty until something is written into it', () => {
     mem.mkdir('/dir');
-    assert.ok(!mem.exists('/dir'));
-    mem.writeFile('/dir/sub/f.txt', 'f');
+    assert.ok(mem.exists('/dir'));
     assert.ok(mem.stat('/dir').isDirectory());
+    assert.deepEqual(mem.readdir('/dir'), []);
+    assert.throws(() => mem.writeFile('/dir/sub/f.txt', 'f'), {
+      code: 'ENOENT',
+    });
+    mem.mkdir('/dir/sub');
+    mem.writeFile('/dir/sub/f.txt', 'f');
     assert.deepEqual(mem.readdir('/dir'), ['sub']);
+    assert.throws(() => mem.rmdir('/dir'), { code: 'ENOTEMPTY' });
+    assert.throws(() => mem.rmdir('/dir/sub/f.txt'), { code: 'ENOTDIR' });
+    mem.rm('/dir/sub', { recursive: true });
+    mem.rmdir('/dir');
+    assert.ok(!mem.exists('/dir'));
+    assert.throws(() => mem.rmdir('/dir'), { code: 'ENOENT' });
   });
 
-  it('unlink removes source and companions', () => {
+  it('unlink removes the file and its representations', () => {
     mem.writeFile('/u.js', 'module.exports = 3;');
     assert.ok(k.bytecode(path.join(root, 'mem', 'u.js')));
     mem.unlink('/u.js');
@@ -465,8 +477,7 @@ describe('PlaceFs: memory mutations', () => {
   });
 
   it('rm: file, recursive tree, force, a directory without recursive', () => {
-    mem.writeFile('/t/a.txt', 'a');
-    mem.writeFile('/t/b/c.txt', 'c');
+    mem.writeFiles({ '/t/a.txt': 'a', '/t/b/c.txt': 'c' });
     assert.throws(() => mem.rm('/t'), { code: 'ERR_FS_EISDIR' });
     assert.throws(() => mem.rm('/nope'), { code: 'ENOENT' });
     mem.rm('/nope', { force: true });
@@ -477,8 +488,7 @@ describe('PlaceFs: memory mutations', () => {
   });
 
   it('rm recursive/force combinations', () => {
-    mem.writeFile('/combo/a.txt', 'a');
-    mem.writeFile('/combo/b/c.txt', 'c');
+    mem.writeFiles({ '/combo/a.txt': 'a', '/combo/b/c.txt': 'c' });
     assert.throws(() => mem.rm('/combo', { force: true }), {
       code: 'ERR_FS_EISDIR',
     });
@@ -492,8 +502,13 @@ describe('PlaceFs: memory mutations', () => {
     assert.ok(!mem.exists('/combo/b/c.txt'));
   });
 
-  it('rename moves source and companions inside the place', () => {
+  it('rename moves a file and its representations inside the place', () => {
     mem.writeFile('/r1.js', 'module.exports = 4;');
+    assert.throws(() => mem.rename('/r1.js', '/moved/r2.js'), {
+      code: 'ENOENT',
+      syscall: 'rename',
+    });
+    mem.mkdir('/moved');
     mem.rename('/r1.js', '/moved/r2.js');
     assert.ok(!mem.exists('/r1.js'));
     assert.equal(mem.readFile('/moved/r2.js', 'utf8'), 'module.exports = 4;');

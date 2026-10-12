@@ -1,9 +1,8 @@
-// Types of cache.js: FilesystemCache, the pooled SharedArrayBuffer file
-// cache the main kernel allocates from, and its data contract — the
-// entries a snapshot carries and the files a thread projects from them.
+// Types of cache.js: FilesystemCache, the pool of SharedArrayBuffer
+// segments the main kernel places file bytes in, and its compaction plan,
+// and the snapshot a worker is made from.
 
 import type { Encoding } from './config.js';
-import type { ScriptOptions } from './pipeline.js';
 
 /** Compact metadata of a file. */
 export interface FileStat {
@@ -22,40 +21,16 @@ export interface FileInput {
   data?: Buffer | null;
   path?: string | null;
   stat: FileStat;
-  /** Frozen cloneable; travels with the entry. */
-  meta?: object | null;
-  scriptOptions?: ScriptOptions | null;
 }
 
-/** A file placed in a SAB segment. */
-export interface SharedEntry {
-  readonly kind: 'shared';
+/**
+ * Bytes in a segment of the pool; `{ segmentId: 0, offset: 0, length: 0 }`
+ * is the empty extent, in no segment.
+ */
+export interface Extent {
   readonly segmentId: number;
   readonly offset: number;
   readonly length: number;
-  readonly stat: FileStat;
-  readonly meta?: object;
-  readonly scriptOptions?: ScriptOptions;
-  /** The kernel's commit that published it; none before it is published. */
-  readonly version?: number;
-}
-
-/** A file left on disk: above `maxFileSize`, no room, `retainRaw: false`. */
-export interface DiskEntry {
-  readonly kind: 'disk';
-  readonly path: string | null;
-  readonly stat: FileStat;
-  readonly meta?: object;
-  readonly scriptOptions?: ScriptOptions;
-  /** The kernel's commit that published it; none before it is published. */
-  readonly version?: number;
-}
-
-export type CacheEntry = SharedEntry | DiskEntry;
-
-/** One namespace (place): its published entries only. */
-export interface FsIndex {
-  readonly entries: Map<string, CacheEntry>;
 }
 
 export interface Segment {
@@ -63,44 +38,23 @@ export interface Segment {
   readonly sab: SharedArrayBuffer;
 }
 
-export interface PlaceSnapshot {
-  readonly entries: [string, CacheEntry][];
-}
-
-/** What `FilesystemCache.snapshot()` gives: published entries only. */
-export interface CacheSnapshot {
-  readonly segments: Segment[];
-  readonly places: { readonly [name: string]: PlaceSnapshot };
-}
-
 /**
- * What `kernel.snapshot()` gives a worker: published entries only, the
- * kernel's version and its instance; under strict with a place of `links:
- * 'deny'`, the links the kernel knows and its index's generation — how many
- * it has come to know — against which a `vfs-links` is newer or not.
+ * What `kernel.snapshot()` gives a worker: every segment of the pool, the
+ * tree of each shared place as it is published (lib/tree.js: an encoding
+ * of the engine's own, structured-cloneable), the kernel's version and its
+ * instance; under strict with a place of `links: 'deny'`, the links the
+ * kernel knows and its index's generation — how many it has come to know —
+ * against which a `vfs-links` is newer or not.
  */
-export interface VfsSnapshot extends CacheSnapshot {
+export interface VfsSnapshot {
+  readonly segments: Segment[];
+  readonly places: { readonly [name: string]: object };
   readonly version: number;
   readonly instance: string;
   readonly links?: {
     readonly known: readonly string[];
     readonly generation: number;
   };
-}
-
-/**
- * One physical version of a file, as a thread projects it: a zero-copy SAB
- * view (shared entry), an owned Buffer (map place) or `null` for an entry
- * kept on disk, which carries its `path`. `version`: the commit that
- * published a shared entry; none for a map place's file.
- */
-export interface ProjectedFile {
-  readonly data: Buffer | null;
-  readonly stat: FileStat;
-  readonly meta?: object;
-  readonly scriptOptions?: ScriptOptions;
-  readonly version?: number;
-  readonly path?: string | null;
 }
 
 /** What the pool holds (`kernel.diagnostics().pool`), in bytes. */
@@ -142,23 +96,20 @@ export interface FilesystemCacheOptions {
   segmentSize: number;
   maxFileSize: number;
   reader?: CacheReader | null;
+  /** The map every segment joins as it is made: id → SAB. */
+  segments?: Map<number, SharedArrayBuffer>;
 }
 
 export interface AllocateOptions {
   /** Default: the cache-wide `maxFileSize`. */
   maxFileSize?: number;
-  /** With `false`, a file that cannot live in SAB is null, no disk entry. */
-  fallback?: boolean;
-  /** Keep the file on disk. */
-  onDisk?: boolean;
 }
 
 /**
- * Pooled SharedArrayBuffer file cache: the engine the main kernel
- * allocates from, exported for tests and benchmarks — not a stable API.
- * Placing bytes and publishing them are separate steps: `allocate()`
- * returns an entry nobody else sees; `put()` / `remove()` change the
- * index, which holds published entries only.
+ * The pool of SharedArrayBuffer segments the main kernel allocates from,
+ * exported for tests and benchmarks — not a stable API. It knows extents,
+ * never keys: what is published, and under which key, is the places'
+ * trees' business — the kernel commits an extent there or frees it here.
  */
 export class FilesystemCache {
   constructor(options: FilesystemCacheOptions);
@@ -168,54 +119,40 @@ export class FilesystemCache {
   /** Bytes of the segments reserved. */
   get totalUsed(): number;
   getSegment(id: number): Segment | null;
-  index(name: string): FsIndex;
-  entry(name: string, key: string): CacheEntry | null;
   /**
-   * Place one file without publishing it: a shared entry, else a disk entry
-   * (or null with `fallback: false`).
+   * Place the bytes of one file, privately: its extent — the empty one for
+   * an empty file — or null when they cannot live in SAB: above
+   * `maxFileSize`, or no room in the pool.
    */
-  allocate(
-    file: FileInput,
-    options?: AllocateOptions,
-  ): Promise<CacheEntry | null>;
+  allocate(file: FileInput, options?: AllocateOptions): Promise<Extent | null>;
   /**
-   * Place in-memory bytes at once, synchronously: a shared entry, or null
-   * when they cannot live in SAB. A copy that throws leaves nothing
-   * allocated.
+   * Place in-memory bytes at once, synchronously, or null. A copy that
+   * throws leaves nothing allocated.
    */
   allocateSync(
     file: FileInput & { data: Buffer },
-    options?: { maxFileSize?: number },
-  ): SharedEntry | null;
-  /** Publish `entry` under `key`; the entry it replaces, or null. */
-  put(name: string, key: string, entry: CacheEntry): CacheEntry | null;
-  /** Unpublish `key`; the removed entry, or null. */
-  remove(name: string, key: string): CacheEntry | null;
-  /** Return an entry's bytes to the pool: nobody may still read it. */
-  free(entry: CacheEntry | null | undefined): void;
+    options?: AllocateOptions,
+  ): Extent | null;
+  /** An extent committed into a segment compaction closed reopens it. */
+  committed(extent: Extent): void;
+  /** A segment compaction closed is open to allocation again. */
+  reopen(segmentId: number): void;
+  /** Return an extent's bytes to the pool: nobody may still read them. */
+  free(extent: Extent | null | undefined): void;
   /**
-   * Plan the relocation of the least-utilised segment's published entries
-   * (below `threshold`); the caller publishes the moves. Null when nothing
-   * qualifies or not everything fits.
+   * The least-utilised segment open to allocation, below `threshold` of
+   * its size, while at least two are in use; null otherwise.
    */
-  compact(
-    threshold: number,
-  ): { name: string; key: string; entry: SharedEntry }[] | null;
-  snapshot(): CacheSnapshot;
+  compactTarget(threshold: number): number | null;
+  /**
+   * Copy `extents` of `target` into free space of the other segments,
+   * never growing the pool, and close `target`: their new extents, in
+   * order, or null when not everything fits (nothing kept).
+   */
+  relocate(target: number, extents: readonly Extent[]): Extent[] | null;
+  /** Every segment of the pool. */
+  snapshot(): Segment[];
   /** What the pool holds, for diagnostics; changes nothing. */
   usage(): PoolUsage;
   stats(): CacheStats;
-  /** Projections of an index's entries into `files`. */
-  static project(
-    index: {
-      entries: Map<string, CacheEntry> | Iterable<[string, CacheEntry]>;
-    },
-    segmentsMap: ReadonlyMap<number, SharedArrayBuffer>,
-    files?: Map<string, ProjectedFile>,
-  ): Map<string, ProjectedFile>;
-  /** Zero-copy view of a shared entry; a disk entry carries only its path. */
-  static projectEntry(
-    entry: CacheEntry,
-    segmentsMap: ReadonlyMap<number, SharedArrayBuffer>,
-  ): ProjectedFile;
 }

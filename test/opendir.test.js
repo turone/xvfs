@@ -207,6 +207,7 @@ describe('opendir: the filtered territory of readdir', () => {
   it('a Dir is a snapshot taken when it is opened', async () => {
     const mem = k.fs('mem');
     try {
+      mem.mkdir('/snap');
       mem.writeFile('/snap/a.txt', 'a');
       mem.writeFile('/snap/b.txt', 'b');
       const sync = fs.opendirSync(at('mem', 'snap'));

@@ -3,7 +3,6 @@
 const { describe, it } = require('node:test');
 const assert = require('node:assert/strict');
 const path = require('node:path');
-const { constants } = require('node:os');
 const {
   tmpDir,
   rm,
@@ -15,14 +14,15 @@ const {
   leakedBytes,
 } = require('./helpers.js');
 
-// A directory rename inside one virtual place moves a subtree of raw
-// sources whole: every source and the companions it has — compressed
-// representations — reappear under the new prefix with their bytes, stat
-// and mtime, and the old keys go, in one publication. Nothing is prepared,
-// compiled or compressed again. One source that cannot move as it is — a
-// prepared one, one with bytecode, one with path-dependent metadata —
-// refuses the whole subtree, and so do collisions and nesting: nothing
-// changes before the plan is complete.
+// A directory rename inside one virtual place moves the directory's node,
+// its subtree with it: every file keeps its node — its id and `ino` — its
+// payload, every representation and its version, and shows under the new
+// prefix, in one publication that names the move. Nothing is copied,
+// prepared, compiled or compressed again, nothing retires, and the pool
+// needs no room. One source that cannot move as it is — a prepared one,
+// one with bytecode, one with path-dependent metadata — refuses the whole
+// subtree, and so do collisions and nesting: nothing changes before the
+// commit.
 
 const PROVIDERS = {
   sab: { origin: 'virtual', fs: { writable: true } },
@@ -57,27 +57,38 @@ const withPlace = async (config, fn, options = {}, defaults = {}) => {
   }
 };
 
+// The files of a set, with the directories they need.
 const write = async (v, files) => {
-  for (const [key, content] of Object.entries(files)) {
-    await v.writeFile(key, content);
-  }
+  await v.writeFiles(files);
 };
 
-// Every key a place projects under a prefix, companions included.
-const keysUnder = (k, name, prefix) =>
-  [...k.registry.get(name).files.keys()]
-    .filter((key) => key.startsWith(prefix))
-    .sort();
+// Every key a place's tree holds under a prefix, a directory's with a
+// trailing slash.
+const keysUnder = (k, name, prefix) => {
+  const { tree } = k.registry.get(name);
+  const keys = [];
+  for (const [node] of tree.walk(tree.get(''))) {
+    keys.push(tree.pathOf(node) + (tree.isDirectory(node) ? '/' : ''));
+  }
+  return keys.filter((key) => key.startsWith(prefix)).sort();
+};
 
 // Settles once the microtasks queued so far — lock releases included — ran.
 const drained = () => new Promise(setImmediate);
 
 describe('virtual subtree rename', () => {
   for (const [name, config] of Object.entries(PROVIDERS)) {
-    it(`${name}: a raw-only nested subtree moves whole, stat and mtime kept`, async () => {
-      await withPlace(config, async (k, v) => {
+    it(`${name}: a raw-only nested subtree moves whole: ids, versions, stat and mtime kept`, async () => {
+      await withPlace(config, async (k, v, at) => {
         await write(v, TREE);
         const before = Object.keys(TREE).map((key) => v.stat(key));
+        const versions = Object.keys(TREE).map((key) => v.version(key));
+        const ids = Object.keys(TREE).map((key) => v.idOf(key));
+        // The destination's directory must be there, as on Linux.
+        const err = await outcome(() => v.rename('/d', '/e/f'));
+        assert.equal(err.code, 'ENOENT');
+        assert.equal(err.dest, at('/e/f'));
+        await v.mkdir('/e');
         const realNow = Date.now;
         // However late the move, the entries keep the time of their write.
         Date.now = () => realNow() + 60_000;
@@ -91,6 +102,9 @@ describe('virtual subtree rename', () => {
           assert.equal(v.readFile(moved, 'utf8'), content, moved);
           assert.equal(v.stat(moved).mtimeMs, before[i].mtimeMs, moved);
           assert.equal(v.stat(moved).size, before[i].size, moved);
+          assert.equal(v.stat(moved).ino, before[i].ino, moved);
+          assert.equal(v.idOf(moved), ids[i], moved);
+          assert.equal(v.version(moved), versions[i], moved);
           assert.equal(v.exists(key), false, key);
         }
         assert.equal(v.exists('/d'), false);
@@ -149,6 +163,7 @@ describe('virtual subtree rename', () => {
           ['/d', '/d/sub/inner', 'EINVAL'],
           ['/d/sub', '/d', 'ENOTEMPTY'],
           ['/nothing', '/else', 'ENOENT'],
+          ['/d', '/none/else', 'ENOENT'],
         ]) {
           const err = await outcome(() => v.rename(from, to));
           assert.equal(err.code, code, `${from} -> ${to}`);
@@ -158,17 +173,23 @@ describe('virtual subtree rename', () => {
         const err = await outcome(() => v.rename('/', '/x'));
         assert.equal(err.code, 'ENOTSUP', 'the place root');
         assert.deepEqual(keysUnder(k, 'v', '/'), keys, 'nothing changed');
+        // An empty directory it replaces, as on Linux.
+        await v.mkdir('/empty');
+        await v.rename('/d', '/empty');
+        assert.equal(v.readFile('/empty/a.txt', 'utf8'), 'alpha');
+        assert.equal(v.exists('/d'), false);
       });
     });
   }
 
-  it('sab: one vfs-update; a worker never sees half a move', async () => {
+  it('sab: one vfs-update naming the move; a worker never sees half of it', async () => {
     await withPlace(PROVIDERS.sab, async (k, v) => {
       await write(v, TREE);
       const t = tap(k);
       const w = worker(k);
       try {
         const updates = t.updates().length;
+        const retires = k.nextRetireId;
         const next = nextMessage(t.port);
         const applied = nextMessage(w.port);
         await v.rename('/d', '/e');
@@ -176,17 +197,18 @@ describe('virtual subtree rename', () => {
         await applied;
         assert.equal(msg.name, 'vfs-update');
         assert.equal(t.updates().length, updates + 1, 'one update');
-        const { entries, removals, retired } = msg.places.v;
-        assert.deepEqual(removals.sort(), Object.keys(TREE).sort());
-        assert.deepEqual(
-          entries.map(([key]) => key).sort(),
-          Object.keys(TREE)
-            .map((key) => key.replace('/d/', '/e/'))
-            .sort(),
-        );
-        // Old versions with bytes retire; the empty file has none.
-        assert.equal(retired.length, 2);
+        const { delta, ...files } = msg.places.v;
+        assert.ok(delta);
+        assert.deepEqual(files, {
+          created: [],
+          replaced: [],
+          removed: [],
+          moved: [['/d', '/e']],
+        });
+        assert.deepEqual(msg.newSegments, [], 'no byte moved');
+        assert.equal(k.nextRetireId, retires, 'nothing retired');
         const wv = w.kernel.fs('v');
+        assert.equal(wv.idOf('/e/a.txt'), v.idOf('/e/a.txt'));
         assert.equal(wv.readFile('/e/sub/b.css', 'utf8'), 'b{}');
         assert.equal(wv.exists('/d'), false);
       } finally {
@@ -216,17 +238,13 @@ describe('virtual subtree rename', () => {
       assert.deepEqual(v.storedEncodings('/e/sub/big.css'), ['raw', 'gzip']);
       assert.deepEqual(v.storedEncodings('/d/sub/big.css'), []);
       assert.deepEqual(v.storedEncodings('/e/a.txt'), ['raw'], 'mixed tree');
-      assert.deepEqual(keysUnder(k, 'v', '/d'), [], 'no companion stays');
+      assert.deepEqual(keysUnder(k, 'v', '/d'), [], 'nothing stays');
     });
   });
 
-  // A subtree moves in one publication or not at all. Each source is
-  // copied while the old versions are still published, so a pool without
-  // room for a copy of each refuses the move as a full disk refuses it —
-  // ENOSPC, named by the rename, whichever thread asked, the key that did
-  // not fit as its detail: the copies it made are freed, nothing moves and
-  // nothing is published.
-  it('sab: a pool too full for the whole subtree moves none of it', async () => {
+  // A subtree moves as it is: a pool with no room left moves it all the
+  // same, from any thread — nothing is copied.
+  it('sab: a full pool moves a subtree all the same', async () => {
     const config = { origin: 'virtual', fs: { writable: true } };
     const memory = {
       limit: '8 kib',
@@ -240,37 +258,24 @@ describe('virtual subtree rename', () => {
     };
     await withPlace(
       config,
-      async (k, v, at) => {
+      async (k, v) => {
         await write(v, tree);
-        const keys = keysUnder(k, 'v', '/');
-        const updates = k.nextUpdateId;
+        const used = k.cache.usage().used;
         const w = worker(k);
         try {
-          for (const [label, place] of [
-            ['main', v],
-            ['worker', w.kernel.fs('v')],
+          for (const [label, place, from, to] of [
+            ['main', v, '/d', '/e'],
+            ['worker', w.kernel.fs('v'), '/e', '/d'],
           ]) {
-            // Room for the copy of /d/a only.
-            const err = await outcome(() => place.rename('/d', '/e'));
-            assert.equal(err.code, 'ENOSPC', label);
-            assert.equal(err.errno, -constants.errno.ENOSPC, label);
-            assert.equal(err.syscall, 'rename', label);
-            assert.equal(err.path, at('/d'), label);
-            assert.equal(err.dest, at('/e'), label);
-            assert.equal(
-              err.message,
-              'ENOSPC: no space left on device ("/d/b" does not fit in SAB), ' +
-                `rename '${at('/d')}' -> '${at('/e')}'`,
-              label,
-            );
+            await place.rename(from, to);
+            for (const [key, text] of Object.entries(tree)) {
+              const moved = to + key.slice(2);
+              assert.equal(v.readFile(moved, 'utf8'), text, `${label}: ${key}`);
+            }
+            assert.equal(v.exists(from), false, label);
           }
-          assert.deepEqual(keysUnder(k, 'v', '/'), keys, 'nothing moved');
-          for (const [key, text] of Object.entries(tree)) {
-            assert.equal(v.readFile(key, 'utf8'), text, key);
-          }
-          assert.equal(w.kernel.fs('v').exists('/e'), false, 'worker');
-          assert.equal(k.nextUpdateId, updates, 'nothing published');
-          assert.equal(leakedBytes(k), 0, 'the copy made is freed');
+          assert.equal(k.cache.usage().used, used, 'nothing copied');
+          assert.equal(leakedBytes(k), 0);
         } finally {
           w.kernel.close();
         }
@@ -280,7 +285,9 @@ describe('virtual subtree rename', () => {
     );
   });
 
-  it('sab: an old version still read retires until it is released', async () => {
+  // A lease taken before the move reads the very bytes the moved file
+  // shows: nothing retires, and its release frees nothing.
+  it('sab: a lease taken before a move reads on; nothing retires', async () => {
     const config = {
       origin: 'virtual',
       fs: { writable: true, zeroCopy: true },
@@ -289,14 +296,12 @@ describe('virtual subtree rename', () => {
       await write(v, TREE);
       const lease = v.readFileView('/d/a.txt');
       await v.rename('/d', '/e');
-      assert.deepEqual(
-        k.retirements().map((r) => [r.key, r.waiting]),
-        [['/d/a.txt', 'release']],
-      );
-      assert.equal(lease.view.toString(), 'alpha', 'the old bytes stay');
+      assert.deepEqual(k.retirements(), []);
+      assert.equal(lease.view.toString(), 'alpha');
       lease.release();
       assert.equal(k.retired.size, 0);
       assert.equal(v.readFile('/e/a.txt', 'utf8'), 'alpha');
+      assert.equal(leakedBytes(k), 0);
     });
   });
 
@@ -307,12 +312,14 @@ describe('virtual subtree rename', () => {
     };
     await withPlace(config, async (k, v) => {
       await write(v, TREE);
-      // A write issued after the move lands after it, under the old name.
+      // A write issued after the move lands after it: its directory is
+      // gone by then.
       const moved = v.rename('/d', '/e');
-      const written = v.writeFile('/d/late.txt', 'late');
-      await Promise.all([moved, written]);
-      assert.equal(v.readFile('/d/late.txt', 'utf8'), 'late');
+      const written = outcome(() => v.writeFile('/d/late.txt', 'late'));
+      await moved;
+      assert.equal((await written).code, 'ENOENT');
       assert.equal(v.readFile('/e/a.txt', 'utf8'), 'alpha');
+      await v.writeFiles({ '/d/late.txt': 'late' });
       // A refused move holds nothing up.
       await v.writeFile('/e/p.css', 'p{}');
       await v.rename('/e', '/f');

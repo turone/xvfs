@@ -5,7 +5,6 @@ const assert = require('node:assert/strict');
 const zlib = require('node:zlib');
 const fs = require('node:fs');
 const path = require('node:path');
-const { compressedKey } = require('../lib/companion.js');
 const {
   tmpDir,
   writeTree,
@@ -116,18 +115,19 @@ describe('compression: representations in SAB', () => {
     assert.equal(site.createReadStreamCompressed('/nope', 'gzip'), null);
   });
 
-  it('companions never leak into listings, exists or the patched fs', () => {
+  // A representation is no node: no key names it, the NUL-separated form
+  // of the old companions included.
+  it('representations never show in listings, exists or the patched fs', () => {
     assert.deepEqual(site.readdir('/'), [
       'app.js',
       'empty.css',
       'index.html',
       'logo.png',
     ]);
-    assert.equal(site.exists(compressedKey('/index.html', 'gzip')), false);
-    assert.equal(site.readFile(compressedKey('/index.html', 'gzip')), null);
+    assert.equal(site.exists('/index.html\u0000fs:gzip'), false);
+    assert.equal(site.readFile('/index.html\u0000fs:gzip'), null);
     assert.equal(
-      k.routeRead(path.join(root, 'site', compressedKey('index.html', 'gzip')))
-        .kind,
+      k.routeRead(path.join(root, 'site', 'index.html\u0000fs:gzip')).kind,
       'disk',
     );
   });
@@ -177,7 +177,7 @@ describe('compression: retainRaw: false', () => {
         'read from disk',
       );
       assert.equal(site.stat('/index.html').size, 200);
-      assert.equal(k.cache.entry('site', '/index.html').kind, 'disk');
+      assert.equal(k.registry.get('site').file('/index.html').source, null);
       assert.equal(
         k.routeRead(path.join(root, 'site', 'index.html')).kind,
         'passthrough',
@@ -238,14 +238,10 @@ describe('compression: failures are per representation', () => {
       assert.notDeepEqual(after, before);
       assert.equal(zlib.gunzipSync(after).toString(), 'bbbb'.repeat(20));
       await until(() => t.updates().length > 0, 2000);
-      const keys = t
-        .updates()
-        .at(-1)
-        .places.site.entries.map(([key]) => key);
-      assert.ok(
-        keys.includes('/a.txt') &&
-          keys.includes(compressedKey('/a.txt', 'gzip')),
-      );
+      // The source and its representation travel in one payload of one
+      // delta: the update names the file once.
+      assert.deepEqual(t.updates().at(-1).places.site.replaced, ['/a.txt']);
+      assert.ok(k.registry.get('site').file('/a.txt').others.gzip);
     } finally {
       k.close();
       rm(root);

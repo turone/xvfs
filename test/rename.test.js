@@ -282,6 +282,7 @@ describe('rename routes its source and its destination', () => {
 
   it('an ordinary virtual entry moves atomically and keeps its mtime', async () => {
     await k.fs('vs').writeFile('/o.txt', 'ordinary');
+    await k.fs('vs').mkdir('/sub');
     const written = fs.statSync(at('vs', 'o.txt'));
     const realNow = Date.now;
     // However late the rename, the entry keeps the time of its write.
@@ -346,8 +347,15 @@ describe('rename routes its source and its destination', () => {
       await refusedEverywhere(from, to, 'ENOTSUP');
       assert.ok(onDisk(from), 'the source stays');
     }
-    // A directory strict routing hides stays hidden.
-    await refusedEverywhere(at('closed', 'rawdir'), fresh('rawdir'), 'EACCES');
+    // A directory the scan publishes — empty to the place, holding only
+    // files of other extensions — is a directory of the place, and leaves
+    // it as none does; a file there that strict routing hides stays hidden.
+    await refusedEverywhere(at('closed', 'rawdir'), fresh('rawdir'), 'ENOTSUP');
+    await refusedEverywhere(
+      at('closed', 'rawdir', 'x.png'),
+      fresh('x.png'),
+      'EACCES',
+    );
     // Within its place, or outside every place, a directory is node:fs.
     await moveDir(at('wd', 'pages'), at('wd', 'docs'));
     assert.equal(readDisk(at('wd', 'docs', 'p.txt'), 'utf8'), 'page');
@@ -375,16 +383,17 @@ describe('rename routes its source and its destination', () => {
       const places = form === 'renameSync' ? [vm] : [vs, vm];
       for (const place of places) {
         const name = place === vs ? 'vs' : 'vm';
-        await place.writeFile(`/${form}/a.txt`, 'a');
-        await place.writeFile(`/${form}/sub/b.txt`, 'b');
+        await place.writeFiles({
+          [`/${form}/a.txt`]: 'a',
+          [`/${form}/sub/b.txt`]: 'b',
+        });
         await rename(at(name, form), at(name, `${form}-moved`));
         assert.equal(place.readFile(`/${form}-moved/sub/b.txt`, 'utf8'), 'b');
         assert.equal(place.exists(`/${form}`), false, `${name}: ${form}`);
       }
     }
     // One prepared source refuses the whole subtree: nothing moves.
-    await vs.writeFile('/mixed/t.txt', 't');
-    await vs.writeFile('/mixed/p.js', 'p');
+    await vs.writeFiles({ '/mixed/t.txt': 't', '/mixed/p.js': 'p' });
     await refusedEverywhere(
       at('vs', 'mixed'),
       at('vs', 'other'),
@@ -396,7 +405,7 @@ describe('rename routes its source and its destination', () => {
     // The place's own directory never moves; a virtual boundary is EXDEV.
     await refusedEverywhere(at('vs'), at('vs', 'x'), 'ENOTSUP', ASYNC);
     await refusedEverywhere(at('vm'), fresh('vm'), 'ENOTSUP');
-    await vm.writeFile('/cross/c.txt', 'c');
+    await vm.writeFiles({ '/cross/c.txt': 'c' });
     await refusedEverywhere(
       at('vm', 'cross'),
       at('vs', 'cross'),
@@ -460,24 +469,30 @@ describe('a rename onto itself', () => {
     );
     for (const name of ['v', 'm']) {
       await k.fs(name).writeFile('/a.txt', 'alpha');
-      await k.fs(name).writeFile('/d/b.txt', 'bravo');
+      await k.fs(name).writeFiles({ '/d/b.txt': 'bravo' });
       await k.fs(name).writeFile('/p.js', 'p');
     }
     const w = worker(k);
     const realNow = Date.now;
     try {
       const at = (name, key) => k.fs(name).pathOf(key);
-      // The published version of every file of both places: its entry,
-      // bytes and mtime.
+      // The published version of every file of both places: its node, its
+      // payload, bytes and mtime.
       const versions = () =>
-        ['v', 'm'].flatMap((name) =>
-          [...k.registry.get(name).files].map(([key, entry]) => [
-            key,
-            entry,
-            Buffer.from(entry.data),
-            entry.stat.mtimeMs,
-          ]),
-        );
+        ['v', 'm'].flatMap((name) => {
+          const { tree } = k.registry.get(name);
+          const files = [...tree.walk(tree.get(''), { containers: 'skip' })];
+          return files.map(([node]) => {
+            const payload = tree.payloadOf(node);
+            return [
+              tree.pathOf(node),
+              node,
+              payload,
+              Buffer.from(payload.source.data),
+              payload.mtimeMs,
+            ];
+          });
+        });
       const before = versions();
       const updates = k.nextUpdateId;
       const retires = k.nextRetireId;

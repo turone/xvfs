@@ -16,6 +16,7 @@ const {
   quiet,
   within,
 } = require('./helpers.js');
+const { fileOf } = require('./helpers.js');
 
 // kernel.diagnostics(): what the shared memory holds and why, as of the
 // call — the pool, what the published versions take of it, the retired
@@ -267,7 +268,7 @@ describe('VfsKernel: diagnostics', () => {
       const lease = v.readFileView('/d');
       await v.unlink('/d');
       await v.unlink('/a');
-      assert.equal(k.cache.entry('v', '/c').segmentId, 1, 'relocated');
+      assert.equal(fileOf(k, 'v', '/c').source.segmentId, 1, 'relocated');
       assert.ok(k.cache.registry.closed.has(2));
       // Segment 1: /b and /c, a hole of 1848. Segment 2: the retired /d,
       // the 200 bytes /c left and a tail of 3796, none of it for anyone.

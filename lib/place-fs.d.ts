@@ -149,15 +149,24 @@ export class PlaceFs {
   get zeroCopy(): boolean;
   /** Absolute OS path of a key, also for entries that exist only in memory. */
   pathOf(key: string): string;
-  /** A file, or an implicit directory. */
+  /** A file, or a directory. */
   exists(key: string): boolean;
   /**
    * The version of the commit that published the file of a shared place
    * (`sab`, `sea`): equal for the files one commit published, the same in
-   * every thread. Null for a missing key, a `map` place's file and the disk
-   * territory.
+   * every thread; a move keeps it. Null for a missing key, a `map` place's
+   * file and the disk territory.
    */
   version(key: string): number | null;
+  /**
+   * The id of the node `key` names — a directory, or a file the fs domain
+   * sees — as `stat().ino` gives it: the same in every thread, kept by a
+   * move, never another node's until the ids wrap. Null for nothing there
+   * and the disk territory.
+   */
+  idOf(key: string): number | null;
+  /** The key of the node with this id now, `''` for the place's; or null. */
+  keyOf(id: number): string | null;
   stat(key: string, options?: { bigint?: false }): VfsStats | null;
   stat(key: string, options: { bigint: true }): VfsBigIntStats | null;
   stat(key: string, options: StatOptions): VfsStats | VfsBigIntStats | null;
@@ -286,15 +295,20 @@ export class PlaceFs {
   ): MutationResult;
   unlink(key: string): MutationResult;
   /**
-   * Creates no entry in an indexed place (directories are implicit) but
-   * checks the hierarchy; on disk, node:fs's own — the first directory
-   * created with `recursive`.
+   * A directory of a virtual place is a node of its tree: mkdir makes it,
+   * its parent there — with `recursive`, every one missing down to it; on
+   * disk, node:fs's own — the first directory created with `recursive`.
    */
   mkdir(key: string, options?: MkdirOptions): MutationResult | string;
+  /** An empty directory goes: `ENOTEMPTY` with children, `ENOTDIR` a file. */
+  rmdir(key: string): MutationResult;
   rm(key: string, options?: RmOptions): MutationResult;
   /**
-   * A prepared key of a virtual place is `ENOTSUP`; a directory moves as a
-   * raw-only subtree.
+   * As on Linux, in one commit: a file onto a file replaces it, a
+   * directory onto an empty one too; the destination's directory must
+   * exist. The node moves with its id, payload and version, nothing copied.
+   * A prepared key of a virtual place is `ENOTSUP`, and so is a directory
+   * holding one, a compiled one or one with metadata.
    */
   rename(from: string, to: string): MutationResult;
 }

@@ -17,6 +17,7 @@ const {
   nextMessage,
   within,
 } = require('./helpers.js');
+const { fileOf } = require('./helpers.js');
 
 // Lifetime of shared allocations: a direct consumer (stream, view lease)
 // pins the version it started with; an update publishes the new version
@@ -207,7 +208,7 @@ describe('lifetime: view leases', () => {
     const { k, v, done } = await virtual({ zeroCopy: true });
     try {
       await v.writeFile('/a.txt', 'A'.repeat(32));
-      const { segmentId, offset } = k.cache.entry('v', '/a.txt');
+      const { segmentId, offset } = fileOf(k, 'v', '/a.txt').source;
       const lease = v.readFileView('/a.txt');
       await v.writeFile('/a.txt', 'B'.repeat(32));
       await v.writeFile('/c.txt', 'C'.repeat(32));
@@ -218,7 +219,7 @@ describe('lifetime: view leases', () => {
       lease[Symbol.dispose]();
       assert.equal(k.retired.size, 0);
       await v.writeFile('/d.txt', 'D'.repeat(32));
-      const d = k.cache.entry('v', '/d.txt');
+      const d = fileOf(k, 'v', '/d.txt').source;
       assert.deepEqual([d.segmentId, d.offset], [segmentId, offset]);
     } finally {
       done();
@@ -575,7 +576,7 @@ describe('lifetime: compaction', () => {
       await v.writeFile('/b', Buffer.alloc(2 * KB, 'b'));
       await v.writeFile('/c', Buffer.alloc(200, 'c'));
       await v.writeFile('/d', Buffer.alloc(100, 'd'));
-      assert.equal(k.cache.entry('v', '/d').segmentId, 2);
+      assert.equal(fileOf(k, 'v', '/d').source.segmentId, 2);
       const stream = v.createReadStream('/d', { highWaterMark: 10 });
       const iterator = stream[Symbol.asyncIterator]();
       const { value: first } = await iterator.next();
@@ -584,11 +585,11 @@ describe('lifetime: compaction', () => {
       // Freeing /a makes segment 2 the compaction target: /c moves out, the
       // retired /d stays where it is and the segment stays closed.
       await v.unlink('/a');
-      assert.equal(k.cache.entry('v', '/c').segmentId, 1, '/c relocated');
+      assert.equal(fileOf(k, 'v', '/c').source.segmentId, 1, '/c relocated');
       assert.equal(v.readFile('/c', 'utf8'), 'c'.repeat(200));
       assert.ok(k.cache.registry.closed.has(2), 'closed, not reused');
       await v.writeFile('/e', Buffer.alloc(100, 'e'));
-      assert.notEqual(k.cache.entry('v', '/e').segmentId, 2);
+      assert.notEqual(fileOf(k, 'v', '/e').source.segmentId, 2);
       assert.equal(
         (await readAll(iterator, first)).toString(),
         'd'.repeat(100),

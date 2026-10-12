@@ -86,8 +86,8 @@ interface ScriptLists {
   /** Sources without cached data: their bundle's `cachedData` is undefined. */
   ext?: readonly string[];
   /**
-   * Sources with cached data (the `\0script:bytecode` companion); each is
-   * a source of the domain too. Never `json` or `mjs`.
+   * Sources with cached data (their script bytecode representation); each
+   * is a source of the domain too. Never `json` or `mjs`.
    */
   compile?: readonly string[];
 }
@@ -126,8 +126,8 @@ export interface RequireDomainConfig {
   /** Extensions without cached data. */
   ext?: readonly string[];
   /**
-   * Extensions with cached data (the `\0require:bytecode` companion); each
-   * is an extension of the domain too. Never `json` or `mjs`.
+   * Extensions with cached data (their require bytecode representation);
+   * each is an extension of the domain too. Never `json` or `mjs`.
    */
   compile?: readonly string[];
   prepare?: PrepareConfig;
@@ -162,6 +162,20 @@ export interface PlaceConfig {
    * provider `'disk'` or `'node-default'`). Default `defaults.links`.
    */
   links?: Links | null;
+  /** Indexed providers only (`sab`, `map`, `sea`). Both off by default. */
+  stat?: StatConfig;
+}
+
+/**
+ * What a place's tree keeps beyond a file's size, mtime and version:
+ * `birthtime`, each file's own — the disk's in a disk-origin place, the
+ * first write's in a virtual one; `directories`, a directory's version and
+ * times, which change with its children. Off: birthtime and ctime equal
+ * mtime, and a directory's times are 0.
+ */
+export interface StatConfig {
+  birthtime?: boolean;
+  directories?: boolean;
 }
 
 /** The raw configuration: hardcoded defaults → `defaults` → per place. */
@@ -252,6 +266,7 @@ export interface ResolvedPlace {
   readonly prepare: { readonly [ext: string]: string } | null;
   /** Under strict, for a place with a directory on disk; else null. */
   readonly links: Links | null;
+  readonly stat: { readonly birthtime: boolean; readonly directories: boolean };
 }
 
 /**

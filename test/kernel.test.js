@@ -8,7 +8,6 @@ const vm = require('node:vm');
 const { availableParallelism, constants } = require('node:os');
 const { Worker } = require('node:worker_threads');
 const { VfsKernel, takeSnapshot } = require('../lib/kernel.js');
-const { bytecodeKey } = require('../lib/companion.js');
 const {
   tmpDir,
   writeTree,
@@ -334,12 +333,14 @@ describe('VfsKernel: providers', () => {
       assert.ok(k.bytecode(path.join(root, 'site', 'app.js')));
       assert.equal(k.bytecode(path.join(root, 'site', 'index.html')), null);
       const lib = k.registry.get('lib');
-      assert.deepEqual(
-        [...lib.files.keys()].filter((key) => !key.includes('\0')).sort(),
-        ['/data.json', '/util.js'],
-      );
-      assert.ok(lib.files.has(bytecodeKey('/util.js')));
-      assert.ok(!lib.files.has(bytecodeKey('/data.json')));
+      const { tree } = lib;
+      const files = [...tree.walk(tree.get(''), { containers: 'skip' })];
+      assert.deepEqual(files.map(([node]) => tree.pathOf(node)).sort(), [
+        '/data.json',
+        '/util.js',
+      ]);
+      assert.ok(lib.file('/util.js').others.requireBytecode);
+      assert.equal(lib.file('/data.json').others, null);
     } finally {
       k.close();
     }
@@ -369,7 +370,9 @@ describe('VfsKernel: providers', () => {
         'ext',
       );
       assert.equal(
-        k.resolveModule(at('lib', 'util.js'), 'require').file.data.toString(),
+        k
+          .resolveModule(at('lib', 'util.js'), 'require')
+          .payload.source.data.toString(),
         'exports.x = 1;',
       );
       assert.equal(k.resolveModule(at('lib', 'data.json'), 'require'), null);
@@ -479,7 +482,7 @@ describe('VfsKernel: a full pool', () => {
     message: err.message,
   });
 
-  it('a virtual write or rename that does not fit is ENOSPC, in main and a worker', async () => {
+  it('a virtual write that does not fit is ENOSPC, in main and a worker; a rename takes no room', async () => {
     const root = tmpDir('kernel-full');
     const k = await kernel(
       root,
@@ -493,7 +496,7 @@ describe('VfsKernel: a full pool', () => {
       await v.writeFile('/b', 'b'.repeat(4000));
       w = worker(k);
       const updates = k.nextUpdateId;
-      const version = k.cache.entry('v', '/a');
+      const version = k.registry.get('v').file('/a');
       const at = (key) => v.pathOf(key);
       for (const [label, place] of [
         ['main', v],
@@ -508,10 +511,6 @@ describe('VfsKernel: a full pool', () => {
             () => place.writeFile('/a', 'A'.repeat(4000)),
             noRoom('open', at('/a')),
           ],
-          [
-            () => place.rename('/a', '/d'),
-            noRoom('rename', at('/a'), at('/d')),
-          ],
         ]) {
           await assert.rejects(op(), (err) => {
             assert.deepEqual(shape(err), refused, label);
@@ -520,12 +519,18 @@ describe('VfsKernel: a full pool', () => {
         }
       }
       assert.equal(v.exists('/c'), false, 'not published');
-      assert.equal(v.exists('/d'), false, 'not moved');
-      assert.equal(k.cache.entry('v', '/a'), version, 'the version kept');
+      assert.equal(k.registry.get('v').file('/a'), version, 'the version kept');
       assert.equal(v.readFile('/a', 'utf8'), 'a'.repeat(4000));
       assert.equal(w.kernel.fs('v').readFile('/a', 'utf8'), 'a'.repeat(4000));
       assert.equal(k.nextUpdateId, updates, 'nothing published');
       assert.equal(leakedBytes(k), 0, 'nothing left behind');
+      // A rename moves the node as it is: it takes no room, and copies
+      // nothing (Т23).
+      const used = k.cache.usage().used;
+      await w.kernel.fs('v').rename('/a', '/d');
+      assert.equal(v.readFile('/d', 'utf8'), 'a'.repeat(4000));
+      assert.equal(k.registry.get('v').file('/d'), version, 'the same payload');
+      assert.equal(k.cache.usage().used, used, 'no byte copied');
     } finally {
       w?.kernel.close();
       k.close();
@@ -731,30 +736,40 @@ describe('VfsKernel: snapshot, workers, ACK', () => {
     }
   });
 
-  it('handleDelta applies vfs-update entries and removals', async () => {
-    const k = await kernel(root, places);
+  it('handleDelta applies a vfs-update: each tree its delta, the thread its version', async () => {
+    const shared = {
+      ...places,
+      v: { origin: 'virtual', fs: { writable: true } },
+    };
+    const k = await kernel(root, shared);
     let w = null;
     try {
-      w = VfsKernel.fromSnapshot(k.snapshot(), config(places), {
+      const v = k.fs('v');
+      await v.writeFile('/a.txt', 'a');
+      w = VfsKernel.fromSnapshot(k.snapshot(), config(shared), {
         appRoot: root,
       });
-      const entry = await k.cache.allocate({
-        data: Buffer.from('new'),
-        stat: { size: 3, mtimeMs: 1 },
-      });
-      const { sab } = k.cache.getSegment(entry.segmentId);
-      w.handleDelta({
-        name: 'vfs-update',
-        updateId: 1,
-        version: 2,
-        places: {
-          site: { entries: [['/new.txt', entry]], removals: ['/a.txt'] },
-        },
-        newSegments: [{ id: entry.segmentId, sab }],
-      });
-      assert.equal(w.fs('site').readFile('/new.txt', 'utf8'), 'new');
-      assert.equal(w.fs('site').exists('/a.txt'), false);
-      assert.equal(w.version, 2, 'the version of the update');
+      const t = tap(k);
+      await v.mkdir('/d');
+      await v.writeFile('/d/new.txt', 'new');
+      await v.unlink('/a.txt');
+      assert.ok(await until(() => t.updates().length === 3));
+      const updates = t.updates();
+      assert.deepEqual(Object.keys(updates[1].places.v), [
+        'delta',
+        'created',
+        'replaced',
+        'removed',
+        'moved',
+      ]);
+      assert.deepEqual(updates[1].places.v.created, ['/d/new.txt']);
+      assert.deepEqual(updates[2].places.v.removed, ['/a.txt']);
+      for (const update of updates) w.handleDelta(update);
+      assert.equal(w.fs('v').readFile('/d/new.txt', 'utf8'), 'new');
+      assert.equal(w.fs('v').exists('/a.txt'), false);
+      assert.deepEqual(w.fs('v').readdir(''), ['d']);
+      assert.equal(w.version, k.version, 'the version of the last update');
+      assert.equal(w.fs('v').idOf('/d/new.txt'), v.idOf('/d/new.txt'));
       assert.deepEqual(w.handleDelta({ name: 'other' }), []);
     } finally {
       k.close();
@@ -817,8 +832,9 @@ describe('VfsKernel: snapshot, workers, ACK', () => {
       await v.writeFile('/a', Buffer.alloc(2 * KB, 'a'));
       await v.writeFile('/b', Buffer.alloc(2 * KB, 'b'));
       await v.writeFile('/c', Buffer.alloc(200, 'c'));
-      assert.equal(k.cache.entry('v', '/b').segmentId, 1);
-      assert.equal(k.cache.entry('v', '/c').segmentId, 2);
+      const segmentOf = (key) => k.registry.get('v').file(key).source.segmentId;
+      assert.equal(segmentOf('/b'), 1);
+      assert.equal(segmentOf('/c'), 2);
       const w = tap(k, { ack: false });
       await v.unlink('/a');
       assert.equal(k.retired.size, 1, '/a waits for the ACK');
@@ -826,7 +842,7 @@ describe('VfsKernel: snapshot, workers, ACK', () => {
       const closed = nextEvent(port, 'close');
       w.port.close();
       await closed;
-      assert.equal(k.cache.entry('v', '/c').segmentId, 1, '/c was relocated');
+      assert.equal(segmentOf('/c'), 1, '/c was relocated');
       assert.equal(v.readFile('/c', 'utf8'), 'c'.repeat(200));
       assert.equal(
         k.acks.size,

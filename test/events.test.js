@@ -20,11 +20,15 @@ const {
   within,
   turn,
 } = require('./helpers.js');
+const { fileOf } = require('./helpers.js');
 
 // Publication events: a kernel tells its 'publish' listeners what each
 // publication it applies changed — after the commit, in every thread, one
 // event per commit, in the order of the versions — and 'close' once, last.
-// Nothing in an event refers to shared bytes.
+// An event names the keys of files, created, replaced and removed, and the
+// nodes a move took, file or directory, as [from, to]: a move is in
+// `moved` only, and a file it replaced in `removed`. Nothing in an event
+// refers to shared bytes.
 
 const VIRTUAL = { v: { origin: 'virtual', fs: { writable: true } } };
 
@@ -35,10 +39,11 @@ const record = (k) => {
   return events;
 };
 
-const changes = (created = [], replaced = [], removed = []) => ({
+const changes = (created = [], replaced = [], removed = [], moved = []) => ({
   created,
   replaced,
   removed,
+  moved,
 });
 
 const isDeepFrozen = (value) =>
@@ -71,8 +76,14 @@ describe('publish: mutations of a virtual place', () => {
         { version: 2, places: { v: changes([], ['/a.txt']) } },
         { version: 3, places: { v: changes([], ['/a.txt']) } },
         { version: 4, places: { v: changes(['/b.txt']) } },
-        { version: 5, places: { v: changes(['/c.txt'], [], ['/b.txt']) } },
-        { version: 6, places: { v: changes([], ['/a.txt'], ['/c.txt']) } },
+        {
+          version: 5,
+          places: { v: changes([], [], [], [['/b.txt', '/c.txt']]) },
+        },
+        {
+          version: 6,
+          places: { v: changes([], [], ['/a.txt'], [['/c.txt', '/a.txt']]) },
+        },
         { version: 7, places: { v: changes([], [], ['/a.txt']) } },
       ]);
       assert.equal(k.version, 7);
@@ -82,7 +93,7 @@ describe('publish: mutations of a virtual place', () => {
     }
   });
 
-  it('a subtree: its move and its removal are one event each; companions are never named', async () => {
+  it('a subtree: its move and its removal are one event each; representations are never named', async () => {
     const root = tmpDir('vfs-events');
     const k = await kernel(root, {
       v: {
@@ -93,32 +104,26 @@ describe('publish: mutations of a virtual place', () => {
     });
     try {
       const v = k.fs('v');
-      await v.writeFile('/d/a.txt', 'a');
-      await v.writeFile('/d/b.txt', 'b');
+      await v.writeFiles({ '/d/a.txt': 'a', '/d/b.txt': 'b' });
       await v.writeFile('/s.js', 'exports.s = 1;');
       const events = record(k);
       await v.rename('/d', '/e');
       await v.rm('/e', { recursive: true });
       await v.writeFile('/s.js', 'exports.s = 2;');
       assert.deepEqual(events, [
+        { version: 3, places: { v: changes([], [], [], [['/d', '/e']]) } },
         {
           version: 4,
-          places: {
-            v: changes(['/e/a.txt', '/e/b.txt'], [], ['/d/a.txt', '/d/b.txt']),
-          },
-        },
-        {
-          version: 5,
           places: { v: changes([], [], ['/e/a.txt', '/e/b.txt']) },
         },
-        { version: 6, places: { v: changes([], ['/s.js']) } },
+        { version: 5, places: { v: changes([], ['/s.js']) } },
       ]);
       const named = events.flatMap(({ places }) =>
-        Object.values(places).flatMap((c) => Object.values(c).flat()),
+        Object.values(places).flatMap((c) => Object.values(c).flat(2)),
       );
       assert.ok(
         named.every((key) => !key.includes('\0')),
-        'no companion',
+        'no representation',
       );
     } finally {
       k.close();
@@ -132,17 +137,23 @@ describe('publish: mutations of a virtual place', () => {
     try {
       const v = k.fs('v');
       await v.writeFile('/a.txt', 'a');
-      await v.writeFile('/d/b.txt', 'b');
+      await v.writeFiles({ '/d/b.txt': 'b' });
       const events = record(k);
       await v.rename('/a.txt', '/a.txt');
       await v.rename('/d', '/d');
-      await v.mkdir('/n');
+      await v.mkdir('/d', { recursive: true });
       await v.rm('/gone', { force: true });
       await turn();
       assert.deepEqual(events, []);
+      // A directory made or removed is a publication of the place, naming
+      // no file.
+      await v.mkdir('/n');
+      await v.rmdir('/n');
       await v.unlink('/a.txt');
       assert.deepEqual(events, [
-        { version: 3, places: { v: changes([], [], ['/a.txt']) } },
+        { version: 3, places: { v: changes() } },
+        { version: 4, places: { v: changes() } },
+        { version: 5, places: { v: changes([], [], ['/a.txt']) } },
       ]);
     } finally {
       k.close();
@@ -305,7 +316,7 @@ describe('publish: init, the watcher, compaction', () => {
       await closed;
       await turn();
       assert.equal(k.nextUpdateId, updates + 1, 'the relocation');
-      assert.equal(k.cache.entry('v', '/c').segmentId, 1);
+      assert.equal(fileOf(k, 'v', '/c').source.segmentId, 1);
       assert.deepEqual(events, [
         { version: 4, places: { v: changes([], [], ['/a']) } },
       ]);
@@ -364,32 +375,27 @@ describe('publish: workers', () => {
         console: quiet,
       });
       const events = record(w);
-      // An update of one new file, from bytes k placed and never published.
-      const update = async (key, text, version) => {
-        const data = Buffer.from(text);
-        const entry = await k.cache.allocate({
-          data,
-          stat: { size: data.length, mtimeMs: 1 },
-        });
-        const { sab } = k.cache.getSegment(entry.segmentId);
-        w.handleDelta({
-          name: 'vfs-update',
-          updateId: 0,
-          version,
-          places: { v: { entries: [[key, entry]], removals: [] } },
-          newSegments: [{ id: entry.segmentId, sab }],
-        });
-      };
-      await update('/a.txt', 'a');
+      // The updates of main, the first without its version.
+      const t = tap(k);
+      await k.fs('v').writeFile('/a.txt', 'a');
+      await k.fs('v').writeFile('/b.txt', 'b');
+      await within(
+        (async () => {
+          while (t.updates().length < 2) await turn();
+        })(),
+        'two updates',
+      );
+      const [first, second] = t.updates();
+      w.handleDelta({ ...first, version: undefined });
       await turn();
       assert.equal(w.fs('v').readFile('/a.txt', 'utf8'), 'a', 'applied');
       assert.equal(w.version, 0, 'its version kept');
       assert.deepEqual(events, [], 'announced to no one');
-      await update('/b.txt', 'b', 1);
+      w.handleDelta(second);
       await turn();
-      assert.equal(w.version, 1);
+      assert.equal(w.version, 2);
       assert.deepEqual(events, [
-        { version: 1, places: { v: changes(['/b.txt']) } },
+        { version: 2, places: { v: changes(['/b.txt']) } },
       ]);
     } finally {
       w?.close();

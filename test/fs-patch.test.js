@@ -283,10 +283,15 @@ describe('fs-patch: reads over sab and memory places', () => {
     assert.ok(fs.existsSync(at('pub', 'index.html')));
   });
 
-  it('memory place: writeFile / appendFile / unlink / mkdir / rm / rename through node:fs', async () => {
+  it('memory place: writeFile / appendFile / unlink / mkdir / rmdir / rm / rename through node:fs', async () => {
     const mem = at('mem');
     fs.writeFileSync(path.join(mem, 'a.txt'), 'a');
     await fs.promises.appendFile(path.join(mem, 'a.txt'), 'b');
+    assert.throws(() => fs.writeFileSync(path.join(mem, 'dir', 'c.txt'), 'c'), {
+      code: 'ENOENT',
+      syscall: 'open',
+    });
+    fs.mkdirSync(path.join(mem, 'dir'));
     await new Promise((resolve, reject) =>
       fs.writeFile(path.join(mem, 'dir', 'c.txt'), Buffer.from('c'), (err) =>
         err ? reject(err) : resolve(),
@@ -306,8 +311,19 @@ describe('fs-patch: reads over sab and memory places', () => {
       code: 'ENOENT',
     });
     await fs.promises.rm(path.join(mem, 'dir'), { recursive: true });
-    assert.deepEqual(fs.readdirSync(mem), []);
+    assert.deepEqual(fs.readdirSync(mem), ['whatever']);
     assert.equal(k.fs('mem').exists('/dir/a2.txt'), false);
+    fs.writeFileSync(path.join(mem, 'whatever', 'w.txt'), 'w');
+    assert.throws(() => fs.rmdirSync(path.join(mem, 'whatever')), {
+      code: 'ENOTEMPTY',
+      syscall: 'rmdir',
+    });
+    assert.throws(() => fs.rmdirSync(path.join(mem, 'whatever', 'w.txt')), {
+      code: 'ENOTDIR',
+    });
+    fs.unlinkSync(path.join(mem, 'whatever', 'w.txt'));
+    fs.rmdirSync(path.join(mem, 'whatever'));
+    assert.deepEqual(fs.readdirSync(mem), []);
   });
 
   it('rename across places or into disk is EXDEV', () => {

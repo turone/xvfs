@@ -136,6 +136,7 @@ type Place = {
   readonly scanExt: readonly string[] | null;
   readonly prepare: { readonly [ext: string]: string } | null;
   readonly links: 'deny' | 'verify' | null;
+  readonly stat: { readonly birthtime: boolean; readonly directories: boolean };
 };
 expectType<Place[]>()(quickStart.places);
 expectType<Place[]>()(quickStart.allPlaces);

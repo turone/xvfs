@@ -458,6 +458,7 @@ describe('single-file copies hand the raw input to the destination', () => {
     const native = await outcome(() => fs.promises.cp(from, dir));
     assert.equal(native.code, 'ERR_FS_CP_NON_DIR_TO_DIR');
     await k.fs('vs').writeFile('/src.txt', 'src');
+    k.fs('vmp').mkdir('/dir');
     k.fs('vmp').writeFile('/dir/in.txt', 'in');
     const store = at('vmp', 'dir');
     // Onto a virtual directory, and from a virtual source onto a disk one,

@@ -8,7 +8,6 @@ const path = require('node:path');
 const vm = require('node:vm');
 const { pathToFileURL } = require('node:url');
 const moduleHook = require('../lib/adapters/module-hook.js');
-const { bytecodeKey } = require('../lib/companion.js');
 const { tmpDir, writeTree, rm, kernel } = require('./helpers.js');
 
 // Spy on vm.Script to observe whether V8 accepted our cached data.
@@ -124,14 +123,15 @@ describe('module-hook: CommonJS', () => {
     delete globalThis.__vfsThrows;
   });
 
+  // The cached data this thread reads, damaged in this thread alone: what
+  // the place hands the compile hook (Place.bytecode).
   it('damaged cached data falls back to the normal compiler once', () => {
     const place = k.registry.get('lib');
-    const key = bytecodeKey('/damaged.js');
-    const good = place.files.get(key);
-    place.files.set(key, {
-      data: Buffer.from('garbage-not-bytecode'),
-      stat: good.stat,
-    });
+    const { bytecode } = place;
+    place.bytecode = (key, domain) =>
+      key === '/damaged.js'
+        ? Buffer.from('garbage-not-bytecode')
+        : bytecode.call(place, key, domain);
     const before = scripts.length;
     assert.equal(require(at('lib', 'damaged.js')), 'repaired');
     assert.equal(globalThis.__vfsDamaged, 1, 'executed once');
@@ -140,7 +140,7 @@ describe('module-hook: CommonJS', () => {
       .filter((s) => s.filename === at('lib', 'damaged.js'));
     assert.equal(attempts.length, 1);
     assert.equal(attempts[0].rejected, true);
-    place.files.set(key, good);
+    delete place.bytecode;
     delete globalThis.__vfsDamaged;
   });
 
@@ -683,7 +683,7 @@ describe('module-hook: cached data across isolates', () => {
 
   // Cached data one thread's V8 rejects is that thread's alone: the module
   // compiles from its source there, once, with nothing published again;
-  // the file, its companion and the version stay, and another thread still
+  // the file, its representations and the version stay, and another thread still
   // runs the cached data.
   it('cached data a worker rejects: the source runs there, once; the file and the version stay', async () => {
     const { Worker } = require('node:worker_threads');
@@ -700,7 +700,6 @@ describe('module-hook: cached data across isolates', () => {
         `
         const vm = require('node:vm');
         const { parentPort, workerData } = require('node:worker_threads');
-        const { bytecodeKey } = require(${JSON.stringify(path.resolve(__dirname, '../lib/companion.js'))});
         const seen = [];
         const Real = vm.Script;
         vm.Script = class extends Real {
@@ -711,10 +710,8 @@ describe('module-hook: cached data across isolates', () => {
         };
         const kernel = require(${JSON.stringify(path.resolve(__dirname, '..'))}).attach();
         if (workerData.damage) {
-          // This thread's own projection of the companion, nothing shared.
-          const { files } = kernel.registry.get('lib');
-          const key = bytecodeKey('/m.js');
-          files.set(key, { ...files.get(key), data: Buffer.from('not cached data') });
+          // What this thread hands its compile hook, nothing shared.
+          kernel.registry.get('lib').bytecode = () => Buffer.from('not cached data');
         }
         const result = require(workerData.file);
         parentPort.postMessage({ result, seen, runs: globalThis.__vfsRuns });
@@ -739,8 +736,8 @@ describe('module-hook: cached data across isolates', () => {
     };
     try {
       const place = k.registry.get('lib');
-      const source = place.files.get('/m.js');
-      const companion = place.files.get(bytecodeKey('/m.js'));
+      const payload = place.file('/m.js');
+      const { requireBytecode } = payload.others;
       const version = k.version;
       let published = 0;
       k.on('publish', () => published++);
@@ -756,8 +753,8 @@ describe('module-hook: cached data across isolates', () => {
       });
       assert.equal(k.version, version);
       assert.equal(published, 0, 'nothing published again');
-      assert.equal(place.files.get('/m.js'), source);
-      assert.equal(place.files.get(bytecodeKey('/m.js')), companion);
+      assert.equal(place.file('/m.js'), payload);
+      assert.equal(place.file('/m.js').others.requireBytecode, requireBytecode);
     } finally {
       k.close();
       rm(root);
@@ -870,6 +867,7 @@ describe('module-hook: a specifier that names a directory', () => {
     });
     const mem = k.fs('mem');
     mem.writeFile('/pick.js', "module.exports = 'pick.js';");
+    mem.mkdir('/pick');
     mem.writeFile('/pick/index.js', "module.exports = 'pick/index.js';");
     mem.writeFile(
       '/pick/probe.js',
@@ -924,6 +922,7 @@ describe('module-hook: relative specifiers, as Node reads them', () => {
       },
     });
     const mem = k.fs('mem');
+    mem.mkdir('/lib');
     mem.writeFile('/lib/x.js', "module.exports = 'x.js';");
     mem.writeFile('/lib/..private.js', "module.exports = '..private.js';");
     mem.writeFile('/lib/.hidden.js', "module.exports = '.hidden.js';");

@@ -127,6 +127,27 @@ const FAILURES = [
   ['an unlink of a directory', 'v', (f) => f.unlink('/d'), 'EISDIR'],
   ['a mkdir of a file', 'v', (f) => f.mkdir('/f'), 'EEXIST'],
   ['a mkdir under a file', 'v', (f) => f.mkdir('/f/g'), 'ENOTDIR'],
+  ['a mkdir in a missing directory', 'v', (f) => f.mkdir('/n/g'), 'ENOENT'],
+  [
+    'a write into a missing directory',
+    'v',
+    (f) => f.writeFile('/n/x', 'x'),
+    'ENOENT',
+  ],
+  [
+    'an rmdir of a directory with children',
+    'v',
+    (f) => f.rmdir('/d'),
+    'ENOTEMPTY',
+  ],
+  ['an rmdir of a file', 'v', (f) => f.rmdir('/f'), 'ENOTDIR'],
+  ['an rmdir of nothing', 'v', (f) => f.rmdir('/none'), 'ENOENT'],
+  [
+    'a rename into a missing directory',
+    'v',
+    (f) => f.rename('/f', '/n/f'),
+    'ENOENT',
+  ],
   // Sets of writeFiles, refused whole: a file of the set before the one
   // refused is never published, and nothing of it stays.
   [
@@ -224,9 +245,13 @@ const codeOf = async (fn) => {
 // The keys each place publishes, sorted.
 const published = (k) =>
   Object.fromEntries(
-    k.registry
-      .all()
-      .map((place) => [place.name, [...place.files.keys()].sort()]),
+    k.registry.all().map(({ name, tree }) => {
+      const keys = [];
+      for (const [node] of tree.walk(tree.get(''))) {
+        keys.push(tree.pathOf(node) + (tree.isDirectory(node) ? '/' : ''));
+      }
+      return [name, keys.sort()];
+    }),
   );
 
 // A kernel over PLACES with CONTENT published and the patch installed;
@@ -238,9 +263,7 @@ const setup = async (defaults = {}) => {
   fs.writeFileSync(path.join(outside, 'big'), BIG);
   const k = await kernel(root, PLACES, defaults, { preparers: PREPARERS });
   for (const [name, files] of Object.entries(CONTENT)) {
-    for (const [key, text] of Object.entries(files)) {
-      await k.fs(name).writeFile(key, text);
-    }
+    await k.fs(name).writeFiles(files);
   }
   const at = (...p) => path.join(root, ...p);
   const done = () => {
@@ -278,9 +301,10 @@ describe('a kernel at rest after failures', () => {
     }
   });
 
-  // Two segments of 4 KiB, 6000 bytes in them: no room for a copy of the
-  // subtree, nor for 3 KiB more, though no file is too large for SAB.
-  it('a write and a subtree rename the pool has no room for leave nothing', async () => {
+  // Two segments of 4 KiB, 6000 bytes in them: no room for 3 KiB more,
+  // though no file is too large for SAB. A subtree moves as it is: it
+  // takes no room (Т23).
+  it('a write the pool has no room for leaves nothing; a subtree moves without room', async () => {
     const baseline = activeResources();
     const root = tmpDir('vfs-rest-full');
     const memory = {
@@ -291,11 +315,15 @@ describe('a kernel at rest after failures', () => {
     const k = await kernel(root, { v: PLACES.v }, { memory });
     const w = worker(k);
     try {
+      await k.fs('v').mkdir('/d');
       for (const key of ['/d/a', '/d/b', '/d/c']) {
         await k.fs('v').writeFile(key, key.repeat(500));
       }
       for (const place of [k.fs('v'), w.kernel.fs('v')]) {
-        assert.equal(await codeOf(() => place.rename('/d', '/e')), 'ENOSPC');
+        const used = k.cache.usage().used;
+        await place.rename('/d', '/e');
+        await place.rename('/e', '/d');
+        assert.equal(k.cache.usage().used, used, 'nothing copied');
         await assertAtRest(k, { workers: [w.kernel] });
         const more = Buffer.alloc(3 * 1024, 1);
         assert.equal(await codeOf(() => place.writeFile('/m', more)), 'ENOSPC');

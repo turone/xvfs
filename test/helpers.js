@@ -146,21 +146,34 @@ const nextEvent = (emitter, event, ms = WAIT) => {
 
 const nextMessage = (port, ms) => nextEvent(port, 'message', ms);
 
+// The payload published under `key` in the place `name` of a kernel — its
+// version, attributes and representations (lib/tree.js) — or null.
+const fileOf = (k, name, key) => k.registry.get(name).file(key);
+
+// The representations a shared place's tree publishes, each once.
+const publishedReps = function* (place) {
+  const { tree } = place;
+  for (const [node] of tree.walk(tree.get(''), { containers: 'skip' })) {
+    const { source, others } = tree.payloadOf(node);
+    if (source) yield source;
+    for (const field in others) if (others[field]) yield others[field];
+  }
+};
+
 // The bytes of a main kernel's pool in allocations that neither a published
-// entry nor a retired version accounts for: what a failed publication left
-// behind. 0 whenever no publication is in flight, whatever the ACKs still
-// pending; the count of segments hides such a leak inside a segment.
+// representation nor a retired one accounts for: what a failed publication
+// left behind. 0 whenever no publication is in flight, whatever the ACKs
+// still pending; the count of segments hides such a leak inside a segment.
 const leakedBytes = (k) => {
   let used = 0;
   for (const id of k.cache.pool.segments.keys()) {
     used += k.cache.registry.used(id);
   }
-  for (const { entries } of k.cache.indexes.values()) {
-    for (const entry of entries.values()) {
-      if (entry.kind === 'shared') used -= entry.length;
-    }
+  for (const place of k.registry.all()) {
+    if (place.provider !== 'sab' && place.provider !== 'sea') continue;
+    for (const rep of publishedReps(place)) used -= rep.length;
   }
-  for (const record of k.retired.values()) used -= record.entry.length;
+  for (const record of k.retired.values()) used -= record.extent.length;
   return used;
 };
 
@@ -308,6 +321,8 @@ module.exports = {
   within,
   WAIT,
   diskCalls,
+  fileOf,
+  publishedReps,
   leakedBytes,
   turn,
   restOf,

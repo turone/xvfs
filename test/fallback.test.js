@@ -9,6 +9,7 @@ const { VfsStats } = require('../lib/stats.js');
 const fsPatch = require('../lib/adapters/fs-patch.js');
 const moduleHook = require('../lib/adapters/module-hook.js');
 const { tmpDir, writeTree, rm, kernel } = require('./helpers.js');
+const { fileOf } = require('./helpers.js');
 
 // Disk edits behind the VFS's back: captured before any patch is installed.
 const {
@@ -320,7 +321,7 @@ describe("fs.fallback: 'disk' — a partial disk cache", () => {
       fs.readFileSync(at('site', 'media', 'clip.mp4'), 'utf8'),
       'MP4',
     );
-    assert.equal(k.cache.entry('site', '/logo.png'), null, 'never cached');
+    assert.equal(fileOf(k, 'site', '/logo.png'), null, 'never cached');
   });
 
   it('merges cached and disk entries in listings, without duplicates', () => {
@@ -426,7 +427,7 @@ describe("fs.fallback: 'disk' — a partial disk cache", () => {
     );
     await k.watchQueue.idle;
     assert.equal(fs.readFileSync(at('up', 'a.txt'), 'utf8'), 'a2');
-    assert.equal(k.cache.entry('up', '/b.png'), null);
+    assert.equal(fileOf(k, 'up', '/b.png'), null);
     assert.equal(fs.readFileSync(at('up', 'b.png'), 'utf8'), 'PNG');
   });
 
