@@ -54,7 +54,7 @@ is unsupported.
 [Protocol](#protocol) · [Examples](#examples) ·
 [Architecture](#architecture) · [Support](#support) ·
 [Design decisions](doc/architecture.md) · [Alternatives](doc/alternatives.md) ·
-[Benchmarks](doc/benchmarks.md)
+[Benchmarks](doc/benchmarks.md) · [External sources](doc/external-sources.md)
 
 ## Features
 
@@ -677,7 +677,9 @@ the source's own ids, each with a class, a policy and a payload of
 bytes in the same pool as the places' files, the same in every thread.
 A tree is declared in the config, made empty by `initialize()`, written
 only by the batches of its source and read in every thread through
-`kernel.tree(name)`.
+`kernel.tree(name)`. What a database, Redis or another source of truth
+provides — batches, numbers, a log, a snapshot — is in
+[doc/external-sources.md](doc/external-sources.md).
 
 ```js
 const config = new VfsConfig({

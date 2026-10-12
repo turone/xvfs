@@ -1276,7 +1276,8 @@ its files would otherwise build a second pool, a second protocol and
 second books of frees. Declared in advance, a tree is known to every
 worker from its snapshot and checked with the config; a tree made at run
 time would need a message of its own and a lifetime per tree, and nothing
-asks for one.
+asks for one. What a source provides — batches, numbers, a log, a
+snapshot — is [external-sources.md](external-sources.md).
 
 **`trees.<name>`: `ids` (`'number'` or `'string'`, required),
 `containers`, `birthtime`, `aggregates`, `maxNodes`, `maxFileSize`
