@@ -464,11 +464,15 @@ ACK and `vfs-release` free of place names and the books whole.
 over, a representation relocated again, a node removed with what the
 commit wrote into it — retires nothing: the commit returns its extents
 as `dropped`, and the kernel returns them to the pool at once, a `map`
-place's store drops their buffers.** _Why:_ nobody ever saw them, so
-nothing waits for an ACK; a caller that writes one key twice in one
-commit — the kernel takes any list, only `writeFiles` refuses a key
-twice — would otherwise leave their bytes in the pool for good, outside
-both the published and the retired.
+place's store drops their buffers. A set names each key once: the
+kernel's batch (`publishVirtualBatch`) refuses a key twice before
+anything is placed, as `writeFiles` does.** _Why:_ nobody ever saw what a
+commit took back, so nothing waits for an ACK, and without `dropped` its
+bytes would stay in the pool for good, outside both the published and
+the retired — whatever the next caller of the engine does. A set with a
+key twice is a contradiction rather than a commit to take back: what it
+published would hang on the order of its files, and its event would
+name the key twice.
 
 **A tree's version never decreases and never wraps: the kernel hands each
 commit the next publication's version, and a commit that changes nothing,

@@ -310,36 +310,72 @@ describe('nodes: segments', () => {
 describe('nodes: what a commit takes back', () => {
   // A payload a commit writes and writes over in itself was published to no
   // one: its bytes go back with the commit (the tree's `dropped`) — never
-  // retired, never left in the pool. PlaceFs.writeFiles refuses a key
-  // twice; the kernel's batch does not.
+  // retired, never left in the pool. No caller of the kernel writes a key
+  // twice in one commit: a set names each key once, as writeFiles does.
   const failOf = () => (code) => Object.assign(new Error(code), { code });
 
-  it('a batch that writes a key twice publishes the second; the first goes back to the pool at once', async () => {
+  it('a batch that names a key twice is refused before anything changes', async () => {
+    const root = tmpDir('vfs-nodes');
+    const k = await kernel(root, { v: VIRTUAL });
+    try {
+      const v = k.fs('v');
+      await v.writeFile('/a.txt', 'zero');
+      const version = k.version;
+      const update = k.nextUpdateId;
+      const files = [
+        ['/a.txt', Buffer.from('one')],
+        ['/n/b.txt', Buffer.from('three')],
+        ['/a.txt', Buffer.from('two')],
+      ];
+      await assert.rejects(
+        k.publishVirtualBatch(k.registry.get('v'), files, failOf),
+        (err) =>
+          err instanceof TypeError && /"\/a\.txt" twice/.test(err.message),
+      );
+      assert.equal(v.readFile('/a.txt', 'utf8'), 'zero');
+      assert.equal(v.exists('/n'), false, 'no directory made');
+      assert.equal(k.version, version, 'no version');
+      assert.equal(k.nextUpdateId, update, 'no update');
+      assert.equal(leakedBytes(k), 0, 'nothing placed');
+    } finally {
+      k.close();
+      rm(root);
+    }
+  });
+
+  // Through the kernel's own seam, with extents of its pool: a commit that
+  // writes a key twice and writes and unlinks another.
+  it('a commit that takes back what it wrote frees it at once; a worker reads what stays', async () => {
     const root = tmpDir('vfs-nodes');
     const k = await kernel(root, { v: VIRTUAL });
     const w = worker(k);
     try {
       const v = k.fs('v');
       await v.writeFile('/a.txt', 'zero');
-      const files = [
-        ['/a.txt', Buffer.from('one')],
-        ['/a.txt', Buffer.from('two')],
-        ['/n/b.txt', Buffer.from('three')],
-        ['/n/b.txt', Buffer.from('four')],
+      const input = (text) => {
+        const data = Buffer.from(text);
+        const stat = { size: data.length, mtimeMs: 1 };
+        const extent = k.cache.allocateSync({ data, stat });
+        return { ...stat, representations: [[0, extent]] };
+      };
+      const fail = (code) => Object.assign(new Error(code), { code });
+      const ops = [
+        ['write', '/a.txt', input('one')],
+        ['write', '/a.txt', input('two')],
+        ['write', '/b.txt', input('three')],
+        ['unlink', '/b.txt'],
       ];
-      await k.publishVirtualBatch(k.registry.get('v'), files, failOf);
-      assert.equal(leakedBytes(k), 0, 'nothing of the first writes');
+      await k.changeVirtual(k.registry.get('v'), ops, fail);
+      assert.equal(leakedBytes(k), 0, 'nothing of what it took back');
       assert.equal(v.readFile('/a.txt', 'utf8'), 'two');
-      assert.equal(v.readFile('/n/b.txt', 'utf8'), 'four');
+      assert.equal(v.exists('/b.txt'), false);
       const keys = [...k.retired.values()].map((r) => r.key);
       assert.ok(
         keys.every((key) => key === '/a.txt'),
         'the published one alone retires',
       );
       await until(() => w.kernel.version === k.version);
-      const files2 = w.kernel.fs('v');
-      assert.equal(files2.readFile('/a.txt', 'utf8'), 'two');
-      assert.equal(files2.readFile('/n/b.txt', 'utf8'), 'four');
+      assert.equal(w.kernel.fs('v').readFile('/a.txt', 'utf8'), 'two');
       await until(() => k.retired.size === 0);
       assert.equal(leakedBytes(k), 0);
     } finally {
