@@ -154,8 +154,10 @@ export class PlaceFs {
   /**
    * The version of the commit that published the file of a shared place
    * (`sab`, `sea`): equal for the files one commit published, the same in
-   * every thread; a move keeps it. Null for a missing key, a `map` place's
-   * file and the disk territory.
+   * every thread; a move keeps it. A directory's is the commit's that
+   * last changed its children, where the place keeps directory attributes
+   * (`stat.directories`). Null for a missing key, a directory without
+   * them, a `map` place's file and the disk territory.
    */
   version(key: string): number | null;
   /**

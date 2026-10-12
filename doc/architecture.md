@@ -1081,9 +1081,11 @@ files. The keys in flight are indexed by the directories above them
 a key is found in the depth of that key. Directories are nodes: `mkdir`
 makes one — with `recursive`, every one missing down to it (`mkdirOps`) —
 and `rmdir` removes an empty one, each a commit that takes a version; a
-write, an append, a copy or a rename into a directory that does not exist
-is `ENOENT`, as in `node:fs` — only `writeFiles` makes the directories its
-files lack, in its commit (`parents`); `unlink` of a directory is
+write, an append, a `copyFile` or a rename into a directory that does not
+exist is `ENOENT`, as in `node:fs` — `writeFiles` makes the directories
+its files lack, in its commit (`parents`), and a `cp` of one file makes
+them first, where nothing is in the way, as `node:fs` `cp` does
+(`storeWrite`, `fs-copy.js`); `unlink` of a directory is
 `EISDIR`, `rm` of one without `recursive` the `ERR_FS_EISDIR` `node:fs`
 throws.** _Why:_ a path that is both lets `/f.txt` and `/f.txt/x` exist —
 a structure no filesystem has, for which listings, `stat`, subtree

@@ -169,6 +169,8 @@ describe('nodes: attributes', () => {
       await v.writeFile('/d/a.txt', 'a');
       const after = tree.payloadOf(tree.get('/d')).version;
       assert.ok(after > before, 'a child added changes it');
+      assert.equal(v.version('/d'), after, "version(): the directory's own");
+      assert.equal(v.version('/d/a.txt'), after, 'the commit that changed it');
       const changed = v.stat('/d');
       assert.equal(changed.mtimeMs, 1_005_000, 'its mtime, with its children');
       assert.equal(changed.birthtimeMs, 1_000_000, 'its birthtime, kept');
@@ -182,6 +184,7 @@ describe('nodes: attributes', () => {
       const plain = k.fs('plain');
       await plain.mkdir('/d');
       assert.equal(plain.stat('/d').mtimeMs, 0);
+      assert.equal(plain.version('/d'), null, 'no directory attributes');
       assert.equal(
         k.registry
           .get('plain')

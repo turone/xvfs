@@ -555,6 +555,37 @@ describe('single-file copies hand the raw input to the destination', () => {
     );
   });
 
+  // A virtual place's directories are nodes of its own: copyFile into a
+  // missing one is ENOENT; cp makes the ones it lacks first, as node:fs cp
+  // does, and past a file in the way is refused as the copy (ENOTDIR).
+  it('into a virtual place: cp makes the directories it lacks, copyFile is ENOENT', async () => {
+    const src = external('v');
+    for (const place of ['vs', 'vmp']) {
+      const missing = at(place, `no${++n}`, 'x.txt');
+      refusal(
+        await outcome(() => fs.promises.copyFile(src, missing)),
+        'ENOENT',
+        'copyfile',
+        src,
+        missing,
+      );
+      const name = `new${++n}`;
+      const deep = at(place, name, 'deep', 'x.txt');
+      assert.equal(await outcome(() => fs.promises.cp(src, deep)), 'ok', place);
+      const files = k.fs(place);
+      assert.equal(files.readFile(`/${name}/deep/x.txt`, 'utf8'), 'v', place);
+      assert.ok(files.stat(`/${name}/deep`).isDirectory(), place);
+      const under = at(place, name, 'deep', 'x.txt', 'y.txt');
+      refusal(
+        await outcome(() => fs.promises.cp(src, under)),
+        'ENOTDIR',
+        'cp',
+        src,
+        under,
+      );
+    }
+  });
+
   it('compression: a compressed representation is never copied as content', async () => {
     // A disk-origin source: the raw disk file, not its gzip representation.
     assert.ok(k.fs('site').storedEncodings('/index.html').includes('gzip'));
