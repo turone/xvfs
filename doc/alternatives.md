@@ -31,7 +31,7 @@ Contents: [What it does](#what-it-does) ·
 **Places over the real paths.** A place is a directory under `appRoot`;
 its name is the mount, the cache namespace and the key of every update.
 The _provider_ says where the bytes live — `sab` (the shared pool), `map`
-(a per-thread `Map`), `sea` (the pool, filled from SEA assets), `disk` and
+(each thread's own memory), `sea` (the pool, filled from SEA assets), `disk` and
 `node-default` (passthrough mounts) — and the _origin_ where the content
 comes from: `disk` (a scanner, then a watcher) or `virtual` (the
 application writes it). Code that reads `appRoot/static/index.html` keeps

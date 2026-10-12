@@ -115,8 +115,8 @@ mapping table; the router maps any path to its place with one lookup on the
 first path segment; a place is enabled or disabled without rewriting paths.
 
 **Provider (where bytes live) and origin (where content comes from) are
-independent axes.** `sab` / `sea` keep bytes in the SAB pool, `map` in a
-per-thread Map, `disk` / `node-default` are passthrough mounts; `sab` and
+independent axes.** `sab` / `sea` keep bytes in the SAB pool, `map` in each
+thread's own memory, `disk` / `node-default` are passthrough mounts; `sab` and
 `map` read a directory (`origin: 'disk'`) or take application writes
 (`origin: 'virtual'`). _Why:_ the four `sab`/`map` × `disk`/`virtual`
 combinations cover a worker-shared cache, shared scratch state, a per-thread
@@ -460,7 +460,7 @@ and the pages of a site; a clean boundary lets the reference model
 **One pipeline for every source of content: raw input → the preparer of
 its extension (once) → canonical content → bytecode flavors → compressed
 representations → one epoch.** Initial scan, watcher, SEA assets, virtual
-writes from any thread and Map writes all use it. _Why:_ what a file _is_
+writes from any thread and `map` writes all use it. _Why:_ what a file _is_
 cannot differ between init and live updates or between origins, and
 atomicity and failure semantics are enforced in one place.
 
@@ -480,7 +480,7 @@ stage — the payload input, the attributes and each representation's
 `[kind, extent]`, and its extents; `inputOf()` makes the canonical input
 for either sink —
 a raw input read through the kernel's reader, its preparer run once — and
-the Map sink is `MapStore.publish()`. A failure frees the attempt's own
+the map sink is `MapStore.publish()`. A failure frees the attempt's own
 allocations and nothing else. The sink keeps no state and calls nothing
 private: it reads the kernel's `cache` and `compressor` at each call —
 after `close()` both are gone — and the kernel stages what comes back into
@@ -658,7 +658,7 @@ representations. `require.compile` is
 best-effort. A source `fs.script.compile` cannot compile is one error
 wherever it is published: `ENOTSUP` (`fs.script.compile: source does not
 compile`), `syscall` `open`, `path` the source's — `bytecodeFor()` throws it
-for the SAB and the Map sink alike, and a worker's mutation gets it back
+for the SAB and the map sink alike, and a worker's mutation gets it back
 with the same fields. A rename that publishes a source under a new name
 refuses it as the rename: `rename`, the renamed source as `path`, the new
 name as `dest` — the operation hands the pipeline its `fail`, and so it
@@ -827,7 +827,7 @@ function is a deployment error: startup fails, not a later publication.
 **Preparers are synchronous, run once per publication attempt and never on
 read; returned bytes are taken the moment the preparer returns, `meta` /
 `scriptOptions` cloned and deep-frozen.** _Why:_ they run inside
-synchronous Map writes and the watcher pipeline; running on read would
+synchronous `map` writes and the watcher pipeline; running on read would
 multiply the CPU cost per thread and request; cloned, frozen results
 travel to workers and cannot change after publication.
 
@@ -966,7 +966,7 @@ what never came.
 
 **The semantics of a virtual place's mutations is written once
 (`VirtualStore`): which checks run, in which order, and what each refusal
-is; a store only executes it — `MapStore` at once, on the thread's own Map,
+is; a store only executes it — `MapStore` at once, on the thread's own tree,
 `SabStore` in the key's turn of the kernel's queue (under the place barrier
 for `rm` and the rename of a directory), publishing through the kernel.
 Every check runs inside that turn, and a mutation takes the bytes it is
@@ -989,6 +989,13 @@ the snapshot there against 5.13 with it on the port. A message taken off
 the port is the worker's own object, collected once the replicas are
 built. A link whose port holds none — taken already, or no port at all —
 is refused at once rather than replicated empty.
+
+**An update carries a segment once, in `newSegments` — the first that
+publishes into it — and a snapshot every one (`#sentSegments`).** _Why:_
+a segment stays in the pool for good, the same SAB, so a link made later
+has it from its snapshot. Carried with every update that touched it, a
+segment cost 1.7 µs of a clone on each side per update, and a new
+`SharedArrayBuffer` object in every worker each time.
 
 **A delta a worker cannot apply breaks its view, in the same synchronous
 step, before the event loop runs again: every call that reaches its
@@ -1792,7 +1799,7 @@ file under it can move as it is — not prepared, not compiled
 `meta` (`immovable`).** Every file keeps its node — its id and `ino` — its
 payload, every representation and its version under the new prefix, in
 one publication that names one pair in `moved`: one `vfs-update` for SAB,
-one commit of its tree for a Map. Nothing is copied, prepared, compiled or
+one commit of its tree for a `map` place. Nothing is copied, prepared, compiled or
 compressed again, nothing retires, and the pool needs no room; the move
 takes the place barrier. One file that cannot move refuses the whole move
 (`ENOTSUP`); onto an empty directory it replaces it, onto one with
@@ -2024,7 +2031,7 @@ workers call `attach()`.** _Why:_ preloads do not run in worker threads.
 | Design                                                                                                          | Why not                                                                                     |
 | --------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------- |
 | Preparer functions inside `VfsConfig`                                                                           | the config must stay structured-cloneable for workers                                       |
-| Async preparers                                                                                                 | they run inside synchronous Map writes and one atomic publication                           |
+| Async preparers                                                                                                 | they run inside synchronous `map` writes and one atomic publication                         |
 | Domain priority or merging of `prepare` declarations                                                            | hides mistakes; one extension, one declaration                                              |
 | `fs.script.prepare`                                                                                             | preparation belongs to the file, not to the script consumer                                 |
 | `compile: boolean`, or an alias for it                                                                          | a fixed set of extensions; `fs.ext` repeated the script ones                                |

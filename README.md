@@ -9,7 +9,7 @@ strict routing of what the application may reach — through `node:fs` and
 
 A place is a directory under `appRoot`. Its **provider** says where the
 bytes live: `sab` — one copy in pooled `SharedArrayBuffer` segments that
-every thread reads zero-copy; `map` — each thread's own `Map`, written
+every thread reads zero-copy; `map` — each thread's own memory, written
 synchronously and seen by that thread only; `sea` — the assets of a
 single executable, in the shared pool; `disk` and `node-default` — the
 file system itself, under the place's policy. Its **origin** says where
@@ -284,7 +284,7 @@ always explicit in the resolved config:
 | `sab` + `disk`    | scanner + watcher                | to disk, watcher republishes | snapshot/delta      |
 | `sab` + `virtual` | application writes               | main thread or worker RPC    | snapshot/delta      |
 | `map` + `disk`    | scanner + watcher, owned Buffers | to disk, watcher republishes | none (thread-local) |
-| `map` + `virtual` | application writes               | local `Map`, synchronous     | none (thread-local) |
+| `map` + `virtual` | application writes               | local tree, synchronous      | none (thread-local) |
 
 `origin: 'virtual'` requires the fs domain with `writable: true` —
 nothing else can ever give the place content. A virtual place is
@@ -1900,7 +1900,10 @@ without it. One `vfs-update` per commit — a watcher epoch, an accepted
 virtual mutation, a compaction — with each place's delta and the keys
 of its event; a file's source and representations change in the same
 delta, which the worker applies to its replica of the tree with the
-very code the main tree applied it with. Every shared representation an
+very code the main tree applied it with. A snapshot carries every segment
+of the pool, and an update a segment once, in `newSegments` — the first
+that publishes into it: a segment stays in the pool for good, the same SAB.
+Every shared representation an
 update replaces or removes is retired under a `retireId` that exists
 only until it is freed. A worker ACKs each update; `retained` lists the
 retired versions its streams or leases still read, and one `vfs-release`

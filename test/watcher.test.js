@@ -90,7 +90,16 @@ describe('watcher pipeline', () => {
     assert.deepEqual(Object.keys(msg.places), ['site']);
     assert.deepEqual(msg.places.site.replaced, ['/a.js']);
     assert.deepEqual(msg.places.site.removed, []);
-    assert.ok(msg.newSegments.length >= 1);
+    // Every segment the new bytes lie in is the worker's: from its snapshot,
+    // or from the update that first published into it.
+    const known = new Set(w.snapshot.segments.map((s) => s.id));
+    for (const m of msgs.filter((x) => x.name === 'vfs-update')) {
+      for (const s of m.newSegments) known.add(s.id);
+    }
+    const now = place().file('/a.js');
+    for (const rep of [now.source, ...Object.values(now.others)]) {
+      if (rep && rep.length > 0) assert.ok(known.has(rep.segmentId));
+    }
     assert.equal(
       site.readFile('/a.js', 'utf8'),
       'module.exports = 2; // changed',

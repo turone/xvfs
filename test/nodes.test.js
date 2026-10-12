@@ -196,6 +196,62 @@ describe('nodes: attributes', () => {
   });
 });
 
+describe('nodes: segments', () => {
+  // A segment is the pool's for good, the same SAB: a snapshot carries
+  // every one, an update the one it first publishes into — once.
+  it('an update carries a segment once, the first that publishes into it; a snapshot carries every one', async () => {
+    const root = tmpDir('vfs-nodes');
+    const k = await kernel(
+      root,
+      { v: VIRTUAL },
+      {
+        memory: {
+          limit: '1 mib',
+          segmentSize: '64 kib',
+          maxFileSize: '64 kib',
+        },
+      },
+    );
+    const w = worker(k);
+    try {
+      const first = tap(k);
+      const v = k.fs('v');
+      const segmentOf = (key) => fileOf(k, 'v', key).source.segmentId;
+      await v.writeFile('/a.txt', 'a'.repeat(1024));
+      await v.writeFile('/b.txt', 'b'.repeat(1024));
+      await until(() => first.updates().length === 2);
+      const [ua, ub] = first.updates();
+      const one = segmentOf('/a.txt');
+      assert.deepEqual(
+        ua.newSegments.map((s) => s.id),
+        [one],
+      );
+      assert.equal(segmentOf('/b.txt'), one, 'the same segment');
+      assert.deepEqual(ub.newSegments, [], 'carried already');
+      const second = tap(k);
+      assert.ok(second.snapshot.segments.some((s) => s.id === one));
+      await v.writeFile('/c.bin', Buffer.alloc(40 * 1024, 1));
+      await v.writeFile('/d.bin', Buffer.alloc(40 * 1024, 2));
+      const fresh = segmentOf('/d.bin');
+      assert.notEqual(fresh, one, 'a new segment');
+      await until(() => second.updates().length === 2);
+      for (const t of [first, second]) {
+        const carried = t
+          .updates()
+          .flatMap((u) => u.newSegments.map((s) => s.id));
+        assert.equal(carried.filter((id) => id === fresh).length, 1, 'once');
+      }
+      await until(() => w.kernel.version === k.version);
+      const files = w.kernel.fs('v');
+      assert.deepEqual(files.readFile('/d.bin'), Buffer.alloc(40 * 1024, 2));
+      assert.equal(files.readFile('/a.txt', 'utf8'), 'a'.repeat(1024));
+    } finally {
+      k.close();
+      rm(root);
+    }
+  });
+});
+
 describe('nodes: moves', () => {
   it('a file onto a file replaces it in one commit: moved, the replaced one removed', async () => {
     const root = tmpDir('vfs-nodes');
