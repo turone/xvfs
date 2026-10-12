@@ -18,6 +18,7 @@ const fill = async (k) => {
   const v = k.fs('v');
   await v.writeFile('/big.bin', Buffer.alloc(700 * KIB, 1));
   const small = Buffer.alloc(KIB, 2);
+  await v.mkdir('/s', { recursive: true });
   for (let i = 0; i < SMALL; i++) await v.writeFile(`/s/${i}.bin`, small);
   await v.writeFile('/fill.bin', Buffer.alloc(600 * KIB, 3));
   return v;

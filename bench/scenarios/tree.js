@@ -6,15 +6,11 @@ const { Worker, MessageChannel } = require('node:worker_threads');
 const { median } = require('../harness.js');
 const engine = require('../../test/tree-engine.js');
 const data = require('../../test/tree-data.js');
-const { PlaceFiles } = require('../../lib/place.js');
-const { FilesystemCache } = require('../../lib/cache.js');
-const { bytecodeKey, compressedKey } = require('../../lib/companion.js');
 
-// The tree engine (.work/stage1/SPEC.md, "Measurements") and, beside it,
-// today's index of a place on the same data: the real PlaceFiles, the
-// projection of lib/cache.js and the companion keys of lib/companion.js
-// (until step B5 removes them). The engine is test/tree-engine.js's:
-// TREE_ENGINE, else lib/tree.js.
+// The tree engine (.work/stage1/SPEC.md, "Measurements"): test/tree-engine.js's,
+// TREE_ENGINE, else lib/tree.js. The index it replaced is gone from the
+// library with stage B; the library before it is measured against the one
+// on the tree by bench/ab.js, its scenarios.
 //
 //   node --expose-gc bench/run.js --only tree [--n 10000,100000]
 //   node bench/ab.js <base> <new> --only tree [--n 10000]
@@ -25,8 +21,8 @@ const { bytecodeKey, compressedKey } = require('../../lib/companion.js');
 // 1000 files, and /wide, 1023 files, the directory a replacement moves when
 // the catalog has no 8000-file section. Sizes: n = 10⁴ and 10⁵, the memory
 // of a replica at 10⁶ too; `--n` sets them all. Metrics are
-// `tree.<section>.<n>.<what>`, and `…<n>.today.<what>` for today's index;
-// a lookup is timed with a fresh key string per call, as a request's is. A
+// `tree.<section>.<n>.<what>`; a lookup is timed with a fresh key string
+// per call, as a request's is. A
 // random read takes its key from a stream of indices built beforehand from
 // a seed — uniform, or Zipf (s = 1) over the shuffled keys — so that what a
 // round reads does not depend on the number of iterations calibration
@@ -57,10 +53,8 @@ const { bytecodeKey, compressedKey } = require('../../lib/companion.js');
 //   move      apply of a move of 20 and of 8000 nodes and the deferred cost
 //             of the lookups after; a file replacing a file, a directory of
 //             8000 files (of 1023 when the catalog is smaller) replacing an
-//             empty one, and the size of `retired`; today's index re-keys
-//             what moved
-//   attach    snapshot + structuredClone + fromSnapshot; today's snapshot,
-//             clone and projection
+//             empty one, and the size of `retired`
+//   attach    snapshot + structuredClone + fromSnapshot
 //   delta     apply per replaced, per new and per removed file; the first
 //             get of a new file
 //   refusal   in a worker: a commit of 10⁴ writes, of 10³ moves, of the
@@ -81,8 +75,6 @@ const { bytecodeKey, compressedKey } = require('../../lib/companion.js');
 
 const WORKER = path.join(__dirname, '..', 'workers', 'tree-replica.js');
 const SEP = path.sep;
-const WIN = SEP === '\\';
-const BACKSLASH = /\\/g;
 const MOUNT = path.resolve('/xvfs-bench/site');
 const FROM = MOUNT.length;
 const NO_PINS = { retain: () => false };
@@ -239,132 +231,6 @@ const buildTree = (options, ctx) => {
   return tree;
 };
 
-// --- Today's index -------------------------------------------------------------
-
-const ENCODINGS = { 3: 'gzip', 4: 'deflate', 5: 'br', 6: 'zstd' };
-const COMPANIONS = [1, 2, 3, 4, 5, 6];
-
-// The key a representation has in today's index.
-const keyOfKind = (key, kind) => {
-  if (kind === KIND.source) return key;
-  if (kind === KIND.requireBytecode) return bytecodeKey(key, 'require');
-  if (kind === KIND.scriptBytecode) return bytecodeKey(key, 'script');
-  return compressedKey(key, ENCODINGS[kind]);
-};
-
-// The entries a file publishes today, as #flush stamps them: the source and
-// each companion under its own key, a shared entry of lib/cache.js each.
-const entriesOf = (key, input, version) =>
-  input.representations.map(([kind, extent]) => {
-    const { segmentId, offset, length } = extent;
-    const { size, mtimeMs } = input;
-    const encoding = ENCODINGS[kind];
-    let stat = { size: length, mtimeMs };
-    if (kind === KIND.source) stat = { size, mtimeMs };
-    else if (encoding)
-      stat = { size: length, sourceSize: size, encoding, mtimeMs };
-    const entry = { kind: 'shared', segmentId, offset, length, stat, version };
-    if (kind === KIND.source && input.meta) entry.meta = input.meta;
-    return [keyOfKind(key, kind), entry];
-  });
-
-// The main thread's index of a place today: its published entries by key.
-class TodayMain {
-  constructor() {
-    this.entries = new Map();
-  }
-
-  // What #flush sends for these files: their entries, under one version.
-  publish(keys, inputs, version) {
-    const update = { entries: [], removals: [], retired: [] };
-    for (let i = 0; i < keys.length; i++) {
-      for (const pair of entriesOf(keys[i], inputs[i], version)) {
-        this.entries.set(pair[0], pair[1]);
-        update.entries.push(pair);
-      }
-    }
-    return update;
-  }
-
-  // A place's part of cache.snapshot().
-  snapshot() {
-    return { entries: [...this.entries] };
-  }
-}
-
-// A thread's projection today: PlaceFiles over the projected entries, each
-// with its Buffer view.
-class TodayReplica {
-  constructor(segments) {
-    this.segments = segments;
-    this.files = new PlaceFiles();
-  }
-
-  static fromSnapshot(snapshot, segments) {
-    const replica = new TodayReplica(segments);
-    FilesystemCache.project(snapshot, segments, replica.files);
-    return replica;
-  }
-
-  get(key) {
-    return this.files.get(key);
-  }
-
-  // What routing does past the mount: the rest of the path, '\' made '/'
-  // on Windows, then the projection's Map.
-  resolve(abs, from) {
-    const rel = abs.slice(from);
-    return this.files.get(WIN ? rel.replace(BACKSLASH, '/') : rel);
-  }
-
-  // What PlaceFs.readdir takes from the index: [name, isDirectory].
-  children(dir) {
-    const out = [];
-    const cut = dir.length + 1;
-    for (const [key, isDirectory] of this.files.children(dir)) {
-      out.push([key.slice(cut), isDirectory]);
-    }
-    return out;
-  }
-
-  // #apply: bind the pinned retired versions, then set and delete.
-  apply(update, pins) {
-    const { files } = this;
-    const retained = [];
-    for (const [key, id] of update.retired) {
-      const file = files.get(key);
-      if (file && pins.retain(file, id)) retained.push(id);
-    }
-    for (const [key, entry] of update.entries) {
-      files.set(key, FilesystemCache.projectEntry(entry, this.segments));
-    }
-    for (const key of update.removals) files.delete(key);
-    return retained;
-  }
-
-  // A move as the flat index has to take it: every source below `from` and
-  // its companions re-keyed under `to` — the same projected objects, one
-  // delete and one set each. (Today's kernel also copies their bytes,
-  // sharedCopies; that is not counted here.)
-  move(from, to) {
-    const moved = [];
-    for (const [key, isDirectory] of this.files.below(from)) {
-      if (isDirectory) continue;
-      moved.push(key);
-      for (const kind of COMPANIONS) {
-        const companion = keyOfKind(key, kind);
-        if (this.files.has(companion)) moved.push(companion);
-      }
-    }
-    for (const key of moved) {
-      const file = this.files.get(key);
-      this.files.delete(key);
-      this.files.set(to + key.slice(from.length), file);
-    }
-    return moved.length;
-  }
-}
-
 // --- Contexts --------------------------------------------------------------------
 
 const setup = (n) => {
@@ -381,16 +247,12 @@ const setup = (n) => {
     nodes: keys.length + dirs.length + 1,
     inputs: null,
     tree: null,
-    today: null,
     replica: null,
-    todayReplica: null,
     replicas: [],
     client: null,
   };
   ctx.inputs = keys.map((_, i) => inputOf(ctx.extents, i));
   ctx.tree = buildTree({}, ctx);
-  ctx.today = new TodayMain();
-  ctx.today.publish(keys, ctx.inputs, clock.next());
   return ctx;
 };
 
@@ -457,11 +319,11 @@ const noJournalEnv = () => ({ ...process.env, TREE_JOURNAL: 'off' });
 
 // --- Memory --------------------------------------------------------------------------
 
-const replicaMemory = async (side, snapshot, ctx) => {
+const replicaMemory = async (snapshot, ctx) => {
   const bytes = v8.serialize(snapshot).length;
   const boxed = ctx.n <= BOXED_MAX;
   const message = { snapshot, segments: ctx.segments };
-  const result = await inWorker('memory', { side, boxed }, [message]);
+  const result = await inWorker('memory', { boxed }, [message]);
   return { ...result, bytes };
 };
 
@@ -480,14 +342,12 @@ const memoryReport = (b, id, r, files) => {
 
 const memory = async (b, ctx) => {
   const { nk, files } = ctx;
-  const plain = await replicaMemory('engine', ctx.tree.snapshot(), ctx);
+  const plain = await replicaMemory(ctx.tree.snapshot(), ctx);
   memoryReport(b, `tree.memory.${nk}.plain`, plain, files);
   const attributes = { birthtime: true, directories: true };
   const snapshot = buildTree(attributes, ctx).snapshot();
-  const attrs = await replicaMemory('engine', snapshot, ctx);
+  const attrs = await replicaMemory(snapshot, ctx);
   memoryReport(b, `tree.memory.${nk}.attrs`, attrs, files);
-  const today = await replicaMemory('today', ctx.today.snapshot(), ctx);
-  memoryReport(b, `tree.memory.${nk}.today`, today, files);
 };
 
 // --- Views -----------------------------------------------------------------------------
@@ -528,7 +388,7 @@ const views = async (b, ctx) => {
 // --- Lookups ---------------------------------------------------------------------------
 
 const lookups = (b, ctx) => {
-  const { nk, replica, todayReplica } = ctx;
+  const { nk, replica } = ctx;
   const files = ctx.keys.slice(0, ctx.n);
   expectAll(replica, files, 'the replica');
   // The hot set is drawn by a seed of its own, apart from the random order.
@@ -542,10 +402,7 @@ const lookups = (b, ctx) => {
   const absHot = fresh(hot.map(absOf));
   const uniform = streamOf(random.length, 'uniform', 1);
   const zipf = streamOf(random.length, 'zipf', 2);
-  const sides = [
-    [`tree.lookup.${nk}`, replica],
-    [`tree.lookup.${nk}.today`, todayReplica],
-  ];
+  const sides = [[`tree.lookup.${nk}`, replica]];
   for (const [id, r] of sides) {
     b.ops(`${id}.get.random`, (i) =>
       r.get(freshRandom[uniform[i & MASK]].slice(1)),
@@ -566,7 +423,7 @@ const lookups = (b, ctx) => {
 // --- Listing -----------------------------------------------------------------------------
 
 const listing = (b, ctx) => {
-  const { nk, replica, todayReplica } = ctx;
+  const { nk, replica } = ctx;
   const leaves = shuffled(
     ctx.dirs.filter((dir) => dir.includes('/sub-')),
     3,
@@ -579,8 +436,6 @@ const listing = (b, ctx) => {
   const id = `tree.listing.${nk}`;
   b.ops(`${id}.children20`, (i) => replica.children(nodes[i % L]));
   b.ops(`${id}.children1000`, () => replica.children(big));
-  b.ops(`${id}.today.children20`, (i) => todayReplica.children(leaves[i % L]));
-  b.ops(`${id}.today.children1000`, () => todayReplica.children('/big'));
 };
 
 // --- Misses ------------------------------------------------------------------------------
@@ -607,7 +462,7 @@ const resolverCandidates = (files) => {
 // The candidates of 200 files, one of them a call by a uniform stream; a
 // hot set of them; misses below a file.
 const misses = (b, ctx) => {
-  const { nk, replica, todayReplica } = ctx;
+  const { nk, replica } = ctx;
   const files = ctx.keys.slice(0, ctx.n);
   const candidates = fresh(
     resolverCandidates(shuffled(files, 5).slice(0, 200)),
@@ -621,10 +476,7 @@ const misses = (b, ctx) => {
   const overCandidates = streamOf(candidates.length, 'uniform', 3);
   const overBelow = streamOf(below.length, 'uniform', 4);
   const id = `tree.miss.${nk}`;
-  const sides = [
-    [id, replica],
-    [`${id}.today`, todayReplica],
-  ];
+  const sides = [[id, replica]];
   for (const [at, r] of sides) {
     b.ops(`${at}.resolver`, (i) =>
       r.get(candidates[overCandidates[i & MASK]].slice(1)),
@@ -665,7 +517,6 @@ const moveRounds = (b, ctx, sides, from) => {
     ...others,
   ]);
   const results = sides.map(() => ({ apply: [], deferred: [] }));
-  const today = { apply: [], deferred: [] };
   for (let r = 0; r <= b.repeats; r++) {
     const warm = sides.map(([, replica]) => warmPass(replica, before));
     const { times } = publish(ctx, [['move', from, to]], true);
@@ -676,18 +527,8 @@ const moveRounds = (b, ctx, sides, from) => {
       results[i].deferred.push(deferred);
     });
     publish(ctx, [['move', to, from]]);
-    const todayWarm = warmPass(ctx.todayReplica, before);
-    global.gc();
-    const t0 = hr();
-    ctx.todayReplica.move(from, to);
-    const apply = msSince(t0);
-    const deferred = pass(ctx.todayReplica, after) - todayWarm;
-    ctx.todayReplica.move(to, from);
-    if (r === 0) continue;
-    today.apply.push(apply);
-    today.deferred.push(deferred);
   }
-  return { results, today };
+  return results;
 };
 
 const moves = (b, ctx) => {
@@ -698,14 +539,11 @@ const moves = (b, ctx) => {
     if (ctx.keys.filter((key) => key.startsWith(prefix)).length < count) {
       continue;
     }
-    const { results, today } = moveRounds(b, ctx, sides, from);
+    const results = moveRounds(b, ctx, sides, from);
     sides.forEach(([id], i) => {
       b.rounds(`${id}.${size}.apply`, 'ms', 'lower', results[i].apply);
       b.rounds(`${id}.${size}.deferred`, 'ms', 'lower', results[i].deferred);
     });
-    b.rounds(`tree.move.${nk}.today.${size}.apply`, 'ms', 'lower', today.apply);
-    const deferred = today.deferred;
-    b.rounds(`tree.move.${nk}.today.${size}.deferred`, 'ms', 'lower', deferred);
   }
 };
 
@@ -783,7 +621,6 @@ const replacements = (b, ctx) => {
 const attach = (b, ctx) => {
   const { nk, files } = ctx;
   const parts = { snapshot: [], clone: [], fromSnapshot: [], total: [] };
-  const today = { snapshot: [], clone: [], project: [], total: [] };
   for (let r = 0; r <= b.repeats; r++) {
     global.gc();
     const t0 = hr();
@@ -793,14 +630,6 @@ const attach = (b, ctx) => {
     const t2 = hr();
     use(engine.fromSnapshot(clone, ctx.segments));
     const t3 = hr();
-    global.gc();
-    const u0 = hr();
-    const todaySnapshot = ctx.today.snapshot();
-    const u1 = hr();
-    const todayClone = structuredClone(todaySnapshot);
-    const u2 = hr();
-    use(TodayReplica.fromSnapshot(todayClone, ctx.segments));
-    const u3 = hr();
     use(null);
     if (r === 0) continue;
     const ms = (a, z) => Number(z - a) / 1e6;
@@ -808,26 +637,12 @@ const attach = (b, ctx) => {
     parts.clone.push(ms(t1, t2));
     parts.fromSnapshot.push(ms(t2, t3));
     parts.total.push(ms(t0, t3));
-    today.snapshot.push(ms(u0, u1));
-    today.clone.push(ms(u1, u2));
-    today.project.push(ms(u2, u3));
-    today.total.push(ms(u0, u3));
   }
   for (const [name, rounds] of Object.entries(parts)) {
     b.rounds(`tree.attach.${nk}.${name}`, 'ms', 'lower', rounds);
   }
-  for (const [name, rounds] of Object.entries(today)) {
-    b.rounds(`tree.attach.${nk}.today.${name}`, 'ms', 'lower', rounds);
-  }
   const bytes = v8.serialize(ctx.tree.snapshot()).length;
   b.value(`tree.attach.${nk}.bytes`, 'B/file', 'lower', bytes / files);
-  const todayBytes = v8.serialize(ctx.today.snapshot()).length;
-  b.value(
-    `tree.attach.${nk}.today.bytes`,
-    'B/file',
-    'lower',
-    todayBytes / files,
-  );
 };
 
 // --- Deltas --------------------------------------------------------------------------------
@@ -838,95 +653,38 @@ const timed = (fn) => {
   return msSince(t0);
 };
 
-// Today's updates of a delta round: #flush's entries, removals and retired
-// keys, the retireIds from today's own books.
-const todayReplace = (keys, inputs, version, books) => {
-  const update = { entries: [], removals: [], retired: [] };
-  for (let i = 0; i < keys.length; i++) {
-    update.entries.push(...entriesOf(keys[i], inputs[i], version));
-    for (const [kind] of inputs[i].representations) {
-      update.retired.push([keyOfKind(keys[i], kind), books.next++]);
-    }
-  }
-  return update;
-};
-
-const todayAdd = (ops, version) => {
-  const update = { entries: [], removals: [], retired: [] };
-  for (const [, key, input] of ops) {
-    update.entries.push(...entriesOf(key, input, version));
-  }
-  return update;
-};
-
-const todayRemove = (ops, books) => {
-  const update = { entries: [], removals: [], retired: [] };
-  for (const [, key, input] of ops) {
-    for (const [kind] of input.representations) {
-      update.removals.push(keyOfKind(key, kind));
-      update.retired.push([keyOfKind(key, kind), books.next++]);
-    }
-  }
-  return update;
-};
-
 const deltas = (b, ctx) => {
-  const { nk, replica, todayReplica, extents } = ctx;
+  const { nk, replica, extents } = ctx;
   const files = ctx.keys.slice(0, ctx.n);
   const indexOf = new Map(files.map((key, i) => [key, i]));
   const engineSide = { replace: [], add: [], addDeferred: [], remove: [] };
-  const todaySide = { replace: [], add: [], addDeferred: [], remove: [] };
-  const books = { next: 1e9 }; // today's retireIds, apart from the engine's
   const perFile = (ms) => (1000 * ms) / CHANGES;
   for (let r = 0; r <= b.repeats; r++) {
     const chosen = shuffled(files, 1000 + r).slice(0, CHANGES);
     const inputs = chosen.map((key) => inputOf(extents, indexOf.get(key)));
     const writes = chosen.map((key, i) => ['write', key, inputs[i]]);
     const replaced = publish(ctx, writes, true);
-    const update = todayReplace(chosen, inputs, clock.version, books);
-    global.gc();
-    const replaceMs = timed(() =>
-      todayReplica.apply(structuredClone(update), NO_PINS),
-    );
 
     const dir = `/delta-${r}`;
     const ops = addOps(ctx, dir);
     const added = ops.map((op) => op[1]);
     const add = publish(ctx, ops, true);
-    const addUpdate = todayAdd(ops, clock.version);
-    global.gc();
-    const addMs = timed(() =>
-      todayReplica.apply(structuredClone(addUpdate), NO_PINS),
-    );
     // The first get of each new file: work an apply may leave to the
     // lookups after it.
     const firstGets = fresh(added);
     const addDeferred = timed(() => pass(replica, firstGets));
-    const todayAddDeferred = timed(() => pass(todayReplica, firstGets));
 
     const unlinks = added.map((key) => ['unlink', key]);
     const removed = publish(ctx, unlinks, true);
-    const removeUpdate = todayRemove(ops, books);
-    global.gc();
-    const removeMs = timed(() =>
-      todayReplica.apply(structuredClone(removeUpdate), NO_PINS),
-    );
     publish(ctx, [['rmdir', dir]]);
     if (r === 0) continue;
     engineSide.replace.push(perFile(replaced.times.get(replica)));
     engineSide.add.push(perFile(add.times.get(replica)));
     engineSide.addDeferred.push(perFile(addDeferred));
     engineSide.remove.push(perFile(removed.times.get(replica)));
-    todaySide.replace.push(perFile(replaceMs));
-    todaySide.add.push(perFile(addMs));
-    todaySide.addDeferred.push(perFile(todayAddDeferred));
-    todaySide.remove.push(perFile(removeMs));
   }
   for (const [name, rounds] of Object.entries(engineSide)) {
     b.rounds(`tree.delta.${nk}.${name}`, 'us/file', 'lower', rounds);
-  }
-  for (const [name, rounds] of Object.entries(todaySide)) {
-    b.rounds(`tree.delta.${nk}.today.${name}`, 'us/file', 'lower', rounds);
   }
 };
 
@@ -1166,8 +924,6 @@ const numbers = async (b, ctx) => {
 
 const inProcess = async (b, ctx, first) => {
   ctx.replica = replicaOf(ctx);
-  const todayClone = structuredClone(ctx.today.snapshot());
-  ctx.todayReplica = TodayReplica.fromSnapshot(todayClone, ctx.segments);
   attach(b, ctx);
   lookups(b, ctx);
   listing(b, ctx);
@@ -1206,8 +962,8 @@ module.exports = async (b, options = {}) => {
   }
 };
 
-// For the worker (bench/workers/tree-replica.js): the same data, today's
-// index and measuring.
+// For the worker (bench/workers/tree-replica.js): the same data and
+// measuring.
 module.exports.helpers = {
   engine,
   data,
@@ -1220,7 +976,6 @@ module.exports.helpers = {
   segmentsFor,
   commitAll,
   buildTree,
-  TodayReplica,
   flat,
   fresh,
   shuffled,

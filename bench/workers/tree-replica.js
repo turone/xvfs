@@ -12,7 +12,7 @@ const { helpers } = require('../scenarios/tree.js');
 // isolate, by `workerData.mode`. What it needs waits on `workerData.port`
 // and is taken synchronously, as attach() takes a snapshot — no message
 // event is left to keep it; the figures go back in one message.
-//   memory   a replica (the engine's or today's) from the snapshot: heap
+//   memory   a replica from the snapshot: heap
 //            with the snapshot in scope and dropped; boxed numbers
 //   views    the same replica: heap and a full GC as its views are read;
 //            the first and a repeated access to `data`; an apply
@@ -34,7 +34,6 @@ const {
   segmentsFor,
   commitAll,
   buildTree,
-  TodayReplica,
   fresh,
   shuffled,
   heap,
@@ -150,14 +149,11 @@ const grown = (before, after, type) => {
 // The replica of the snapshot waiting on the port, and the heap while the
 // snapshot is still in scope. In a function of its own, so that nothing
 // of the message outlives it.
-const build = (side) => {
+const build = () => {
   const message = take();
   const { snapshot, segments } = message;
   const t0 = hr();
-  const replica =
-    side === 'today'
-      ? TodayReplica.fromSnapshot(snapshot, segments)
-      : engine.fromSnapshot(snapshot, segments);
+  const replica = engine.fromSnapshot(snapshot, segments);
   const ms = msSince(t0);
   const withSnapshot = heap();
   use(message);
@@ -168,10 +164,10 @@ const build = (side) => {
 // --- memory --------------------------------------------------------------------------
 
 const memory = async () => {
-  const { side, boxed } = workerData;
+  const { boxed } = workerData;
   const before = boxed ? await countTypes() : null;
   const base = heap();
-  const built = build(side);
+  const built = build();
   await turn();
   const after = heap();
   const types = boxed ? await countTypes() : null;
@@ -225,7 +221,7 @@ const access = (reps, from, to) => {
 
 const views = async () => {
   const base = heap(true);
-  const built = build('engine');
+  const built = build();
   await turn();
   const { replica } = built;
   const reps = representationsOf(replica);
