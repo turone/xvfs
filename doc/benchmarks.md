@@ -679,79 +679,99 @@ Every indexed place became a tree of nodes in every thread
 ([architecture → Node trees](architecture.md#node-trees)); the flat index
 it replaced is gone from the library, so the two are compared as two
 revisions: `main` at `ffb3e26`, the last with the flat index, against the
-trees at `359086a`, `node bench/ab.js main tree/b --pairs 3` on the
-machine above, Node 24.20, quiet. The rest of this page was measured
-before the trees and stands as it was; where a figure below differs from
-one above, this section is the later.
+trees at `7f199bf`, `node bench/ab.js main 7f199bf --pairs 4` over every
+scenario, on the machine above, Node 24.20, quiet. Every figure of the
+tables below comes from that one run but where its note names a probe of
+its own. Of its 618 figures 5 are better beyond the threshold
+(`bench/ab.js`), 63 worse, 144 move the same way in every pair without
+passing it, 4 disagree between pairs, and the others stay. The rest of
+this page was measured before the trees and stands as it was; where a
+figure there differs from one here, this section is the later.
 
 ### Reads, ns/op
 
-| figure                           |   flat |   tree |
-| -------------------------------- | -----: | -----: |
-| `read.sab.1k.view`               |     91 |    179 |
-| `read.map.1k.view`               |     46 |     87 |
-| `views.acquire` (N held)         |     90 |    264 |
-| `views.withFileView.sync`        |    169 |    250 |
-| `read.sab.stat`                  |     57 |     74 |
-| `read.sab.version`               |     22 |     35 |
-| `read.sab.exists`                |     23 |     33 |
-| `read.sab.1k.readFile`           |    337 |    395 |
-| `router.open.read.file`          |    201 |    245 |
-| `router.open.read.dir`           |    234 |    292 |
-| `router.open.read.miss`          |    262 |    335 |
-| `read.sab.readdir100`            | 47 700 | 39 580 |
-| `patch.strict.vfs.readdirSync` ¹ | 12 648 |  4 715 |
+| figure                         |   flat |   tree |
+| ------------------------------ | -----: | -----: |
+| `read.sab.1k.view`             |     89 |    126 |
+| `read.map.1k.view`             |     42 |     63 |
+| `views.acquireRelease`         |    101 |    144 |
+| `views.acquire` (N held) ¹     |    108 |    320 |
+| `views.withFileView.sync`      |    170 |    221 |
+| `read.sab.stat`                |     52 |     81 |
+| `read.sab.version`             |     18 |     37 |
+| `read.sab.exists`              |     18 |     36 |
+| `read.sab.1k.readFile`         |    345 |    371 |
+| `patch.strict.vfs.statSync`    |    421 |    510 |
+| `router.open.read.file`        |    211 |    241 |
+| `router.open.read.dir`         |    234 |    230 |
+| `router.open.read.miss`        |    265 |    272 |
+| `read.sab.readdir100`          | 49 300 | 41 340 |
+| `patch.vfs.readdirSync`        | 50 600 | 41 890 |
+| `patch.strict.vfs.readdirSync` | 13 130 |  4 756 |
 
-¹ From the first run of the same comparison, at `d3973c1`; nothing on
-its path changed after.
+¹ Five rounds of 20 000 leases held at once, each after a full collection,
+right after the scenario starts: the longer code of a lookup takes about
+ten such rounds to settle. Round by round, the flat index settles at about
+50 ns and the trees at about 75 — the cost of the walk below.
 
 A lookup walks the names of its key, a `Map` of children a level, with
 no cache of paths (architecture, "A lookup walks"): a key of one name
 costs 27 ns where a hit of the flat `Map` with the key's hash cached
-cost 6, which `stat`, `version`, `exists` and the routing pay once per
-call. A view is made on each access of `data` (19 ns) and kept by no
-representation, so a lease or a stream holds one of its own — `views.acquire`
-keeps N of them alive at once. Listings read a directory's children and
-are faster: 17 % for a hundred files of a place, 63 % through the patched
-`readdirSync` under strict.
+cost 6, which `stat`, `version`, `exists` and a lease pay once per
+call. A representation keeps the view of its first read, so every lease
+and stream of it shares one (architecture, "Node trees"). The router
+walks once — to a file, a directory, or where the path broke off,
+`ENOTDIR` past a file — so a directory and a miss cost what they did.
+Listings read a directory's children and are faster: 16 % for a hundred
+files of a place, 64 % through the patched `readdirSync` under strict.
 
-### Writes, µs p50
+### Writes and updates, µs p50
 
-| figure                      | flat | tree |
-| --------------------------- | ---: | ---: |
-| `publish.map.raw`           |  1.9 |  2.8 |
-| `publish.sab.raw`           |  6.1 |  6.4 |
-| `batch.series.1`            |  4.3 |  4.9 |
-| `batch.writeFiles.1`        |  5.5 |  8.7 |
-| `events.publish.1`          |  4.5 |  5.4 |
-| `ack.inthread.1` (one link) | 15.4 | 25.3 |
-| `ack.worker.1`              | 16.8 | 26.3 |
-| `batch.series.linked.1`     |  5.1 |  8.6 |
-| `batch.series.linked.512`   | 2775 | 5574 |
-| `retain.worker.1.held`      | 34.5 | 42.1 |
+| figure                        | flat | tree |
+| ----------------------------- | ---: | ---: |
+| `publish.map.raw` ²           |  1.9 |  2.8 |
+| `publish.sab.raw`             |  6.1 |  6.3 |
+| `batch.series.1`              |  4.3 |  4.7 |
+| `batch.writeFiles.1` ³        |  5.6 |  8.8 |
+| `events.publish.1`            |  4.6 |  5.3 |
+| `ack.inthread.1` (one link)   | 16.0 | 20.5 |
+| `ack.worker.1`                | 17.0 | 22.9 |
+| `retain.worker.1.held`        | 34.8 | 40.2 |
+| `batch.series.linked.1`       |  5.1 |  7.0 |
+| `batch.series.linked.512`     | 2935 | 4036 |
+| `batch.writeFiles.linked.512` | 1029 | 1018 |
+| `watch.epoch.100`             | 2340 | 2508 |
+| `pool.sab.1.update`           |  201 |  237 |
+| `compact.on` ³                |  190 |  248 |
+| `compact.off` ³               | 11.1 | 17.0 |
+
+² p99 6.4 against 22.4 µs over 400 calls; in a steady loop of the same
+1 KiB writes over 64 keys p99 is 4.2 against 4.7 µs, p50 1.2 against 1.6.
+³ Cold: 200 single calls after 20 of warm-up for `batch`, a new kernel
+for each of 20 calls for `compact`. In a steady loop a one-file
+`writeFiles` costs 3.0 against 4.3 µs, a `writeFile` 3.5 against 4.2.
 
 A commit plans its ops against the tree, logs them and applies the log as
-a delta, the main tree as every replica does: about 1.2 µs a commit,
-which a `map` place pays alone. With a link the delta travels: its
-numeric columns are typed arrays (architecture, "Snapshots and deltas"),
-14 of them for a one-file write, and its structured clone takes 5.3 µs
-where the flat index's entries took 2.0 — on each side of the port. The
-single calls of `batch` (200 samples after 20 rounds of warm-up) run
-colder than a loop: in a steady loop a one-file `writeFiles` costs
-1.3 µs more than before and a `writeFile` 0.6.
-
-Found and fixed during this comparison: every update carried the SAB of
-each segment it touched (1.7 µs of a clone on each side — the flat index
-did the same; now a segment travels once), a `map` place copied bytes it
-owned a second time, and a write built its path for a refusal it never
-made (0.6 µs — the flat index too).
+a delta — the main tree as every replica does — whether a link is there
+to send it to or not (architecture, "Snapshots and deltas"): 0.5–0.7 µs a
+write in a steady loop, which a `map` place pays alone, about 0.4 of it
+making the delta's columns — one `ArrayBuffer`, a view of it a column.
+With a link the delta travels in one structured clone on each side of the
+port: an update to a linked worker costs about 5 µs more than the flat
+index's entries did, a series of linked writes 2 µs more a write, while
+512 files in one `writeFiles` — one delta — cost what they did.
+`compact.on` is the unlink of a 700 KiB file that relocates 256 files of
+1 KiB in one commit; `compact.off`, the same unlink without compaction.
+The watcher's epoch of 100 files costs about what it did: the disk is
+asked how it spells a name only where fs.watch reported a rename
+(architecture, "Publication").
 
 ### Compaction
 
 Not a scenario of `bench/`: `n` files of 1000 B in 1 MiB segments, the
 files of the first segment unlinked one by one; the unlink whose free
 takes a segment below the threshold compacts. The cost of that free
-cycle, ms:
+cycle, ms, measured at `359086a`:
 
 |                 | 10⁵ files | 10⁶ files |
 | --------------- | --------: | --------: |
@@ -770,18 +790,34 @@ representation: 1–2 ms in that nearly full pool of 10⁶ files.
 
 ### Memory
 
-| figure, per file                                       | flat | tree |
+| figure, MiB (the A/B run) |  flat |  tree |
+| ------------------------- | ----: | ----: |
+| `memory.start.heap`       |  6.39 |  6.77 |
+| `memory.published.heap`   |  6.92 |  7.29 |
+| `pool.sab.4.workers.heap` | 30.63 | 32.38 |
+| `mem.ack.worker.rss`      | 140.9 | 148.5 |
+| `mem.retain.main.rss`     |  76.1 |  89.1 |
+| `mem.retain.worker.rss`   | 164.8 | 166.2 |
+| `mem.publish.rss`         |  98.6 | 104.8 |
+| `mem.compact.rss`         |  85.9 |  83.5 |
+| `mem.views.rss`           | 304.7 | 192.2 |
+| `mem.read.rss`            | 201.5 | 255.6 |
+
+| figure, per file (probes)                              | flat | tree |
 | ------------------------------------------------------ | ---: | ---: |
 | main thread, heap (10⁵ files of 100 B, books incl.)    |  535 |  407 |
 | a worker's replica (10⁵ files, `bench … --only tree`)  |    — |  408 |
 | a replica with `stat.birthtime` and `stat.directories` |    — |  438 |
 | a snapshot on the port                                 |    — |   68 |
 
-The books take 37 B a file on the main thread. A worker attaches 10⁵
-files in 44 ms: 19 to take the snapshot, 7 to clone it, 19 to build the
-replica. `memory.start.heap` grows by 0.35 MiB, mostly the engine's code. RSS
-after a scenario moves with the collector's timing — the `read`
-scenario's figure ranges by a third between runs of the same code;
-`mem.publish.rss` is 7 MiB higher in every pair — while a run of 200 000
-writes under a link keeps the heap after a collection flat: nothing grows
-with writes.
+The engine's code takes 0.4 MiB of every thread's heap
+(`memory.start.heap`, each worker of `pool` too). Per file the trees
+hold less than the flat index did; the books take 37 B a file on the
+main thread. A worker attaches 10⁵ files in 44 ms:
+19 to take the snapshot, 7 to clone it, 19 to build the replica. RSS after
+a scenario moves with the collector's timing: `mem.read.rss` and
+`mem.views.rss` range by a third between runs of the same code, and of
+the rows above only `mem.retain.main.rss` passes the threshold in every
+pair (+17 %), `mem.ack.worker.rss` and `mem.publish.rss` grow 5–6 % in
+every pair without passing it; a run of 200 000 writes under a link
+keeps the heap after a collection flat — nothing grows with writes.

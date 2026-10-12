@@ -248,11 +248,19 @@ names that are no V8 strings (listing 1000 names: 69–72 µs against 17 in
 JavaScript); it pays only at 10⁵ files and more, many workers and frequent
 spawns. A dropped SAB lives until every holder has collected it, one in
 `workerData` for the worker's whole life, so none is made per snapshot,
-version or update. Measured against the flat index before it went, the
-trees list 13–35 times faster, a worker attaches 3.6–5.4 times faster, a
-snapshot clones 17–37 times faster, a delta costs 2.4–4 times less, and a
-thread's memory stays about the same; `bench/scenarios/tree.js` measures
-the engine now.
+version or update. On the stand of the engine, against the flat index
+before it went (`bench/scenarios/tree.js`, 10⁴ and 10⁵ files), the trees
+list 13–35 times faster, a worker attaches 3.6–5.4 times faster, a
+snapshot clones 17–37 times faster and a delta of many files costs
+2.4–4 times less. In the library
+([benchmarks](benchmarks.md#node-trees-against-the-flat-index)) a listing
+is 16–64 % faster and a rename copies nothing, while a lookup walks its
+names — 20–30 ns over the flat index's hit — and a commit plans, logs and
+applies its delta even with no link to send it to: 0.5–0.7 µs a write
+in a steady loop, 1.3 a one-file `writeFiles`, about 5 µs an update to a
+linked worker. A thread holds 407 B a file in its heap where the flat
+index held 535; the RSS of most scenarios stays within a few per cent,
+the main thread's under leases (`retain`) grows 17 %.
 
 **A node is opaque: the engine answers through operations — `get`,
 `childOf`, `children`, `walk`, `countOf`, `pathOf`, `byId`, `nodeId`,
