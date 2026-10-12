@@ -196,6 +196,57 @@ describe('nodes: attributes', () => {
   });
 });
 
+describe('nodes: the buffers of a map place', () => {
+  const MAP = {
+    provider: 'map',
+    origin: 'virtual',
+    fs: { writable: true, script: { compile: ['js'] } },
+  };
+
+  it('a set refused before its commit leaves no buffer behind', async () => {
+    const root = tmpDir('vfs-nodes');
+    const k = await kernel(root, { m: MAP });
+    try {
+      const m = k.fs('m');
+      const { store } = k.registry.get('m');
+      m.writeFile('/keep.js', 'module.exports = 1;');
+      const held = store.segments.size;
+      for (let i = 0; i < 20; i++) {
+        assert.throws(
+          () =>
+            m.writeFiles([
+              ['/ok.js', 'module.exports = 2;'],
+              ['/bad.js', 'this is ( not a script'],
+            ]),
+          { code: 'ENOTSUP' },
+        );
+      }
+      assert.equal(store.segments.size, held, 'nothing of the refused sets');
+      assert.deepEqual(m.readdir('/'), ['keep.js']);
+    } finally {
+      k.close();
+      rm(root);
+    }
+  });
+
+  it("a small file keeps a buffer of its own, not a slab of Node's pool", async () => {
+    const root = tmpDir('vfs-nodes');
+    const k = await kernel(root, { m: MAP });
+    try {
+      const m = k.fs('m');
+      const { store, tree } = k.registry.get('m');
+      for (let i = 0; i < 50; i++) m.writeFile(`/f${i}.txt`, 'x'.repeat(100));
+      for (let i = 0; i < 50; i++) {
+        const { source } = tree.payloadOf(tree.get(`/f${i}.txt`));
+        assert.equal(store.segments.get(source.segmentId).byteLength, 100);
+      }
+    } finally {
+      k.close();
+      rm(root);
+    }
+  });
+});
+
 describe('nodes: segments', () => {
   // A segment is the pool's for good, the same SAB: a snapshot carries
   // every one, an update the one it first publishes into — once.

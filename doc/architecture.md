@@ -219,9 +219,13 @@ without room is a disk without room to the caller: a refusal with a
 the thread's own (`MapStore.segments`, by id), which its tree reads as the
 shared places' trees read the pool: one model of content for every
 place.** _Why:_ one tree, one `PlaceFs` and one pipeline for every indexed
-place, and no second index to keep in step. A buffer the store owns whole
-is taken as it is, else the bytes are copied once; one a commit retires
-leaves the map, and lives while a view of it does.
+place, and no second index to keep in step. The copy a mutation takes of
+its bytes is a buffer of its own (`MapStore.own`), kept as it is; a result
+that fills less than half of its buffer — a slice of a slab of Node's pool
+— is copied into one of its own: 20 000 files of 100 B kept 73.6 MiB of
+slabs, 2.1 MiB of their own. Buffers a set placed before a refusal leave
+the map with it; one a commit retires leaves it too, and lives while a
+view of it does.
 
 ## Node trees
 
