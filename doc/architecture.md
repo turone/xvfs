@@ -223,15 +223,20 @@ too: a rule could refuse a read while the listing showed what it hides.
 trie of the rules' paths (`PlaceRules`, lib/rules.js): each node holds the
 place's settings overridden by every rule on the way down to it, and a
 lookup walks the names of a key while the trie has them. Names compare as
-the place compares keys: exactly in a virtual place, without case in a
-disk-origin one on Windows (`foldName`). Two paths of rules equal but for
-case are refused on every platform, as place names are.** _Why:_ a place
-without rules pays nothing — its settings at any key are its config — and
-one with rules a walk of the few names its rules share with a key, most
-often one lookup. On Windows the disk opens `/PRIVATE/x` as `/private/x`:
-a rule compared exactly would let the other spelling through. Kept in the
-nodes of the place's tree, a rule would need a node at a path where none
-lies, and would leave with a directory removed or moved.
+the place compares keys: exactly in a virtual place, without case — and
+in one normalization form — in a disk-origin one on Windows and macOS
+(`foldName`, `CASELESS`). Two paths of rules equal but so are refused on
+every platform, as place names are. In a place with rules the disk
+territory of the facade takes no key with a name in 8.3 form anywhere in
+it, as strict routing takes no path.** _Why:_ a place without rules pays
+nothing — its settings at any key are its config — and one with rules a
+walk of the few names its rules share with a key, most often one lookup.
+The disk opens `/PRIVATE/x` as `/private/x`, a decomposed `é` as a
+composed one on macOS, and `/CONFID~1/x` as `/confidential/x` on Windows:
+a rule compared exactly would let each other spelling through, where
+before rules every spelling led to one file under one policy. Kept in
+the nodes of the place's tree, a rule would need a node at a path where
+none lies, and would leave with a directory removed or moved.
 
 **Every decision that read the place's settings reads the key's: the
 routing — a domain off is the place without it (EACCES under strict, else

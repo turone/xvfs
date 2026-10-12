@@ -665,9 +665,12 @@ places: {
   moved takes no rule with it. A recursive `mkdir` makes no directory
   where its rules refuse one.
 - Paths compare as the place's keys do: exactly in a virtual place,
-  without case in a disk-origin place on Windows; two rules that differ
-  only in case are a config error everywhere. Places with a tree only
-  (`sab`, `map`, `sea`).
+  without case — and in one normalization form — in a disk-origin place
+  on Windows and macOS; two rules that differ only so are a config error
+  everywhere. A spelling the disk reads as another name — an 8.3 name, a
+  stream — is no way past a rule: strict refuses it, and the facade's
+  disk territory serves none. Places with a tree only (`sab`, `map`,
+  `sea`).
 
 ## Trees of client ids
 
@@ -1113,7 +1116,9 @@ places: {
   never stands in for canonical (prepared) content — nor under another
   name: on Windows the `PlaceFs` facade takes no key with a `:` and no
   file name in short-name form for a disk file, in either mode
-  (`/a.txt::$DATA` is `a.txt`, `/INDEX~1.HTM` may be `index.html`). `readdir` merges
+  (`/a.txt::$DATA` is `a.txt`, `/INDEX~1.HTM` may be `index.html`) —
+  and in a place with rules no name in short-name form anywhere in the
+  key (`/CONFID~1/x` may lie in a directory a rule hides by its name). `readdir` merges
   published entries with disk directories and files of the other
   extensions (no duplicates) — also in a directory that
   exists only on disk, and in either mode: a file of a cached extension is

@@ -157,9 +157,24 @@ describe('PathTrie, foldName', () => {
     assert.equal(PathTrie.child(trie.find(['a', 'b']), 'x'), null);
   });
 
-  it('folds case, and a final sigma as a sigma', () => {
+  it('folds case, a final sigma as a sigma, and one normalization form', () => {
     assert.equal(foldName('ΛΟΓΟΣ'), foldName('λογοσ'));
     assert.equal(foldName('λογος'), 'λογοσ');
     assert.equal(foldName('CAFÉ'), 'café');
+    assert.equal(foldName('café'), foldName('café'));
+  });
+
+  it("a place whose disk takes names in any case folds its rules' names", () => {
+    const { Place } = require('../lib/place.js');
+    const config = { ...placeOf({ '/Private': { fs: false } }) };
+    config.name = 'site';
+    config.origin = 'disk';
+    const caseless = new Place(config, '/app', true);
+    assert.equal(caseless.settingsAt('/PRIVATE/x.html').fs, null);
+    assert.equal(caseless.settingsAt('/private/x.html').fs, null);
+    const exact = new Place(config, '/app', false);
+    assert.equal(exact.settingsAt('/PRIVATE/x.html').fs, FS);
+    const virtual = new Place({ ...config, origin: 'virtual' }, '/app', true);
+    assert.equal(virtual.settingsAt('/PRIVATE/x.html').fs, FS, 'exact keys');
   });
 });

@@ -4,6 +4,7 @@ const { describe, it } = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
+const { spawnSync } = require('node:child_process');
 const { VfsConfig } = require('../lib/config.js');
 const fsPatch = require('../lib/adapters/fs-patch.js');
 const {
@@ -388,6 +389,75 @@ describe('rules: a virtual place', () => {
       await assertAtRest(k, { workers: [w.kernel] });
     } finally {
       w.kernel.close();
+      k.close();
+      rm(root);
+    }
+  });
+});
+
+// The 8.3 spelling Windows gives an existing path, or null without one
+// (path-identity.test.js).
+const shortPath = (p) => {
+  const { stdout } = spawnSync(
+    'cmd',
+    ['/d', '/c', `for %I in ("${p}") do @echo %~sI`],
+    { windowsVerbatimArguments: true, encoding: 'utf8' },
+  );
+  const short = stdout.trim();
+  return short && short.toLowerCase() !== p.toLowerCase() ? short : null;
+};
+
+describe('rules: other spellings of a hidden path', () => {
+  const files = {
+    'site/a.html': 'a',
+    'site/confidential/secret.md': 'secret',
+    'site/open/notes.md': 'notes',
+  };
+  const place = {
+    fs: { ext: ['html'], fallback: 'disk' },
+    rules: { '/confidential': { fs: false } },
+  };
+
+  it(
+    'the disk territory takes no 8.3 name anywhere in a key, in either mode',
+    { skip: process.platform !== 'win32' },
+    async (t) => {
+      for (const strict of [false, true]) {
+        const root = writeTree(tmpDir('vfs-rules-83'), files);
+        const k = await kernel(root, { site: place }, { strict });
+        try {
+          const short = shortPath(path.join(root, 'site', 'confidential'));
+          if (short === null) {
+            return void t.skip('the volume makes no 8.3 names');
+          }
+          const brief = path.basename(short);
+          const site = k.fs('site');
+          assert.equal(site.readFile('/open/notes.md', 'utf8'), 'notes');
+          assert.equal(site.readFile(`/${brief}/secret.md`), null);
+          assert.equal(site.exists(`/${brief}`), false);
+          assert.equal(site.stat(`/${brief}/secret.md`), null);
+          assert.throws(() => site.readdir(`/${brief}`), { code: 'ENOENT' });
+          assert.ok(
+            !site
+              .readdir('/', { recursive: true })
+              .includes('confidential/secret.md'),
+          );
+        } finally {
+          k.close();
+          rm(root);
+        }
+      }
+    },
+  );
+
+  it('another case of a hidden path is hidden where the disk takes it for one', async () => {
+    const root = writeTree(tmpDir('vfs-rules-case'), files);
+    const k = await kernel(root, { site: place });
+    try {
+      const site = k.fs('site');
+      assert.equal(site.readFile('/CONFIDENTIAL/secret.md'), null);
+      assert.equal(site.exists('/Confidential'), false);
+    } finally {
       k.close();
       rm(root);
     }
