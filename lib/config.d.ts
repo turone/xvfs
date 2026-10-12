@@ -178,10 +178,57 @@ export interface StatConfig {
   directories?: boolean;
 }
 
+/**
+ * How a tree of client ids takes its batches (`lib/intake.js`, README,
+ * "Trees of client ids").
+ */
+export interface IntakeConfig {
+  /**
+   * Who numbers the batches: `'source'` (default) — the source, densely,
+   * in the order it commits them; `'intake'` — the intake, in the order
+   * they arrive, for a single writer over one lossless channel.
+   */
+  seq?: 'source' | 'intake';
+  /** How long batches gather before a publication, ms. Default 10. */
+  window?: number;
+  /** The most ops one publication takes; a run is cut there. Default 10000. */
+  limit?: number;
+  /** How long a gap is waited for before `onGap`, ms. Default 2000. */
+  gapTimeout?: number;
+  /** How long a batch waits for room in the pool, ms. Default 2000. */
+  spaceTimeout?: number;
+}
+
+/**
+ * A tree of client ids: nodes the source names by its own ids, payloads
+ * in the pool, the same in every thread (`kernel.tree(name)`). Its name
+ * takes no name of a place.
+ */
+export interface TreeConfig {
+  /** The source's ids: numbers (safe integers) or strings. */
+  ids: 'number' | 'string';
+  /** The classes that are containers in every thread at first. Default []. */
+  containers?: readonly number[];
+  /** Payloads keep a birthtime. Default false. */
+  birthtime?: boolean;
+  /** The aggregates the tree keeps; both off by default. */
+  aggregates?: { classes?: boolean; subtreeVersion?: boolean };
+  /** The most live nodes. Default 2^24, the most there can be. */
+  maxNodes?: number;
+  /** The largest payload. Default `defaults.memory.maxFileSize`. */
+  maxFileSize?: Size;
+  /** Compressed representations, as a place's (`ext` by a node's name). */
+  compress?: Omit<CompressConfig, 'retainRaw'> | false | null;
+  /** Leases and borrowed stream chunks. Default false. */
+  zeroCopy?: boolean;
+  intake?: IntakeConfig;
+}
+
 /** The raw configuration: hardcoded defaults → `defaults` → per place. */
 export interface VfsRawConfig {
   defaults?: VfsDefaults | null;
   places?: { [name: string]: PlaceConfig };
+  trees?: { [name: string]: TreeConfig };
 }
 
 /** `T` with every property read-only, at every depth. */
@@ -269,6 +316,30 @@ export interface ResolvedPlace {
   readonly stat: { readonly birthtime: boolean; readonly directories: boolean };
 }
 
+export interface ResolvedIntake {
+  readonly seq: 'source' | 'intake';
+  readonly window: number;
+  readonly limit: number;
+  readonly gapTimeout: number;
+  readonly spaceTimeout: number;
+}
+
+export interface ResolvedTree {
+  readonly name: string;
+  readonly ids: 'number' | 'string';
+  readonly containers: readonly number[];
+  readonly birthtime: boolean;
+  readonly aggregates: {
+    readonly classes: boolean;
+    readonly subtreeVersion: boolean;
+  };
+  readonly maxNodes: number;
+  readonly maxFileSize: number;
+  readonly compress: ResolvedCompress | null;
+  readonly zeroCopy: boolean;
+  readonly intake: ResolvedIntake;
+}
+
 /**
  * The resolved, validated configuration: deep-frozen after construction.
  * A wrong option throws an `Error` whose message starts with
@@ -290,10 +361,14 @@ export class VfsConfig {
   get places(): ResolvedPlace[];
   get allPlaces(): ResolvedPlace[];
   place(name: string): ResolvedPlace | null;
+  /** The trees of client ids, in declaration order. */
+  get trees(): ResolvedTree[];
+  tree(name: string): ResolvedTree | null;
   /**
    * `appConfig` with the `--vfs.*` overrides of `argv` (after `--`)
-   * applied: `--vfs.defaults.*`, `--vfs.places.<name>.*`, `--vfs.enable`
-   * and `--vfs.disable`, then validated as a JS or JSON config is.
+   * applied: `--vfs.defaults.*`, `--vfs.places.<name>.*`,
+   * `--vfs.trees.<name>.*`, `--vfs.enable` and `--vfs.disable`, then
+   * validated as a JS or JSON config is.
    * `"true"` / `"false"` are booleans, a decimal a number; a setting that
    * takes a list takes a comma-separated one —
    * `--vfs.places.lib.require.compile=js,cjs`, one item included — which
