@@ -1,11 +1,21 @@
 # xvfs
 
-Extended virtual filesystem for Node.js: places over the application's
-real paths, each with its own storage and content origin; content
-prepared once and published atomically, with a version, to every thread;
-one shared copy for all `worker_threads` where a place asks for it; and
-strict routing of what the application may reach — through `node:fs` and
-`module.registerHooks` adapters or the explicit `PlaceFs` API.
+Extended virtual filesystem for Node.js, and shared page and route trees,
+for every `worker_threads` thread:
+
+- **places** over the application's real paths, each with its own
+  storage and content origin, served through `node:fs` and
+  `module.registerHooks` adapters or the explicit `PlaceFs` API;
+- **page and route trees** — a site's URL structure, stable ids from its
+  database, access policies and the pages' content, available in every
+  worker thread, the content's bytes stored once in shared memory and
+  the tree kept current by ordered changes from the application's source
+  of truth ([Page and route trees](#page-and-route-trees)).
+
+Content is prepared once and published atomically, with a version, to
+every thread; one shared copy serves all `worker_threads` where a place
+or a tree asks for it; and strict routing decides what the application
+may reach.
 
 A place is a directory under `appRoot`. Its **provider** says where the
 bytes live: `sab` — one copy in pooled `SharedArrayBuffer` segments that
@@ -26,13 +36,14 @@ bytecode (`require.compile`) is compiled once and stored in SAB so
 workers skip parse + compile. There is no ESM bytecode cache.
 
 What it is used for: worker pools over one copy of static assets,
-templates, configuration and modules; worker-local workspaces of agents,
-sessions or tenants (`map` + `virtual`); code generated and compiled at
-run time, loaded with `require()` and never written to disk; applications
-packaged as a single executable; and a declared, reviewable map of what
-an application may touch under `appRoot` — which places, which of them
-writable, what a link on their disks may do. Strict routing is a policy
-for code that
+templates, configuration and modules; the pages and routes of a site,
+served by a worker pool from one tree, with no query to the database per
+request; worker-local workspaces of agents, sessions or tenants (`map` +
+`virtual`); code generated and compiled at run time, loaded with
+`require()` and never written to disk; applications packaged as a single
+executable; and a declared, reviewable map of what an application may
+touch under `appRoot` — which places, which of them writable, what a
+link on their disks may do. Strict routing is a policy for code that
 goes through the patched `node:fs` and the module hooks, not an OS
 sandbox or a security boundary ([Strict routing](#strict-routing)).
 [doc/alternatives.md](doc/alternatives.md) walks through the production
@@ -45,18 +56,27 @@ is unsupported.
 ## Contents
 
 [Features](#features) · [Install](#install) · [Quick start](#quick-start) ·
-[Providers](#providers) · [Preparation](#preparation-prepare) ·
-[Compression](#compression) · [Rules of subtrees](#rules-of-subtrees) ·
-[Trees of client ids](#trees-of-client-ids) ·
+[Page and route trees](#page-and-route-trees) · [Providers](#providers) ·
+[Preparation](#preparation-prepare) · [Compression](#compression) ·
+[Rules of subtrees](#rules-of-subtrees) ·
 [Strict routing](#strict-routing) ·
 [Lifetime of shared bytes](#lifetime-of-shared-bytes) · [API](#api) ·
 [Patched `node:fs`](#patched-nodefs) · [Errors](#errors) ·
 [Protocol](#protocol) · [Examples](#examples) ·
 [Architecture](#architecture) · [Support](#support) ·
 [Design decisions](doc/architecture.md) · [Alternatives](doc/alternatives.md) ·
-[Benchmarks](doc/benchmarks.md) · [External sources](doc/external-sources.md)
+[Benchmarks](doc/benchmarks.md) · [Feeding a shared tree](doc/external-sources.md)
 
 ## Features
+
+Pages and routes:
+
+- **Page and route trees** — a site's pages and routes as a tree of URL
+  segments in every worker thread: stable ids from its database, access
+  policies checked on the way down, redirects, breadcrumbs and id → URL;
+  the pages' bytes and their compressed forms stored once in shared
+  memory; kept current by ordered changes from the source of truth,
+  published atomically — [Page and route trees](#page-and-route-trees).
 
 Storage and origins:
 
@@ -83,12 +103,6 @@ Storage and origins:
   `MessagePort` created by `kernel.link()` and attached with
   `attach({ link })`): generated code, fetched data, fixtures, with no
   file on disk.
-- **Trees of client ids** — an application's own tree — the pages of a
-  site, a catalogue — its nodes named by its source's ids, their bytes in
-  the same shared memory, the same in every thread: written only by the
-  batches of the source, in the order of their numbers, from any thread,
-  and read under policies (`allow`) —
-  [Trees of client ids](#trees-of-client-ids).
 
 Publication:
 
@@ -272,6 +286,312 @@ synchronously and returns `undefined`; `await` is still correct for both.
 
 Bytecode is not on `PlaceFs` — it is [adapter API](#adapter-api), except
 for `fs.script` bundles, which are `PlaceFs.script(key)` (below).
+
+## Page and route trees
+
+A site's pages and routes are a tree: each URL segment a node, each node
+a page or a section with a stable id from the site's database, an access
+policy and the page's bytes. xvfs makes that tree available in every
+worker thread — its structure replicated in each thread for fast walks,
+the pages' bytes stored once in shared memory — and keeps it current by
+ordered changes from the application's source of truth: each change is a
+numbered batch, applied in order and published to every thread at once.
+A worker answers a request from memory: no query to the database, no
+copy of a page per worker.
+
+```
+GET /guide/intro   → the page, in br or gzip, with an ETag
+GET /admin/stats   → 403 unless the user is an admin
+GET /docs/intro    → 301 to /guide/intro: /docs has moved
+GET /products/42   → 404 past /products — or '/42' for the application
+```
+
+It is a tree, not a cache: it holds the whole tree, a lookup walks its
+names and never goes to the source — nothing is fetched on a miss and
+nothing evicted. Nor is it a router: the application turns a request
+into a key and a node into a response, as below. The mechanism is
+general — a **shared tree**, declared under `trees.<name>` and read
+through `kernel.tree(name)` (`SharedTree`) in every thread — and holds
+any hierarchy its source names by ids: a menu, a catalogue, the tenants
+of a service. Where the changes come from — a database's log, Redis, the
+application itself — is in
+[doc/external-sources.md](doc/external-sources.md).
+
+### Quick start: from a request to a page
+
+[`examples/url-tree/server.mjs`](examples/url-tree/server.mjs), whole: a
+tree loaded at change 41 of the database, then its change 42, which
+moves a section and leaves a redirect at its old path.
+
+<!-- quickstart: examples/url-tree/server.mjs -->
+
+```js
+import http from 'node:http';
+import { VfsConfig, VfsKernel, Denied, NotFound } from 'xvfs';
+
+const SECTION = 0; // a node's class: the application's own small integer
+const PAGE = 1;
+
+const kernel = new VfsKernel(
+  new VfsConfig({
+    trees: {
+      site: {
+        ids: 'number', // the pages' keys in the database
+        containers: [SECTION], // classes whose nodes hold others
+        compress: { encodings: ['br', 'gzip'] }, // every page, once
+      },
+    },
+  }),
+  // A gap in the changes' numbers: replay them from the log; a refused
+  // change: load the whole state again.
+  { trees: { site: { onGap: console.warn, onError: console.error } } },
+);
+await kernel.initialize();
+const site = kernel.tree('site'); // in a worker: attach().tree('site')
+
+// The database's state at change 41...
+const page = (title) => ({ data: `<h1>${title}</h1>`, meta: { title } });
+await site.load(
+  [
+    { id: 1, parentId: null, name: '', class: SECTION },
+    { id: 2, parentId: 1, name: 'docs', class: SECTION },
+    { id: 3, parentId: 2, name: 'intro', class: PAGE, payload: page('Intro') },
+    {
+      id: 4,
+      parentId: 1,
+      name: 'admin',
+      class: SECTION,
+      policy: { role: 'admin' },
+    },
+    { id: 5, parentId: 4, name: 'stats', class: PAGE, payload: page('Stats') },
+    {
+      id: 6,
+      parentId: 1,
+      name: 'products',
+      class: PAGE,
+      payload: page('Products'),
+    },
+  ],
+  41,
+);
+// ...and its change 42: /docs moves to /guide, and a node of the old name
+// sends what was below it there.
+await site.submit({
+  seq: 42,
+  ops: [
+    ['put', 2, 1, 'guide', {}],
+    ['put', 7, 1, 'docs', { class: SECTION, policy: { redirect: '/guide' } }],
+  ],
+});
+```
+
+A node's policy is the application's own, and so is what `allow` makes
+of it: `true` lets a lookup through, anything else stops it — a `Denied`
+whose `decision` is that answer. A request gets one of four results:
+
+| `match()` gives             | When                                                               | The response                                                                     |
+| --------------------------- | ------------------------------------------------------------------ | -------------------------------------------------------------------------------- |
+| a node                      | the path leads to it, and every policy on the way lets it through  | 200 — the page, compressed where the client takes it — or 304; 404 for a section |
+| `Denied { node, decision }` | a policy on the way refused: the uppermost                         | 403, or 301 when it is a redirect: its target, then the rest of the path         |
+| `NotFound { node, rest }`   | a name is missing: the deepest node on the path, what lies past it | 404, or a dynamic tail the application serves                                    |
+| —                           | the URL makes no key (`keyOf`, below)                              | 400                                                                              |
+
+```js
+// A policy is the application's own: a role, or where a path has moved.
+const allow = (policy, node, user) =>
+  policy.redirect
+    ? { redirect: policy.redirect }
+    : user.roles.includes(policy.role);
+
+const server = http.createServer((req, res) => {
+  const key = keyOf(req.url); // the path as a key of the tree, below
+  if (key === null) return res.writeHead(400).end();
+  const user = { roles: req.headers['x-role'] ? [req.headers['x-role']] : [] };
+  const found = site.match(key, { allow, context: user });
+  if (found instanceof Denied) {
+    // the uppermost policy that refused: its node, and what allow answered
+    const to = found.decision?.redirect;
+    if (!to) return res.writeHead(403).end();
+    const rest = key.slice(site.pathOf(found.node).length);
+    return res.writeHead(301, { location: to + rest }).end();
+  }
+  if (found instanceof NotFound) {
+    // the deepest node on the path, and what lies past it: a 404 here, or a
+    // dynamic tail the application serves — '/42' of '/products/42'
+    const under = site.pathOf(found.node);
+    return res.writeHead(404, { 'x-under': under }).end(found.rest);
+  }
+  const info = site.payloadOf(found);
+  if (info === null) return res.writeHead(404).end(); // a section, no page
+  const etag = `"${kernel.instance}-${info.version}"`;
+  if (req.headers['if-none-match'] === etag) return res.writeHead(304).end();
+  const headers = { etag, 'content-type': 'text/html; charset=utf-8' };
+  // the first of br and gzip the page has and the client takes (q aside)
+  const accepted = req.headers['accept-encoding'] ?? '';
+  const encoding = ['br', 'gzip'].find(
+    (e) => info.encodings.includes(e) && accepted.includes(e),
+  );
+  if (!encoding) return res.writeHead(200, headers).end(site.read(found));
+  headers['content-encoding'] = encoding;
+  return res.writeHead(200, headers).end(site.readCompressed(found, encoding));
+});
+server.listen(Number(process.env.PORT ?? 3000), '127.0.0.1', () => {
+  console.log(`listening on http://127.0.0.1:${server.address().port}`);
+});
+```
+
+### From a request to a key
+
+`match()` takes a key of the tree — names joined by `/`; `''` or `'/'`
+is the root — never a raw request URL. It compares names exactly: a
+query, a percent-encoded name, a doubled or a trailing slash would miss,
+and a name in another case is another name. The application makes the
+key, by its own rules:
+
+```js
+// The path of a request as a key of the tree: no query or hash, '.' and
+// '..' resolved, each name decoded; a doubled or a trailing slash
+// collapses ('/guide/intro/' is '/guide/intro'); null — a 400 — when a
+// name holds a '/' (%2F) or does not decode.
+function keyOf(url) {
+  const { pathname } = new URL(url, 'http://localhost');
+  try {
+    const names = pathname.split('/').filter(Boolean).map(decodeURIComponent);
+    if (names.some((name) => name.includes('/'))) return null;
+    return '/' + names.join('/');
+  } catch {
+    return null;
+  }
+}
+```
+
+<!-- /quickstart -->
+
+A site that wants one canonical URL redirects a request whose path
+differs from its key; one that answers `/About` as `/about` stores its
+names lower-cased and lower-cases the key.
+
+### Ids, breadcrumbs and moves
+
+```js
+// A link by id, wherever the page lies now; null once it is removed.
+const node = site.byId(3);
+const href = node && site.pathOf(node); // '/guide/intro'
+
+// Breadcrumbs: the nodes from the root down to the one `match` found.
+const crumbs = site.trailOf(found).map((n) => ({
+  href: site.pathOf(n) || '/',
+  title: site.payloadOf(n)?.meta?.title ?? site.nameOf(n),
+}));
+```
+
+A `put` with another parent or name moves a node — a page, or a section
+with everything below it — and keeps its id, its payload and its
+version: a link by id follows it, and an ETag made of the version stays
+valid. Its old path is free; a node of the application's own there,
+whose policy names the new one, redirects that path and every path
+below it (quick start).
+
+### Reference
+
+| `trees.<name>.*`      | Type     | Default       | Description                                                         |
+| --------------------- | -------- | ------------- | ------------------------------------------------------------------- |
+| `ids`                 | string   | required      | `'number'` (safe integers) or `'string'`: the source's ids          |
+| `containers`          | number[] | `[]`          | Classes whose nodes hold others, at first, in every thread          |
+| `birthtime`           | bool     | `false`       | Payloads keep a birthtime                                           |
+| `aggregates`          | object   | both off      | `{ classes, subtreeVersion }`: counts by class, a subtree's version |
+| `maxNodes`            | number   | 2^24          | Live nodes at most                                                  |
+| `maxFileSize`         | size     | from defaults | A payload's bytes at most (`EFBIG`)                                 |
+| `compress`            | object   | off           | `{ encodings, ext? }`, as a place's but without `retainRaw`         |
+| `zeroCopy`            | bool     | `false`       | Leases and borrowed stream chunks                                   |
+| `intake.seq`          | string   | `'source'`    | Who numbers the batches: `'source'` or `'intake'`                   |
+| `intake.window`       | number   | 10            | How long batches gather, ms                                         |
+| `intake.limit`        | number   | 1000          | Ops of one publication at most; a run goes in parts                 |
+| `intake.gapTimeout`   | number   | 2000          | How long a gap is waited for before `onGap`, ms                     |
+| `intake.spaceTimeout` | number   | 2000          | How long a batch waits for room in the pool, ms                     |
+
+A tree takes no name of a place, in any case. A node's **class** is a
+small integer of the application's own — page, section, redirect…; the
+classes of `containers` hold other nodes.
+
+**Compression** is made once, when a payload is published: of every
+payload of the tree without `ext`; with it, of the payloads of nodes
+whose names end with one of its extensions — which a page's name seldom
+has. A node without a payload — a section — has nothing to compress.
+`payloadOf(node).encodings` names the forms a payload has: a form the
+pool had no room for is left out — the source never is — so a server
+checks it and falls back to `read()`.
+
+**Changes.** A tree changes only by the batches of its source, which
+the **intake** — a queue on the main thread — applies in the order of
+their numbers. Its handlers are kernel options of the main thread, both
+required: `initialize()` refuses a tree without them. What a handler
+throws is its own — an uncaught exception — and never stops the intake.
+
+`submit({ seq, ops })` gives one change of the source, from any thread:
+`seq` its number in the source's log, `ops` the final state of every
+node it touched — `['put', id, parentId, name, { class, payload,
+policy }]`, a node made, changed or moved under `parentId` (null: the
+root), and `['remove', id]`, a node gone with all below it — each id
+once. A `payload` is `{ data, mtimeMs?, meta?, scriptOptions? }`, `data`
+a `Uint8Array` or a string (UTF-8); `null` takes it off, an absent one
+keeps it; `policy` likewise. A batch is taken when submitted: its bytes
+copied, a `policy`, a `meta` and `scriptOptions` cloned — data
+structured clone carries, kept frozen in every thread — so what the
+caller does to its own objects after changes nothing. A wrong form, or a
+value structured clone cannot carry, throws `EINVAL` at once, with the
+`index` and `id` of the op. The promise resolves `{ seq, status }` once
+the batch is published and this thread's tree shows it — `'committed'`,
+`'duplicate'` (a number applied or waiting already: a worker's batch
+and the same change read back from the source's log collapse) or
+`'superseded'` (a load past it) — and rejects with a refusal: the
+commit's (`ENOENT`, `EEXIST`, …), `EFBIG`, `ENOSPC` after
+`spaceTimeout`, each with `seq`, `index` and `id`.
+
+- Batches are applied strictly by number, from `last + 1`: those of a
+  window go in parts of at most `limit` ops, each part one publication
+  — no thread sees a state between two batches of it.
+- A batch past a gap waits; a gap older than `gapTimeout` is told once
+  (`onGap`), until the missing batches come or a load.
+- A refused batch is told to `onError`; the batches before it publish,
+  it and everything after it wait for a load.
+- `load(rows, seq)` replaces the tree's state with the source's at
+  `seq` — rows `{ id, parentId, name, class, payload, policy }` — in one
+  commit; the batches waiting up to `seq` are `'superseded'`, those
+  after it join its publication. A load older than the tree is
+  `ESTALE`. In `'source'` mode nothing applies before the first load —
+  an empty source loads `[]`.
+- `intake.seq: 'intake'` is for a single writer over one channel that
+  loses nothing: the intake numbers the batches as they come, there are
+  no gaps, no repeats and no `ESTALE`, and `load(rows)` takes no number
+  — the batches submitted after it wait for it.
+
+**Reading.** A node is opaque: `get(key)`, `match(key)`, `byId(id)`,
+`root`, then `nodeId`, `nameOf`, `parentOf`, `pathOf`, `trailOf`,
+`classOf`, `policyOf`, `isContainer`, `childOf`, `children`,
+`childNodesOf`, `countOf`, `walk`; with aggregates `classCountOf`,
+`leafCountOf`, `subtreeVersionOf`. `payloadOf(node)` is a frozen `{
+version, size, mtimeMs, birthtimeMs?, meta, scriptOptions, encodings }`;
+the bytes come as a copy (`read`, `readCompressed`), a lease (`view`,
+`viewCompressed`, with `zeroCopy`) or a stream (`createReadStream`,
+`createReadStreamCompressed`), pinned while they read, as `PlaceFs`'s
+are. `last` is the number of the last batch this thread's tree shows;
+`version`, `structureVersion` and `policyVersion` the publications that
+last changed it, its structure, its policies.
+
+**Policies.** A lookup with `{ allow, context }` — `get`, `match` —
+passes each policy on its way, from the root down, to `allow(policy,
+node, context)`: `true` lets it through, anything else is a `Denied` —
+`{ node, decision }`, the uppermost refusal — and `match` gives a
+`NotFound` — `{ node, rest }` — for a miss past them.
+`check(node, { allow, context })` asks the same of a node in hand. A
+lookup without `allow` passes every policy.
+
+**Events.** A publication that changed a tree names it in `'publish'`:
+`trees: [{ tree, seqFrom, seqTo, loaded }]` — the numbers of the batches
+it shows, `loaded` when it began with a load, which replaced the state
+whole. A batch that changes nothing publishes nothing, and still moves
+`last` in every thread.
 
 ## Providers
 
@@ -681,146 +1001,6 @@ places: {
   stream — is no way past a rule: strict refuses it, and the facade's
   disk territory serves none. Places with a tree only (`sab`, `map`,
   `sea`).
-
-## Trees of client ids
-
-Beside its places, a kernel keeps trees whose structure an application's
-source gives — the pages of a site, a catalogue, a menu: nodes named by
-the source's own ids, each with a class, a policy and a payload of
-bytes in the same pool as the places' files, the same in every thread.
-A tree is declared in the config, made empty by `initialize()`, written
-only by the batches of its source and read in every thread through
-`kernel.tree(name)`. What a database, Redis or another source of truth
-provides — batches, numbers, a log, a snapshot — is in
-[doc/external-sources.md](doc/external-sources.md).
-
-```js
-const config = new VfsConfig({
-  places: { static: { fs: { ext: ['css', 'js'] } } },
-  trees: {
-    pages: {
-      ids: 'number', // the source's ids: 'number' | 'string'
-      containers: [0], // classes whose nodes hold others
-      compress: { encodings: ['br', 'gzip'], ext: ['html'] },
-      zeroCopy: true, // view() and borrowed stream chunks
-      intake: { seq: 'source' }, // the source numbers its batches
-    },
-  },
-});
-const kernel = new VfsKernel(config, {
-  trees: {
-    pages: {
-      onGap: ({ from, to }) => replay(from, to), // batches missing
-      onError: (err) => reload(err), // a refused batch or load
-    },
-  },
-});
-await kernel.initialize();
-
-const pages = kernel.tree('pages');
-await pages.load(await readPages(), lastSeq); // the source's state at lastSeq
-await pages.submit({
-  seq: lastSeq + 1,
-  ops: [
-    ['put', 42, 7, 'about', { class: 1, payload: { data: html } }],
-    ['remove', 13],
-  ],
-});
-
-const node = pages.get('/docs/about');
-if (node) res.end(pages.read(node));
-```
-
-| `trees.<name>.*`      | Type     | Default       | Description                                                         |
-| --------------------- | -------- | ------------- | ------------------------------------------------------------------- |
-| `ids`                 | string   | required      | `'number'` (safe integers) or `'string'`                            |
-| `containers`          | number[] | `[]`          | Classes that are containers, at first, in every thread              |
-| `birthtime`           | bool     | `false`       | Payloads keep a birthtime                                           |
-| `aggregates`          | object   | both off      | `{ classes, subtreeVersion }`: counts by class, a subtree's version |
-| `maxNodes`            | number   | 2^24          | Live nodes at most                                                  |
-| `maxFileSize`         | size     | from defaults | A payload's bytes at most (`EFBIG`)                                 |
-| `compress`            | object   | off           | As a place's, by the extension of a node's name; no `retainRaw`     |
-| `zeroCopy`            | bool     | `false`       | Leases and borrowed stream chunks                                   |
-| `intake.seq`          | string   | `'source'`    | Who numbers the batches: `'source'` or `'intake'`                   |
-| `intake.window`       | number   | 10            | How long batches gather, ms                                         |
-| `intake.limit`        | number   | 1000          | Ops of one publication at most; a run goes in parts                 |
-| `intake.gapTimeout`   | number   | 2000          | How long a gap is waited for before `onGap`, ms                     |
-| `intake.spaceTimeout` | number   | 2000          | How long a batch waits for room in the pool, ms                     |
-
-A tree takes no name of a place, in any case. The handlers of each
-tree's intake are kernel options of the main thread, both required:
-`initialize()` refuses a tree without them. What a handler throws is
-its own — an uncaught exception — and never stops the intake.
-
-**Batches.** `submit({ seq, ops })` from any thread: `ops` are `['put',
-id, parentId, name, { class, payload, policy }]` — a node made or
-changed under `parentId` (null: the root) — and `['remove', id]`, each
-id once. A `payload` is `{ data, mtimeMs?, meta?, scriptOptions? }`,
-`data` a `Uint8Array` or a string (UTF-8); `null` takes it off, an
-absent one keeps it; `policy` likewise. A batch is taken when submitted:
-its bytes copied, a `policy`, a `meta` and `scriptOptions` cloned — data
-structured clone carries, kept frozen in every thread — so what the
-caller does to its own objects after changes nothing. A wrong form, or
-a value structured clone cannot carry, throws `EINVAL` at once, with the
-`index` and `id` of the op. The promise resolves `{ seq, status }` once the batch is
-published and this thread's tree shows it — `'committed'`,
-`'duplicate'` (a number applied or waiting already: a worker's batch
-and the same change read back from the source's log collapse) or
-`'superseded'` (a load past it) — and rejects with a refusal: the
-commit's (`ENOENT`, `EEXIST`, …), `EFBIG`, `ENOSPC` after
-`spaceTimeout`, each with `seq`, `index` and `id`.
-
-- Batches are applied strictly by number, from `last + 1`: those of a
-  window go in parts of at most `limit` ops, each part one publication
-  — no thread sees a state between two batches of it.
-- A batch past a gap waits; a gap older than `gapTimeout` is told once
-  (`onGap`), until the missing batches come or a load.
-- A refused batch is told to `onError`; the batches before it publish,
-  it and everything after it wait for a load.
-- `load(rows, seq)` replaces the tree's state with the source's at
-  `seq` — rows `{ id, parentId, name, class, payload, policy }` — in one
-  commit; the batches waiting up to `seq` are `'superseded'`, those
-  after it join its publication. A load older than the tree is
-  `ESTALE`. In `'source'` mode nothing applies before the first load —
-  an empty source loads `[]`.
-- `intake.seq: 'intake'` is for a single writer over one channel that
-  loses nothing: the intake numbers the batches as they come, there are
-  no gaps, no repeats and no `ESTALE`, and `load(rows)` takes no number
-  — the batches submitted after it wait for it.
-
-**Reading.** A node is opaque: `get(key)`, `match(key)`, `byId(id)`,
-`root`, then `nodeId`, `nameOf`, `parentOf`, `pathOf`, `trailOf`,
-`classOf`, `policyOf`, `isContainer`, `childOf`, `children`,
-`childNodesOf`, `countOf`, `walk`; with aggregates `classCountOf`,
-`leafCountOf`, `subtreeVersionOf`. `payloadOf(node)` is a frozen `{
-version, size, mtimeMs, birthtimeMs?, meta, scriptOptions, encodings }`;
-the bytes come as a copy (`read`, `readCompressed`), a lease (`view`,
-`viewCompressed`, with `zeroCopy`) or a stream (`createReadStream`,
-`createReadStreamCompressed`), pinned while they read, as `PlaceFs`'s
-are. `last` is the number of the last batch this thread's tree shows;
-`version`, `structureVersion` and `policyVersion` the publications that
-last changed it, its structure, its policies.
-
-**Policies.** A lookup with `{ allow, context }` passes each policy on
-its way, from the root down, to `allow(policy, node, context)`: `true`
-lets it through, anything else is a `Denied` — `{ node, decision }`, the
-uppermost refusal — and `match` gives a `NotFound` — `{ node, rest }` —
-for a miss past them. `check(node, { allow, context })` asks the same of
-a node in hand.
-
-```js
-const { Denied, NotFound } = require('xvfs');
-const allow = (policy, node, user) => user.roles.includes(policy.role);
-const found = pages.match(url.pathname, { allow, context: user });
-if (found instanceof Denied) return redirect('/login');
-if (found instanceof NotFound) return notFound(pages.pathOf(found.node));
-```
-
-**Events.** A publication that changed a tree names it in `'publish'`:
-`trees: [{ tree, seqFrom, seqTo, loaded }]` — the numbers of the batches
-it shows, `loaded` when it began with a load, which replaced the state
-whole. A batch that changes nothing publishes nothing, and still moves
-`last` in every thread.
 
 ## Strict routing
 
@@ -1373,7 +1553,7 @@ JSON file and flags that say the same resolve to one config.
 | `console`   | `globalThis.console` | Logger                                                                                                                      |
 | `seaModule` | `node:sea` if any    | Inject for tests                                                                                                            |
 | `preparers` | `{}`                 | `{ name: (raw, file) => ... }` named by the domains' `prepare` — synchronous; every name an enabled place uses must be here |
-| `trees`     | —                    | `{ name: { onGap, onError } }`: the handlers of each tree's intake ([Trees of client ids](#trees-of-client-ids))            |
+| `trees`     | —                    | `{ name: { onGap, onError } }`: the handlers of each tree's intake ([Page and route trees](#page-and-route-trees))          |
 
 States: `new → initializing → ready → closed` (final). `fs()`,
 `snapshot()`, `watch()`, `link()` require `ready`. `initialize()`
@@ -1388,11 +1568,11 @@ published.
 | -------------------- | ------------------------------------------------------------------------------------------------------------------------------------ |
 | `await initialize()` | Scan / SEA / map through the publication pipeline: preparers, bytecode, compression                                                  |
 | `fs(name)`           | `PlaceFs` for an indexed fs place                                                                                                    |
-| `tree(name)`         | `ClientTree` of a tree of client ids, in every thread ([Trees of client ids](#trees-of-client-ids))                                  |
+| `tree(name)`         | `SharedTree` of a shared tree — pages and routes, a menu — in every thread ([Page and route trees](#page-and-route-trees))           |
 | `on('publish', fn)`  | What each publication changed, after its commit — [Publication events](#publication-events); `'close'` once, last                    |
 | `version`            | The version of the last publication this thread committed or applied; 0 before the first — [Versions](#versions)                     |
 | `instance`           | The main kernel's random id, the same in every thread linked to it                                                                   |
-| `snapshot()`         | `{ segments, places, trees, version, instance }` — each shared place's tree and each tree of client ids, as committed                |
+| `snapshot()`         | `{ segments, places, trees, version, instance }` — each shared place's tree and each shared tree, as committed                       |
 | `link()`             | `{ vfs, transferList }` for a worker — the only worker transport                                                                     |
 | `watch()`            | Start `DirWatcher` (also auto if writable disk-origin)                                                                               |
 | `diagnostics()`      | Read-only picture of the shared memory: pool, bytes waiting to be freed, each worker's ACKs and holds — [Diagnostics](#diagnostics)  |
@@ -1499,9 +1679,9 @@ kernel.on('publish', ({ version, places, trees }) => {
   be newer already — compare `files.version(key)` with `event.version`.
 - **Shared places only.** A `map` place is each thread's own: its writes
   publish nothing and announce nothing.
-- **Trees of client ids.** `trees` names each tree the publication
-  changed: `[{ tree, seqFrom, seqTo, loaded }]`, empty when it changed
-  none ([Trees of client ids](#trees-of-client-ids)).
+- **Shared trees.** `trees` names each tree the publication changed:
+  `[{ tree, seqFrom, seqTo, loaded }]`, empty when it changed none
+  ([Page and route trees](#page-and-route-trees)).
 - **Errors.** What a listener throws is an uncaught exception, as from any
   emitter; the publication, its ACK and the mutation's promise are done by
   then. An async listener's rejection is its own. The kernel never emits
@@ -1562,7 +1742,7 @@ of the call — a frozen plain object, a new one each time:
     files, bytes,
     fallback: { files, bytes }, // of them, those the pool had no room for
   },
-  trees: {              // each tree of client ids
+  trees: {              // each shared tree
     [name]: {
       nodes, payloads,  // its live nodes, the payloads among them
       bytes,            // what their representations take of the pool
@@ -1615,8 +1795,8 @@ of the call — a frozen plain object, a new one each time:
 - Read-only: it frees, settles, compacts and publishes nothing, and costs
   nothing on reads or publications — every figure but the failures is
   taken from the pool, the retirement books, the links, the index and the
-  queues when asked. It walks the index, and every tree of client ids
-  node by node (~0.3 ms for 10⁴ nodes, ~8 ms for 10⁵): call it every
+  queues when asked. It walks the index, and every shared tree node by
+  node (~0.3 ms for 10⁴ nodes, ~8 ms for 10⁵): call it every
   few seconds, not per request. Main thread only, on a ready kernel.
 
 #### Adapter API
@@ -2160,7 +2340,7 @@ worker has ACKed (or exited) and no thread holds them. An update's
 file's payload carries the version of the commit that published it. A worker's
 `writeFiles` is one `vfs-mutate`: its keys, the size of each file and
 their bytes one after another in `data`; its answer carries the version
-of the commit. A tree of client ids rides the same messages: its
+of the commit. A shared tree rides the same messages: its
 snapshot and `last` in the snapshot; in an update, the deltas of one
 part of its intake's run in order and the numbers of the batches they
 show — `seq: null` for a compaction's relocation — applied in one step
@@ -2198,6 +2378,12 @@ Runnable demos under [examples/](examples/):
   transformation publishes several related files as one atomic
   `writeFiles`; other workers learn of it only through
   `kernel.on('publish')`, never a partial set.
+- [url-tree/](examples/url-tree/) — the pages of a site as a shared
+  tree: `server.mjs`, the quick start of
+  [Page and route trees](#page-and-route-trees), over HTTP; `run.js`, a
+  load on the main thread, a change from a worker read back at once, URLs
+  resolved under policies in another worker, a repeat and a gap of the
+  source's log.
 
 Further reading: [doc/integration.md](doc/integration.md) (integration
 notes and recipes), [doc/architecture.md](doc/architecture.md) (design

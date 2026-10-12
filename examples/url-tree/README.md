@@ -1,9 +1,22 @@
 # url-tree
 
-The pages of a site as a tree of client ids: nodes named by the source's
-own ids, each with a class, a policy and a payload of bytes in the
+The pages of a site as a shared tree: nodes with the ids its source
+gives them, each with a class, a policy and a payload of bytes in the
 shared pool — the same tree in every thread, written only by the
 batches of its source.
+
+`server.mjs` is the README's quick start ("Page and route trees"): the
+tree served over HTTP.
+
+```
+node examples/url-tree/server.mjs           # PORT, default 3000
+curl -i http://127.0.0.1:3000/guide/intro   # 200, an ETag
+curl -i http://127.0.0.1:3000/docs/intro    # 301 to /guide/intro
+curl -i http://127.0.0.1:3000/admin/stats   # 403; -H 'x-role: admin' 200
+curl -i http://127.0.0.1:3000/products/42   # 404 past /products, '/42'
+```
+
+`run.js` takes the tree through its source's changes, in three threads.
 
 The source here is an array and a counter, what a database table and
 its change log would be. The main thread loads its state at change 3
@@ -43,4 +56,4 @@ main: seq=5 committed, seq=6 committed
 reader: publish seq=5..6 /docs: intro, news, guide, faq
 ```
 
-See the README, "Trees of client ids".
+See the README, "Page and route trees".

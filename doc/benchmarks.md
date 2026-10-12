@@ -676,7 +676,7 @@ array is built only when `listenerCount('publish') > 0`, `#publish` in
 ## The limit of a part of an intake's run
 
 `bench/scenarios/intake.js` (opt-in: `node --expose-gc bench/run.js
---only intake`): a tree of client ids takes a run of 20 000 ops at once
+--only intake`): a shared tree takes a run of 20 000 ops at once
 — new nodes with a 64-byte payload each, under 100 parents — as batches
 of 1, 10 or 100 ops, with one linked worker, and the intake publishes it
 in parts of at most `limit` ops. `intake.part` is the longest
@@ -849,11 +849,11 @@ pair (+17 %), `mem.ack.worker.rss` and `mem.publish.rss` grow 5–6 % in
 every pair without passing it; a run of 200 000 writes under a link
 keeps the heap after a collection flat — nothing grows with writes.
 
-## Trees of client ids and rules of subtrees
+## Shared trees and rules of subtrees
 
-The trees of client ids
-([architecture → Trees of client ids](architecture.md#trees-of-client-ids))
-and the rules of subtrees
+The shared trees
+([architecture → Shared trees](architecture.md#shared-trees)) — the
+README's page and route trees — and the rules of subtrees
 ([→ Rules of subtrees](architecture.md#rules-of-subtrees)) came after the
 node trees. No scenario configures either but `intake`
 ([above](#the-limit-of-a-part-of-an-intakes-run)), so the others measure
@@ -876,7 +876,7 @@ disagree between pairs, and the others stay.
   `memory.start.heap` 6.77 → 7.03 MiB, `pool.sab.8.workers.heap`
   64.7 → 66.9 for eight workers — and 1.7 ms more of a `require` of the
   kernel, 24.5 → 26.3 ms (a probe: a fresh process each time, 30 a side,
-  alternating), 1 ms of it `lib/intake.js` and `lib/client-tree.js`: a
+  alternating), 1 ms of it `lib/intake.js` and `lib/shared-tree.js`: a
   worker pays it once, as it starts.
 - **Per call and per file, nothing measurable.** The leases (`views`),
   8–10 % slower in every pair of the earlier run, stay in this one; run

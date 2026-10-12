@@ -148,7 +148,7 @@ wait.
 by another process — has `tree.last` and the `'publish'` event, but a
 batch that changes nothing moves `last` without an event, so a wait polls
 (doc/external-sources.md, "Reading a write made elsewhere"); the spec
-leaves the kernel's own wait to a client of several processes.
+leaves the kernel's own wait to an application of several processes.
 
 **Done when.** A thread can await the number of a batch — a promise that
 settles once its tree shows it, or a timeout — without polling, with a
@@ -164,6 +164,20 @@ out of a listing.
 **Done when.** A rule of such a place holds on reads, writes and listings
 through the patch — a listing filtered by the rules — or the limit stays
 documented.
+
+## P3 — A shared tree compresses by class
+
+**Problem.** `trees.<name>.compress` chooses the payloads it compresses as
+a place does, by the extension of a node's name (`ext`), or takes every
+payload without it. A page's name seldom has an extension, so a tree that
+holds pages beside other payloads — the data a page renders, a
+redirect's node — compresses all of them or none: the class of a node,
+which says what it holds, does not count.
+
+**Done when.** `compress.classes` names the classes whose payloads a tree
+compresses — alone or with `ext` — checked by the config and kept by the
+intake when it prepares a batch, with tests in `test/trees.test.js` and
+the README's reference.
 
 ## P3 — The strict rules in a module of their own
 

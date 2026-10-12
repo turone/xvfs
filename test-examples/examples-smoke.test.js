@@ -3,6 +3,7 @@
 const { describe, it } = require('node:test');
 const assert = require('node:assert/strict');
 const { spawn, spawnSync } = require('node:child_process');
+const { readFileSync } = require('node:fs');
 const http = require('node:http');
 const path = require('node:path');
 const zlib = require('node:zlib');
@@ -728,6 +729,84 @@ describe('examples smoke', () => {
           'main: seq=5 committed, seq=6 committed',
           'reader: publish seq=5..6 /docs: intro, news, guide, faq',
         ]);
+      } finally {
+        await stopChild(child);
+      }
+    },
+  );
+
+  // The README shows server.mjs from its first import on, in three blocks
+  // between the quick start's markers: what the next test runs is what it
+  // shows.
+  it('the README quick start of page and route trees is url-tree/server.mjs', () => {
+    const text = (file) =>
+      readFileSync(path.join(REPO, file), 'utf8').replace(/\r\n/g, '\n');
+    const readme = text('README.md');
+    const from = readme.indexOf(
+      '<!-- quickstart: examples/url-tree/server.mjs -->',
+    );
+    const to = readme.indexOf('<!-- /quickstart -->');
+    assert.ok(from !== -1 && to > from, 'the quick start markers');
+    const blocks = [
+      ...readme.slice(from, to).matchAll(/```js\n([\s\S]*?)\n```/g),
+    ].map((m) => m[1]);
+    assert.equal(blocks.length, 3);
+    const source = text('examples/url-tree/server.mjs');
+    const code = source
+      .slice(source.indexOf('\nimport ') + 1)
+      .replace("from '../../index.js'", "from 'xvfs'")
+      .trimEnd();
+    assert.equal(blocks.join('\n\n'), code);
+  });
+
+  it(
+    'url-tree server answers from a shared tree: a page, 304, 301, 403, 404 with a tail, 400',
+    { timeout: URL_TREE_MS },
+    async () => {
+      const { child, port } = await startExample(
+        'examples/url-tree/server.mjs',
+        { PORT: '0' },
+      );
+      try {
+        const at = (p) => `http://127.0.0.1:${port}${p}`;
+        const br = await httpGet(at('/guide/intro'), {
+          'accept-encoding': 'gzip, br',
+        });
+        assert.equal(br.statusCode, 200);
+        assert.equal(br.headers['content-encoding'], 'br');
+        const html = zlib.brotliDecompressSync(br.body).toString();
+        assert.equal(html, '<h1>Intro</h1>');
+
+        // A query and a trailing slash make the same key; no encoding taken.
+        const plain = await httpGet(at('/guide/intro/?ref=x'));
+        assert.equal(plain.statusCode, 200);
+        assert.equal(plain.headers['content-encoding'], undefined);
+        assert.equal(plain.body.toString(), '<h1>Intro</h1>');
+        assert.equal(plain.headers.etag, br.headers.etag);
+        const cached = await httpGet(at('/guide/intro'), {
+          'if-none-match': br.headers.etag,
+        });
+        assert.equal(cached.statusCode, 304);
+
+        // /docs moved: its node redirects it and every path below it.
+        const moved = await httpGet(at('/docs/intro'));
+        assert.equal(moved.statusCode, 301);
+        assert.equal(moved.headers.location, '/guide/intro');
+        const below = await httpGet(at('/docs/x/y'));
+        assert.equal(below.headers.location, '/guide/x/y');
+
+        assert.equal((await httpGet(at('/admin/stats'))).statusCode, 403);
+        const admin = await httpGet(at('/admin/stats'), { 'x-role': 'admin' });
+        assert.equal(admin.statusCode, 200);
+        assert.equal(admin.body.toString(), '<h1>Stats</h1>');
+
+        const tail = await httpGet(at('/products/42'));
+        assert.equal(tail.statusCode, 404);
+        assert.equal(tail.headers['x-under'], '/products');
+        assert.equal(tail.body.toString(), '/42');
+
+        assert.equal((await httpGet(at('/a%2Fb'))).statusCode, 400);
+        assert.equal((await httpGet(at('/'))).statusCode, 404);
       } finally {
         await stopChild(child);
       }

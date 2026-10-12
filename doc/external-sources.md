@@ -1,12 +1,13 @@
-# External sources of a tree of client ids
+# Feeding a shared tree
 
 What xvfs needs from a database, Redis or any other system that is the
-source of truth for a [tree of client ids](../README.md#trees-of-client-ids):
+source of truth for a [shared tree](../README.md#page-and-route-trees) —
+the pages and routes of a site, a menu, a catalogue:
 what a batch says, how batches are numbered and replayed, how a snapshot
 is taken, and how a reader waits for a write made elsewhere. The
 mechanics on the xvfs side — the intake, its window, gaps and refusals —
 are in the README and in
-[architecture.md](architecture.md#trees-of-client-ids).
+[architecture.md](architecture.md#shared-trees).
 
 Contents: [The model](#the-model) · [A batch](#a-batch) ·
 [Numbers](#numbers) · [A snapshot](#a-snapshot) ·
