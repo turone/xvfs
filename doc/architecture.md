@@ -275,19 +275,24 @@ fixed shape, its fields in one order: `requireBytecode`, `scriptBytecode`,
 A `Representation` — `{ kind, segmentId, offset, length, data }`, kinds 0
 `source`, 1 `require:bytecode`, 2 `script:bytecode`, 3–6 `fs:gzip`,
 `fs:deflate`, `fs:br`, `fs:zstd` — is immutable and holds its extent;
-`data` is a getter that makes a `Buffer` view on each read and keeps
-none.** _Why:_ one unit for allocation, pins, retirement and frees, and the
+`data` is a getter that makes a `Buffer` view on its first read and keeps
+it with the representation.** _Why:_ one unit for allocation, pins,
+retirement and frees, and the
 same object for as long as the representation is published: a move, an
 unrelated commit and the relocation of another kind keep it. A `Map` of
 representations costs 176 B even empty, and the kinds are seven; a fixed
 shape keeps access monomorphic and costs 72 B only on a file that has
 derived representations — an object of the kinds present would make up to
-16 hidden classes. A view costs about 104 B: one kept on each
+16 hidden classes. A view costs about 104 B: one made with each
 representation, at 1.6 representations a file and 10⁶ files, would take
 about 2.5 GB over the main thread and 8 workers against 0.9, and a full GC
-17–21 ms against 7–8. Made on each read it costs some 20 ns, and a
-long-lived worker's memory no longer grows with what it has read; a lease
-and a stream keep their own view, and `readFile` copies.
+17–21 ms against 7–8. Made on every read and kept nowhere, it cost each
+read ~60 ns and each lease a view of its own. Kept from the first read, a
+thread pays a view only for what it has read — a replica of 10⁵ files
+takes 421 B a file, 588 once it has read them all — a repeated read
+costs ~27 ns, and the leases of one file share one view. Nothing
+invalidates it: the object never changes, a new version or a relocation
+is a new one, so its view never goes stale.
 
 **Attributes are fields of the payload in every thread: version, size,
 mtimeMs and, where the place keeps it (`places.<name>.stat.birthtime`),
@@ -2161,7 +2166,8 @@ workers call `attach()`.** _Why:_ preloads do not run in worker threads.
 | Typed-array columns for nodes                                                                                   | code, and pins by number, for 2.7 times less memory                                         |
 | Derived bytes as entries of their own, under keys with a NUL                                                    | keys to keep apart from files, out of listings and moving together                          |
 | `representations: Map<kind, …>` in a payload; an object of the kinds present                                    | 176 B even empty; up to 16 hidden classes                                                   |
-| A `Buffer` view kept on every representation                                                                    | ~104 B each in every thread, mostly unread; a full GC 2.5 times longer                      |
+| A `Buffer` view made with every representation                                                                  | ~104 B each in every thread, mostly unread; a full GC 2.5 times longer                      |
+| A view made on every read and kept nowhere                                                                      | ~60 ns a read; a lease of one file N times held N views                                     |
 | Attributes in SAB records of their own; atime                                                                   | a second allocator and record numbers for 24–56 B a file; work on every read                |
 | Node ids growing to 2⁵³ without a wrap; refusing a commit when they run out                                     | +32 B a node, `byId` 4.5 times slower, a pause; an outage after weeks                       |
 | `updateId` checked in the engine; a new snapshot when a delta is missing                                        | a tree sees gaps in `updateId`; the port loses no delta                                     |
