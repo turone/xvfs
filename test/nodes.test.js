@@ -306,6 +306,70 @@ describe('nodes: segments', () => {
   });
 });
 
+describe('nodes: what a commit takes back', () => {
+  // A payload a commit writes and writes over in itself was published to no
+  // one: its bytes go back with the commit (the tree's `dropped`) — never
+  // retired, never left in the pool. PlaceFs.writeFiles refuses a key
+  // twice; the kernel's batch does not.
+  const failOf = () => (code) => Object.assign(new Error(code), { code });
+
+  it('a batch that writes a key twice publishes the second; the first goes back to the pool at once', async () => {
+    const root = tmpDir('vfs-nodes');
+    const k = await kernel(root, { v: VIRTUAL });
+    const w = worker(k);
+    try {
+      const v = k.fs('v');
+      await v.writeFile('/a.txt', 'zero');
+      const files = [
+        ['/a.txt', Buffer.from('one')],
+        ['/a.txt', Buffer.from('two')],
+        ['/n/b.txt', Buffer.from('three')],
+        ['/n/b.txt', Buffer.from('four')],
+      ];
+      await k.publishVirtualBatch(k.registry.get('v'), files, failOf);
+      assert.equal(leakedBytes(k), 0, 'nothing of the first writes');
+      assert.equal(v.readFile('/a.txt', 'utf8'), 'two');
+      assert.equal(v.readFile('/n/b.txt', 'utf8'), 'four');
+      const keys = [...k.retired.values()].map((r) => r.key);
+      assert.ok(
+        keys.every((key) => key === '/a.txt'),
+        'the published one alone retires',
+      );
+      await until(() => w.kernel.version === k.version);
+      const files2 = w.kernel.fs('v');
+      assert.equal(files2.readFile('/a.txt', 'utf8'), 'two');
+      assert.equal(files2.readFile('/n/b.txt', 'utf8'), 'four');
+      await until(() => k.retired.size === 0);
+      assert.equal(leakedBytes(k), 0);
+    } finally {
+      k.close();
+      rm(root);
+    }
+  });
+
+  it('a map place keeps no buffer of what a commit wrote over in itself', async () => {
+    const root = tmpDir('vfs-nodes');
+    const k = await kernel(root, {
+      m: { provider: 'map', origin: 'virtual', fs: { writable: true } },
+    });
+    try {
+      const { store } = k.registry.get('m');
+      store.publishBatch(
+        [
+          ['/a.txt', Buffer.from('one')],
+          ['/a.txt', Buffer.from('two')],
+        ],
+        failOf,
+      );
+      assert.equal(k.fs('m').readFile('/a.txt', 'utf8'), 'two');
+      assert.equal(store.segments.size, 1, 'the buffer of the second alone');
+    } finally {
+      k.close();
+      rm(root);
+    }
+  });
+});
+
 describe('nodes: moves', () => {
   it('a file onto a file replaces it in one commit: moved, the replaced one removed', async () => {
     const root = tmpDir('vfs-nodes');

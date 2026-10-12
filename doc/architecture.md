@@ -348,7 +348,7 @@ a class from before the removal could differ between threads, which apply
 the commit in their own steps; an error would wrap every call after an
 `await`.
 
-**A commit returns `{ delta, retired, version }` or refuses, and a refusal
+**A commit returns `{ delta, retired, dropped, version }` or refuses, and a refusal
 changes nothing anyone can observe: an `Error` with a `code`, a numeric
 `index` — the refused op — and a `message`; no delta, no retirement, no
 version; the structure, the order of children, the payloads, the tree's
@@ -451,6 +451,16 @@ _Why:_ pins key on the `Representation` object, which a move keeps, so a
 pin stays right where a copy would have needed a second identity for one
 version. One space of retireIds and one version for all places keep the
 ACK and `vfs-release` free of place names and the books whole.
+
+**What a commit gives a node and takes back in itself — a payload written
+over, a representation relocated again, a node removed with what the
+commit wrote into it — retires nothing: the commit returns its extents
+as `dropped`, and the kernel returns them to the pool at once, a `map`
+place's store drops their buffers.** _Why:_ nobody ever saw them, so
+nothing waits for an ACK; a caller that writes one key twice in one
+commit — the kernel takes any list, only `writeFiles` refuses a key
+twice — would otherwise leave their bytes in the pool for good, outside
+both the published and the retired.
 
 **A tree's version never decreases and never wraps: the kernel hands each
 commit the next publication's version, and a commit that changes nothing,

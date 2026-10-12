@@ -111,6 +111,7 @@ class ModelTree {
     this.revision = 0;
     this.nextUid = 1;
     this.nextId = 1; // the engine-mode counter (the model's own ids)
+    this.made = []; // the representations the running commit made
     this.byId = new Map();
     this.root = null;
     if (this.fs) {
@@ -499,13 +500,15 @@ class ModelTree {
     const reps = new Map();
     const sorted = [...input.representations].sort((a, b) => a[0] - b[0]);
     for (const [kind, e] of sorted) {
-      reps.set(kind, {
+      const rep = {
         kind,
         segmentId: e.segmentId,
         offset: e.offset,
         length: e.length,
         uid: this.nextUid++,
-      });
+      };
+      reps.set(kind, rep);
+      this.made.push(rep);
     }
     let birthtimeMs;
     if (this.birthtime) {
@@ -544,13 +547,15 @@ class ModelTree {
   // derived one gets a new `others`.
   #relocated(payload, kind, extent) {
     const reps = new Map(payload.reps);
-    reps.set(kind, {
+    const rep = {
       kind,
       segmentId: extent.segmentId,
       offset: extent.offset,
       length: extent.length,
       uid: this.nextUid++,
-    });
+    };
+    reps.set(kind, rep);
+    this.made.push(rep);
     return new ModelPayload(this.nextUid++, {
       version: payload.version,
       size: payload.size,
@@ -590,9 +595,12 @@ class ModelTree {
 
   // Apply `ops` atomically. Throws a refusal ({ code, index, other? }) and
   // changes nothing; else returns the outcome:
-  //   { delta: boolean, versioned, structure, policy, retired: [{ id, kind, uid, extent }] }
+  //   { delta: boolean, versioned, structure, policy,
+  //     retired: [{ id, kind, uid, extent }], dropped: [extent] }
+  // where an extent is extentKey() of one.
   commit(ops, next, now) {
     this.#checkArgs(ops, next, now);
+    this.made = [];
     const result = this.fs
       ? this.#commitFs(ops, next, now)
       : this.#commitClient(ops, next, now);
@@ -849,13 +857,20 @@ class ModelTree {
   }
 
   // The common end of a successful commit: swap the state in, take the
-  // version, set the numbers and the subtree versions, list what retired.
+  // version, set the numbers and the subtree versions, list what retired
+  // — published before, not after — and what dropped: what the commit
+  // made and the state after does not publish, published to no one.
   #finish(st, before, f) {
     const after = ModelTree.published(st.root);
     const retired = [];
     for (const [uid, { id, rep }] of before) {
       if (!after.has(uid))
         retired.push({ id, kind: rep.kind, uid, extent: extentKey(rep) });
+    }
+    const dropped = [];
+    for (const rep of this.made) {
+      if (!isEmptyExtent(rep) && !after.has(rep.uid))
+        dropped.push(extentKey(rep));
     }
     const delta = f.changed || f.relocated;
     if (f.changed) {
@@ -876,6 +891,7 @@ class ModelTree {
       structure: f.changed && f.structure,
       policy: f.changed && f.policy,
       retired,
+      dropped,
     };
   }
 
@@ -1292,6 +1308,7 @@ class ModelTree {
   load(rows, next, now) {
     if (!Array.isArray(rows)) throw refusal('EINVAL', -1);
     this.#checkArgs([], next, now);
+    this.made = [];
     if (this.fs) throw refusal('EINVAL', -1);
     const seen = new Set();
     const puts = [];

@@ -95,6 +95,11 @@ const run = (seed) => {
       )
       .sort();
     assert.deepEqual(got, want, where(ctx, main, 'retired'));
+    assert.deepEqual(
+      r.dropped.map((e) => `${e.segmentId}:${e.offset}:${e.length}`).sort(),
+      [...m.dropped].sort(),
+      where(ctx, main, 'dropped'),
+    );
     if (r.delta !== null) {
       noSab(r.delta, where(ctx, main, 'delta'));
       for (const th of threads.slice(1))

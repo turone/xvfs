@@ -16,7 +16,13 @@
 
 const assert = require('node:assert/strict');
 const engine = require('./tree-engine.js');
-const { ModelTree, OTHERS, isKey, isName } = require('./tree-model.js');
+const {
+  ModelTree,
+  OTHERS,
+  isKey,
+  isName,
+  extentKey,
+} = require('./tree-model.js');
 const data = require('./tree-data.js');
 
 const env = process.env;
@@ -526,6 +532,22 @@ const keysOfOps = (ctx, ops, isLoad) => {
     }
   }
   return keys;
+};
+
+// The extent objects a commit gives: of the payloads of its writes, puts
+// and rows, and of its relocations.
+const givenExtents = (ops, isLoad) => {
+  const out = new Set();
+  const of = (payload) => {
+    for (const pair of payload?.representations ?? []) out.add(pair[1]);
+  };
+  for (const op of ops) {
+    if (isLoad) of(op?.payload);
+    else if (op[0] === 'write') of(op[2]);
+    else if (op[0] === 'put') of(op[4]?.payload);
+    else if (op[0] === 'relocate') out.add(op[3]);
+  }
+  return out;
 };
 
 // --- lookups, policies, walks ----------------------------------------------------
@@ -1927,6 +1949,16 @@ const runSeed = (seed) => {
         )
         .sort();
       assert.deepEqual(got, want, what('retired'));
+      // dropped: as a multiset of extents, each one the ops gave — the
+      // very object.
+      const given = givenExtents(ops, isLoad);
+      assert.deepEqual(
+        eres.dropped.map(extentKey).sort(),
+        [...mres.dropped].sort(),
+        what('dropped'),
+      );
+      for (const e of eres.dropped)
+        assert.ok(given.has(e), what('a dropped extent the ops did not give'));
       const ids = new Set();
       for (const r of eres.retired) {
         assert.ok(
