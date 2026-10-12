@@ -695,9 +695,10 @@ The step grows with the batches more than with the ops: each batch is a
 commit and a delta of its own, ~7 µs a batch of one op where an op of a
 batch of a hundred costs ~1 µs. A source that commits one row a change
 sends batches of one op, so the default limit is 1 000 — a part of them
-holds the main thread ~7.5 ms here — while the time of the whole run
-moves by a few per cent whatever the limit. A batch larger than the limit
-is never cut: one of 10 000 ops is one commit of ~8–10 ms.
+holds the main thread ~7.5 ms here — while the whole run takes 6 to
+17 % longer than with a limit of 10 000: more publications, each an
+update and a round of ACKs. A batch larger than the limit is never cut:
+one of 10 000 ops is one commit of ~8–10 ms.
 
 ## Node trees against the flat index
 

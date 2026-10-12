@@ -223,6 +223,31 @@ update or delete on pages for each row`, sees each of them — a cascade
   once the commit is done — and deletes its rows of `tree_changed` and
   `tree_tx`.
 
+- **No cycle commits.** The table's keys refuse what the engine refuses
+  of a parent (`ENOENT`) and of a name (`EEXIST`); a cycle nothing
+  refuses — and two changes that each make none alone, A moved under B
+  and B under A, make one together. The same trigger looks for one under
+  the lock it took, in a statement that sees every change that committed
+  before, and raises if it finds one:
+
+  ```sql
+  with recursive up (start, id) as (
+    select p.id, p.parent_id from pages p
+      join tree_changed c on c.id = p.id and c.txid = txid_current()
+    union
+    select up.start, p.parent_id from up join pages p on p.id = up.id
+      where up.id <> up.start
+  )
+  select start from up where id = start limit 1;
+  ```
+
+  A cycle that commits stalls the tree: every batch past it is refused,
+  and so is a snapshot that holds it, until the source mends it.
+
+- **Bytes in the log.** `jsonb` holds no bytes: a batch carries `body`
+  base64-encoded (`encode(body, 'base64')`), which the follower decodes
+  before it submits (`Buffer.from(body, 'base64')`).
+
 - **Following.** The main thread listens (`LISTEN tree_pages`); on each
   notification, and on start, it reads the log past `tree.last` and
   submits every batch:

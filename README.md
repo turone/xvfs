@@ -1605,8 +1605,9 @@ of the call — a frozen plain object, a new one each time:
 - Read-only: it frees, settles, compacts and publishes nothing, and costs
   nothing on reads or publications — every figure but the failures is
   taken from the pool, the retirement books, the links, the index and the
-  queues when asked. It walks the index: call it every few seconds, not
-  per request. Main thread only, on a ready kernel.
+  queues when asked. It walks the index, and every tree of client ids
+  node by node (~0.3 ms for 10⁴ nodes, ~8 ms for 10⁵): call it every
+  few seconds, not per request. Main thread only, on a ready kernel.
 
 #### Adapter API
 

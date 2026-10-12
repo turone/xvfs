@@ -1337,7 +1337,7 @@ step is mostly a cost per batch — a commit of its own, a delta of its
 own on the port: on the stand ([benchmarks](benchmarks.md#the-limit-of-a-part-of-an-intakes-run))
 a part of 1 000 ops took 7.5 ms with batches of one op, 2.2 with batches
 of ten, 1.5 with batches of a hundred, and a part of 10 000 ops 73, 19 and
-11 ms, while the whole run took as long whatever the limit.
+11 ms, while the whole run took 6 to 17 % longer at the smaller limit.
 Batches that wait hold no bytes, and a catch-up after a break does not
 allocate its whole tail at once. What the batches before a full pool
 replace is retired by their publication — it may be the very room the
