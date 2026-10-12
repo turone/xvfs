@@ -81,7 +81,7 @@ and serves the source from disk. → README
 into epochs processed strictly in order; a virtual write is a publication
 of its own. Each publication is one `vfs-update` that carries a file's
 source together with its bytecode and compressed representations — a
-companion never outlives its source. A replaced version is retired, and its
+representation never outlives its source. A replaced version is retired, and its
 bytes return to the pool only after every worker has ACKed the update and
 no stream or lease in any thread still reads them: a reader finishes the
 version it started with, and nothing is freed on a timeout. A preparer that
@@ -123,9 +123,11 @@ the application writes — data or code generated at run time. A
 worker's write travels to the main thread, which prepares, compiles and
 publishes it before the Promise resolves), and every thread reads the same
 version. A `map + virtual` place is per-thread and synchronous: scratch
-space, a workspace of one worker. Both keep a filesystem's hierarchy
-(`ENOTDIR`, `EISDIR`, `EXDEV` where a filesystem says so) and go through the
-same pipeline. → README [Providers](../README.md#providers),
+space, a workspace of one worker. Both keep a filesystem's hierarchy —
+explicit directories (`mkdir`, `rmdir`, an empty one listed), `ENOENT`,
+`ENOTDIR`, `EISDIR`, `EXDEV` where a filesystem says so, a rename that
+moves a file or a whole directory without copying a byte — and go
+through the same pipeline. → README [Providers](../README.md#providers),
 [Map provider](../README.md#map-provider).
 
 **`strict` as an access policy; `fs.fallback`; `links`.** `strict: true`
@@ -289,9 +291,9 @@ tables — as files of a place: a `sab` place over a directory the
 deployment updates (with `watch`), or a `sab + virtual` place the
 application writes from the main thread or from a worker. Every thread
 reads the current version; a file changes atomically, together with its
-companions, and no thread sees half a publication. A preparer can parse the
+representations, and no thread sees half a publication. A preparer can parse the
 file once, at publication, and hand the parsed result to every thread as
-`meta` — frozen, cloned into each thread's projection — so a request reads
+`meta` — frozen, cloned into each thread's tree — so a request reads
 `meta(key)` and parses nothing.
 
 ```js
@@ -339,7 +341,7 @@ change that fails preparation keeps the last good version, and requests in
 flight finish with the version they started with.
 
 **Not covered:** module caches, module-scope state, ES module instances,
-connection draining; a change reaches the index after the watcher
+connection draining; a change reaches the place's tree after the watcher
 debounce. → [integration.md → Generated code with hot reload](integration.md#generated-code-with-hot-reload-no-disk).
 
 ### Shared module bytecode
@@ -382,7 +384,7 @@ file's one content for `fs`, `require` and `import`; `fs.script` and
 or a transform per request or at first load in every worker: the
 transformation runs at publication — for the initial scan, for every
 watcher epoch, for virtual writes from any thread — once, on the publishing
-thread, and its result is what every domain and every companion is built
+thread, and its result is what every domain and every representation is built
 from, with the raw file staying the source of truth. A build at deploy time
 is not replaced; a preparer covers what changes while the process runs.
 
@@ -747,8 +749,8 @@ patched `node:fs` and the module hooks deciding per path.
 instance between threads; a `MemoryProvider` tree is ordinary JavaScript
 state, and a startup source is mounted again in each worker (on `main`, at
 the same mount point in every thread). xvfs keeps every byte
-once in `SharedArrayBuffer` segments: each worker projects the same memory
-from a snapshot, receives each change as one delta, and a replaced version
+once in `SharedArrayBuffer` segments: each worker replicates the trees
+over the same memory from a snapshot, receives each change as one delta, and a replaced version
 is freed only after every worker has moved on and no stream or view still
 reads it. With `n` workers and `m` MiB of files that is `m` MiB instead of
 up to `n × m` — measured above as 261 against 348 MiB of RSS at eight
@@ -757,7 +759,7 @@ workers for a 20 MiB set.
 **Live updates.** `RealFSProvider` always reads the disk, so it is current
 but not cached. xvfs watches disk-origin places and publishes
 each batch of changes atomically — a source with its bytecode and
-compressed companions — to every thread, while readers that started before
+compressed representations — to every thread, while readers that started before
 finish the version they began with.
 
 **API surface.** `node:vfs` aims at the whole `node:fs` contract, including
@@ -907,7 +909,8 @@ own module graph and `node_modules`, the library for the published places.
 - **Public static content behind a reverse proxy or CDN**, where nginx or
   the edge serves it before the process is reached.
 - **Content that must be current on every read** of a writable disk-origin
-  place: it reaches the index after the watcher debounce (`watchTimeout`).
+  place: it reaches the place's tree after the watcher debounce
+  (`watchTimeout`).
 - **Node.js below 22.22.3 or 24.12.0**, or IBM i and AIX without AHAFS for
   the live-reload features.
 

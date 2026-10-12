@@ -96,7 +96,7 @@ const tap = (k, { ack = true } = {}) => {
 };
 
 // A worker kernel attached to a real link(), in this thread: it takes the
-// snapshot off the port, projects it, applies deltas and ACKs them through
+// snapshot off the port, replicates its trees, applies deltas and ACKs them through
 // the port exactly like attach(), without spawning a thread.
 const worker = (k, options = {}) => {
   const { vfs } = k.link();

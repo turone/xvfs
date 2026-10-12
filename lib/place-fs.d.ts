@@ -200,9 +200,9 @@ export class PlaceFs {
     options?: ReadStreamOptions | BufferEncoding,
   ): VfsReadStream | null;
   /**
-   * Directory listing, implicit directories included, merged with the disk
-   * territory of a partial cache; lexicographic order of the string names.
-   * Throws `ENOENT` / `ENOTDIR`.
+   * Directory listing — files and directories, empty ones included —
+   * merged with the disk territory of a partial cache; lexicographic
+   * order of the string names. Throws `ENOENT` / `ENOTDIR`.
    */
   readdir(
     key: string,

@@ -671,7 +671,7 @@ describe('VfsKernel: snapshot, workers, ACK', () => {
     d: { provider: 'disk', fs: true },
   };
 
-  it('snapshot is keyed by place and fromSnapshot projects it read-only', async () => {
+  it('snapshot is keyed by place and fromSnapshot replicates it read-only', async () => {
     const k = await kernel(root, places);
     let w = null;
     let empty = null;

@@ -10,31 +10,38 @@ Main thread                                Worker threads
 ┌──────────────────────────────────┐       ┌──────────────────────────────┐
 │ VfsKernel (full)                 │       │ attach() / fromSnapshot()    │
 │ ├─ VfsConfig (frozen)            │       │ ├─ same VfsConfig from raw   │
-│ ├─ FilesystemCache               │       │ ├─ projected Maps (zero-copy)│
-│ │  └─ Pool + SegmentRegistry     │       │ ├─ per-thread map places     │
+│ ├─ a node tree per place         │       │ ├─ replicas of the trees     │
+│ ├─ FilesystemCache: pool of SABs │       │ ├─ per-thread map places     │
 │ ├─ PlaceRegistry + FsRouter      │       │ └─ Pins: streams and leases  │
 │ ├─ scanner                       │       └──────────────────────────────┘
 │ ├─ DirWatcher (FIFO epochs)      │  link() → workerData.vfs
-│ └─ acks + retired (retireId)     │  vfs-update  ──────────►
-└──────────────────────────────────┘  vfs-ack     ◄────────── (+ retained)
+│ └─ acks + retired (retireId)     │  vfs-snapshot ─────────► (first)
+└──────────────────────────────────┘  vfs-update  ──────────►
+                                      vfs-ack     ◄────────── (+ retained)
                                       vfs-release ◄──────────
 SAB segments ─────────── shared physical memory ─────────── zero-copy views
 ```
 
 Invariants:
 
+- Every thread holds each place as a tree of nodes. The main kernel's
+  takes the commits; a worker's replica applies each commit's delta with
+  the very code the main tree applied it with, so the two cannot drift
+  apart. A directory is a node, a rename moves a node and copies
+  nothing, and `stat().ino` is the node's id in every thread.
 - Workers never write SAB directly; a `sab + virtual` write from a worker
   goes through the mutation RPC and is applied by the main kernel.
-- A virtual place keeps a filesystem's hierarchy: a key under a file is
+- A virtual place keeps a filesystem's hierarchy: a write into a
+  directory that does not exist is `ENOENT`, a key under a file
   `ENOTDIR`, a file where a directory is `EISDIR` — whatever the mutation,
   and also when mutations overlap. A path ending in a separator names a
   directory, as on POSIX, on every platform: a file the VFS serves or
   stores, named so, is `ENOTDIR`.
 - One publication pipeline for every source of content: raw input → the
   preparer of its extension (once) → canonical content → bytecode and
-  compressed companions → one epoch. Allocations stay private until the
-  epoch commits, so snapshots and compaction only ever see published
-  entries, and a failed attempt only frees its own bytes.
+  compressed representations → one commit. Allocations stay private until
+  the commit, so snapshots and compaction only ever see published files,
+  and a failed attempt only frees its own bytes.
 - Watcher epochs (and their rechecks) run strictly one at a time, in
   arrival order: an older epoch never publishes over a newer one.
 - ACK-before-free, per version: a shared version an update replaces or
@@ -56,8 +63,8 @@ Invariants:
 |                       | `sab` + `disk`                       | `sab` + `virtual`             | `map` + `disk`       | `map` + `virtual`    | `sea`             | `node-default` | `disk`                  |
 | --------------------- | ------------------------------------ | ----------------------------- | -------------------- | -------------------- | ----------------- | -------------- | ----------------------- |
 | Source                | scanned dir                          | application writes            | scanned dir          | application writes   | `node:sea` assets | OS fs          | OS path entries         |
-| Storage               | SAB pool                             | SAB pool                      | per-thread `Map`     | per-thread `Map`     | SAB pool          | OS fs          | OS fs                   |
-| Writable              | disk + watch                         | main or worker RPC            | disk + watch         | local `Map`, sync    | no                | passthrough    | `fs.writable`           |
+| Storage               | SAB pool                             | SAB pool                      | per-thread buffers   | per-thread buffers   | SAB pool          | OS fs          | OS fs                   |
+| Writable              | disk + watch                         | main or worker RPC            | disk + watch         | local tree, sync     | no                | passthrough    | `fs.writable`           |
 | Shared across workers | yes                                  | yes                           | no                   | no                   | yes               | n/a            | metadata only           |
 | In `snapshot()`       | yes                                  | yes (empty until first write) | no (recreated empty) | no (recreated empty) | yes               | n/a            | no                      |
 | Watched               | yes                                  | no                            | yes                  | no                   | no                | n/a            | no                      |
@@ -65,7 +72,7 @@ Invariants:
 
 Disk-origin writable places (`sab + disk`, `map + disk`) are **eventual
 consistency**: mutations go to disk — copies and renames through the
-patched `fs` included — and the watcher brings them into the index (no
+patched `fs` included — and the watcher brings them into the place's tree (no
 `waitForUpdate`). A `sab + virtual` mutation, a copy into the place
 included, resolves its Promise only once the new version is already
 published — no watcher involved.
@@ -92,21 +99,26 @@ unmanaged sibling, `fs.writable` stays its own policy, and `require` /
 
 ## Worker message protocol
 
-Main → worker (`link()` port):
+Main → worker (`link()` port): first the snapshot, `{ name:
+'vfs-snapshot', snapshot }` — every shared place's tree as committed,
+the segments, `version` and `instance`; `attach()` takes it before
+anything else and keeps nothing of it but the replicas — then one
+update per commit:
 
 ```js
 {
   name: 'vfs-update',
   updateId: 7,
-  version: 9, // the kernel's version after this update; a relocation keeps it
+  version: 9, // the kernel's version after this update; a compaction keeps it
   places: {
     static: {
-      entries: [
-        ['/index.html', { kind:'shared', segmentId:3, offset:0, length:42, stat }],
-      ],
-      removals: ['/old.html'],
-      // Every shared version this update replaces or removes.
-      retired: [['/index.html', 41], ['/old.html', 42]],
+      // The commit's steps on the tree's nodes, by id, as columns: the
+      // payloads they bring and, in `retired`, every representation the
+      // update replaces or removes, with its retireId (lib/tree.js).
+      delta: { mark, from, version, now, op, id, parent, name, …, retired },
+      // The keys of its 'publish' event.
+      created: [], replaced: ['/index.html'], removed: ['/old.html'],
+      moved: [['/a.html', '/b.html']],
     },
   },
   newSegments: [{ id: 3, sab: SharedArrayBuffer }],
@@ -122,14 +134,17 @@ Worker → main:
 
 `attach()` is the only worker transport (`link()` on the main side). The
 worker kernel applies each `vfs-update` synchronously and ACKs **those —
-and only those** — messages. Before applying, it looks up the retired
-keys in its projection: a version one of its streams or leases still
-reads is bound to its `retireId` and reported in `retained`, in the same
-ACK — so it is held before the ACK can free anything. When the last local
+and only those** — messages. Before its tree changes, every
+representation the delta retires goes to its pins: one a stream or lease
+still reads is bound to its `retireId` and reported in `retained`, in the
+same ACK — so it is held before the ACK can free anything. When the last local
 consumer of that version is done, one `vfs-release` follows. Pinning a
 current version is local bookkeeping: no IPC per chunk, per stream or for
 a version that is never retired while in use. A worker that exits drops
-all its ACKs and holds.
+all its ACKs and holds. A delta a worker cannot apply breaks its view: it
+ACKs nothing more, and its port closes once it holds no lease or borrowed
+chunk — or with the worker, which the rethrown error ends by default
+([README → `VfsKernel` (worker)](../README.md#vfskernel-worker)).
 
 Worker → main, for a mutation of a `sab + virtual` place
 (`lib/mutation-rpc.js`):
@@ -168,9 +183,10 @@ A worker's snapshot carries the index as main knows it and its
 makes, removes and moves no link on a place's disk under strict, and the
 index only grows ([README → Links on a place's disk](../README.md#links-on-a-places-disk-links)).
 
-There is no `file-update` / `file-delete`. One `vfs-update` per epoch.
-Source + companions of one file are published together; a companion that
-fails to rebuild is listed in `removals` of the same message.
+There is no `file-update` / `file-delete`. One `vfs-update` per commit.
+A file's source and representations are published together, in its
+payload; one that fails to rebuild — `require.compile` is best-effort —
+is missing from the payload the delta brings.
 `kernel.retirements()` lists what is still held — representation, bytes,
 age, and whether it waits for ACKs or for consumers — for debugging.
 
@@ -228,9 +244,9 @@ places: {
 ```
 
 `initialize()` compiles every source of an extension of `require.compile`
-(here `.js`) once, stores bytecode as an internal companion
-(`<source>\0require:bytecode`) in the same SAB segments, and projects
-both source and bytecode to workers via `snapshot()`. Workers
+(here `.js`) once, stores the bytecode as the file's `require:bytecode`
+representation in the same SAB segments, and hands both source and
+bytecode to workers in the snapshot. Workers
 `require('/abs/domain/x.js')` and the patched
 `_compile` calls `new vm.Script(wrapped, { cachedData })`. V8 skips
 parse + compile for all functions, including lazy ones. There is no ESM
@@ -263,11 +279,11 @@ const script = new vm.Script(bundle.source, {
 - **On rejection** the consumer runs the canonical source without cached
   data: the `vm.Script` has compiled `bundle.source` itself — run it as
   usual. The refusal is that V8 isolate's alone; it changes no file, no
-  companion and no published version of XVFS, and nothing is published
+  representation and no published version of XVFS, and nothing is published
   again.
 - **CommonJS keeps its own.** An ordinary `require()` uses the cached
   data `require.compile` builds for `Module.wrap(canonicalSource)` under
-  the module's filename — the `\0require:bytecode` companion the module
+  the module's filename — the `require:bytecode` representation the module
   hook applies, falling back to Node's compiler once on rejection. It
   and the bare cached data of `fs.script.compile` are cached data of
   different texts: never mix them, nor hand `kernel.bytecode()` to a
@@ -383,7 +399,7 @@ const config = new VfsConfig({
 ```
 
 At runtime the kernel copies each matching `node:sea` asset into SAB
-once and projects to workers via snapshot. Outside an SEA build the
+once; workers get it in the snapshot. Outside an SEA build the
 provider stays empty and logs a warning — the same code runs unmodified
 during development. See [examples/sea-static/](../examples/sea-static/).
 
@@ -438,8 +454,8 @@ fs: {
 
 **Overlapping domains** — `.js` goes through `api` once; that one prepared
 source is what `fs` reads, `fs.script.compile` turns into
-`\0script:bytecode` (bare source, the preparer's `scriptOptions`) and
-`require.compile` turns into `\0require:bytecode` (`Module.wrap(source)`).
+`script:bytecode` (bare source, the preparer's `scriptOptions`) and
+`require.compile` turns into `require:bytecode` (`Module.wrap(source)`).
 Declaring `prepare` for `js` in `require` too would be a config error,
 even with the same name:
 
@@ -483,15 +499,17 @@ const handler = script.runInThisContext();
 - Preparers are synchronous and run once per publication attempt — scan,
   watcher, SEA, virtual writes from any thread, `map` writes — never on
   read. A preparer error or a failing `fs.script.compile` publishes
-  nothing; a failing `require.compile` only drops its own companion.
+  nothing; a failing `require.compile` only drops its own representation.
 - In a **virtual** place `appendFile`, `rename` and copies of a prepared
   key are `ENOTSUP`: its raw input is not kept. Renaming or copying an
   unprepared entry onto an extension with a preparer publishes it through
-  that preparer, once. A directory renames as a whole subtree only when no
-  source under it is prepared or compiled: sources and compressed
-  representations keep their bytes, stat and mtime, in one publication. In a disk-origin place mutations edit the raw file
-  and the watcher re-prepares it; a copy or a rename hands on the raw
-  file, never the prepared content.
+  that preparer, once. A directory moves as one node only when no file
+  under it is prepared, compiled or holds path-dependent `scriptOptions` /
+  `meta`: files and compressed representations keep their bytes, ids,
+  versions and times, in one publication, and nothing is copied. In a
+  disk-origin place mutations edit the raw file and the watcher
+  re-prepares it; a copy or a rename hands on the raw file, never the
+  prepared content.
 - `readFile` gives the prepared content; passing it to `writeFile`
   elsewhere is a new publication the destination may prepare again, not a
   raw-preserving copy — `copyFile` hands on the raw input.
@@ -553,8 +571,8 @@ decisions and their reasons.
 
 ## Design notes
 
-**Why SAB.** A single physical copy of cached files, projected zero-copy
-into N workers. With 100 MiB of cached files and 8 workers, that's
+**Why SAB.** A single physical copy of cached files, read zero-copy by
+N workers. With 100 MiB of cached files and 8 workers, that's
 ~800 MiB saved versus per-worker copies.
 
 **Why pooled segments.** One SAB per file would exhaust mmap regions
@@ -562,11 +580,18 @@ quickly. A best-fit allocator over 64 MiB segments amortizes the cost;
 free extents are recycled and empty segments stay around to be reused,
 never returned to the OS.
 
-**Why companion NUL keys.** V8 bytecode could be a second region inside
-each entry, but companions (`src\0require:bytecode`, `src\0fs:br`) keep
-the allocator simple — every entry is one contiguous region — and they
-flow through snapshot, delta and ACK without special handling. They
-never appear in `readdir` / patched `fs`.
+**Why a tree of nodes.** A directory is a node, so a listing reads its
+children and an empty directory exists; a rename re-links one node — a
+file or a whole directory — copying no byte and retiring nothing; a
+node's id is its `ino` in every thread. The main tree and the replicas
+apply the same delta with the same code. Details:
+[architecture.md](architecture.md).
+
+**Why representations.** A file's node holds one payload: its source and
+what is made of it — `require:bytecode`, `script:bytecode`,
+`fs:<encoding>` — each a contiguous region of the pool, pinned, retired
+and freed on its own, and the allocator stays simple. They are never
+keys: nothing lists, routes or moves them apart from their file.
 
 **Why main-thread-only compilation.** N workers compiling the same source
 is N× wasted CPU. The main thread compiles once during `initialize()`,

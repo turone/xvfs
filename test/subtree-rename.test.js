@@ -78,7 +78,7 @@ const drained = () => new Promise(setImmediate);
 
 describe('virtual subtree rename', () => {
   for (const [name, config] of Object.entries(PROVIDERS)) {
-    it(`${name}: a raw-only nested subtree moves whole: ids, versions, stat and mtime kept`, async () => {
+    it(`${name}: a nested subtree moves whole: ids, versions, stat and mtime kept`, async () => {
       await withPlace(config, async (k, v, at) => {
         await write(v, TREE);
         const before = Object.keys(TREE).map((key) => v.stat(key));

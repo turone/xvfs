@@ -376,7 +376,7 @@ describe('rename routes its source and its destination', () => {
     }
   });
 
-  it('a raw-only virtual subtree moves; any other subtree stays whole', async () => {
+  it('a virtual subtree of files that move as they are moves; any other stays whole', async () => {
     const vs = k.fs('vs');
     const vm = k.fs('vm');
     for (const [form, rename] of Object.entries(RENAMES)) {

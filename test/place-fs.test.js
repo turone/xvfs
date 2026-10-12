@@ -141,7 +141,7 @@ describe('PlaceFs: reads', () => {
     assert.throws(() => plain.readFileView('/x'), { code: 'ENOTSUP' });
   });
 
-  it('exists / stat for files and implicit directories', () => {
+  it('exists / stat for files and directories', () => {
     assert.ok(pub.exists('/index.html') && pub.exists('index.html'));
     assert.ok(
       pub.exists('/img') &&

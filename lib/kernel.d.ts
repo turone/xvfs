@@ -198,7 +198,11 @@ export interface PlaceChanges {
   readonly replaced: readonly string[];
   /** Files it removed, a file a move replaced included. */
   readonly removed: readonly string[];
-  /** `[from, to]` per node it moved; a move is in no other list. */
+  /**
+   * `[from, to]` per node a rename moved — a file, or a directory with
+   * all below it, as one pair. A file the rename published anew, its new
+   * key taking another pipeline, is in `replaced` too.
+   */
   readonly moved: readonly (readonly [string, string])[];
 }
 
@@ -216,11 +220,12 @@ export interface PublishEvent {
 /**
  * The events of a kernel, in every thread: `'publish'` once per
  * publication it applies, in the order of their versions — shared places
- * only; `'close'` once, last. Never `'error'`.
+ * only; `'close'` once, last — in a worker whose view broke, with what
+ * broke it (`broken`). Never `'error'`.
  */
 export interface VfsKernelEvents {
   publish: [event: PublishEvent];
-  close: [];
+  close: [cause?: unknown];
 }
 
 /**

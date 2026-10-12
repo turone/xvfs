@@ -117,6 +117,8 @@ const onPublish = (event: PublishEvent) => {
 expectType<VfsKernel>()(kernel.on('publish', onPublish));
 kernel.on('publish', (event) => expectType<PublishEvent>()(event));
 kernel.once('close', () => {});
+kernel.once('close', (cause) => expectType<unknown>()(cause));
+expectType<unknown>()(kernel.broken);
 kernel.off('publish', onPublish);
 expectType<number>()(kernel.listenerCount('publish'));
 const emitter: EventEmitter = kernel;
@@ -348,7 +350,7 @@ kernel.appRoot = '/elsewhere';
 kernel.on('published', () => {});
 // @ts-expect-error a 'publish' listener gets the event
 kernel.on('publish', (event: string) => void event);
-// @ts-expect-error 'close' has no argument
+// @ts-expect-error the cause of 'close' is unknown
 kernel.on('close', (reason: Error) => void reason);
 kernel.on('publish', (event) => {
   // @ts-expect-error an event is frozen

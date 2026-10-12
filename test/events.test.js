@@ -27,8 +27,9 @@ const { fileOf } = require('./helpers.js');
 // event per commit, in the order of the versions — and 'close' once, last.
 // An event names the keys of files, created, replaced and removed, and the
 // nodes a move took, file or directory, as [from, to]: a move is in
-// `moved` only, and a file it replaced in `removed`. Nothing in an event
-// refers to shared bytes.
+// `moved`, a file it replaced in `removed`, and a file it published anew
+// under its new key — another pipeline there — in `replaced` too.
+// Nothing in an event refers to shared bytes.
 
 const VIRTUAL = { v: { origin: 'virtual', fs: { writable: true } } };
 

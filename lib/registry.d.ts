@@ -8,7 +8,7 @@ export type DenialCode = 'EACCES' | 'EROFS' | 'ENOTDIR';
 
 /**
  * A path a place serves: `file`, a published source visible to the fs
- * domain; `dir`, an implicit directory of an indexed place; `disk`, the
+ * domain; `dir`, a directory of an indexed place's tree; `disk`, the
  * disk territory of `fs.fallback: 'disk'`. `key` is `'/'`-separated with
  * a leading `'/'`, `''` for the mount itself.
  */
