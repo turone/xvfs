@@ -4,6 +4,7 @@ const { describe, it } = require('node:test');
 const assert = require('node:assert/strict');
 const { VfsKernel } = require('../lib/kernel.js');
 const { VfsConfig } = require('../lib/config.js');
+const { Denied, NotFound } = require('../lib/tree.js');
 const {
   tmpDir,
   rm,
@@ -12,6 +13,9 @@ const {
   until,
   drain,
   leakedBytes,
+  assertAtRest,
+  activeResources,
+  closeAtRest,
 } = require('./helpers.js');
 
 // A tree of client ids in the kernel (doc/architecture.md, "Trees of
@@ -375,6 +379,116 @@ describe('trees: workers', () => {
       assert.deepEqual(await wt.load([ROOT, page(9, 'z', 'z')], 5), { seq: 5 });
       assert.equal(wt.read(wt.get('/z'), 'utf8'), 'z');
       assert.equal(leakedBytes(k), 0);
+    } finally {
+      w.kernel.close();
+      done();
+    }
+  });
+});
+
+describe('trees: policies', () => {
+  it('allow passes each policy from the root down; a refusal is Denied, a miss NotFound', async () => {
+    const { k, done } = await treeKernel({ pages: PAGES });
+    const w = worker(k);
+    try {
+      const t = k.tree('pages');
+      const admin = { id: 2, parentId: 1, name: 'admin', class: 0 };
+      await t.load(
+        [
+          ROOT,
+          { ...admin, policy: { role: 'admin' } },
+          {
+            id: 3,
+            parentId: 2,
+            name: 'page',
+            class: 1,
+            payload: { data: 's' },
+          },
+          page(4, 'public', 'open'),
+        ],
+        0,
+      );
+      const allow = (policy, node, context) =>
+        context.roles.includes(policy.role) || 'forbidden';
+      const guest = { allow, context: { roles: [] } };
+      const staff = { allow, context: { roles: ['admin'] } };
+      const wt = w.kernel.tree('pages');
+      assert.ok(await until(() => wt.last === 0));
+      for (const tree of [t, wt]) {
+        const denied = tree.get('/admin/page', guest);
+        assert.ok(denied instanceof Denied);
+        assert.equal(denied.decision, 'forbidden');
+        assert.equal(tree.pathOf(denied.node), '/admin');
+        assert.equal(tree.read(tree.get('/admin/page', staff), 'utf8'), 's');
+        assert.equal(tree.read(tree.get('/public', guest), 'utf8'), 'open');
+        const missing = tree.match('/admin/none', staff);
+        assert.ok(missing instanceof NotFound);
+        assert.equal(missing.rest, '/none');
+        assert.equal(tree.pathOf(missing.node), '/admin');
+        assert.ok(tree.match('/admin/none', guest) instanceof Denied);
+        assert.ok(tree.check(tree.get('/admin/page'), guest) instanceof Denied);
+        assert.equal(
+          tree.check(tree.get('/public'), guest),
+          tree.get('/public'),
+        );
+        assert.deepEqual(tree.policyOf(tree.get('/admin')), { role: 'admin' });
+      }
+      // A batch that changes a policy: policyVersion moves in every thread.
+      const before = t.policyVersion;
+      await t.submit({
+        seq: 1,
+        ops: [['put', 2, 1, 'admin', { class: 0, policy: null }]],
+      });
+      assert.ok(t.policyVersion > before);
+      assert.ok(await until(() => wt.last === 1));
+      assert.equal(wt.policyVersion, t.policyVersion);
+      assert.equal(wt.read(wt.get('/admin/page', guest), 'utf8'), 's');
+      assert.throws(() => t.get('/admin', { allow: 'yes' }), {
+        code: 'EINVAL',
+      });
+    } finally {
+      w.kernel.close();
+      done();
+    }
+  });
+});
+
+describe('trees: at rest', () => {
+  it('a refused batch leaves nothing; close() leaves nothing alive, a gap waited for included', async () => {
+    const baseline = activeResources();
+    // A gap waited for far longer than closeAtRest waits for a timer.
+    const intake = { window: 1, gapTimeout: 60_000 };
+    const { k, errors, done } = await treeKernel({
+      pages: { ...PAGES, maxFileSize: '1 kib', intake },
+    });
+    const w = worker(k);
+    try {
+      await k.tree('pages').load([ROOT], 0);
+      const wt = w.kernel.tree('pages');
+      assert.ok(await until(() => wt.last === 0));
+      const refusals = [
+        [{ seq: 1, ops: [put(2, 9, 'x', { class: 1 })] }, 'ENOENT'],
+        [
+          {
+            seq: 1,
+            ops: [
+              put(2, 1, 'x', { class: 1, payload: { data: 'x'.repeat(2048) } }),
+            ],
+          },
+          'EFBIG',
+        ],
+      ];
+      for (const [batch, code] of refusals) {
+        await assert.rejects(wt.submit(batch), { code });
+        await assertAtRest(k, { workers: [w.kernel] });
+        await k.tree('pages').load([ROOT], 0);
+      }
+      assert.equal(errors.length, 2);
+      // A batch past a gap waits — its timer with it — until close().
+      const late = k.tree('pages').submit({ seq: 9, ops: [] });
+      const closed = assert.rejects(late, { code: 'ERR_VFS_CLOSED' });
+      await closeAtRest(k, { workers: [w.kernel], baseline });
+      await closed;
     } finally {
       w.kernel.close();
       done();
