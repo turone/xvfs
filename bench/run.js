@@ -14,8 +14,8 @@ const { mkdirSync, writeFileSync } = require('node:fs');
 // Every scenario runs as one function in its own process (`--expose-gc`);
 // results go to `.work/bench/<platform>-<node>-<time>.json` unless `--out`
 // names a file. A figure is the median of `repeats` rounds after a warm-up.
-// `tree` (the tree engine, until it replaces the index) runs only when
-// `--only` names it; `--n` sets its sizes.
+// `tree` (the tree engine) and `intake` (the limit of a part of a tree's
+// run) run only when `--only` names them; `--n` sets the sizes of `tree`.
 
 const SCENARIOS = [
   'read',
@@ -36,7 +36,7 @@ const SCENARIOS = [
   'batch',
   'events',
 ];
-const OPT_IN = ['tree'];
+const OPT_IN = ['tree', 'intake'];
 
 const ROOT = path.join(__dirname, '..');
 

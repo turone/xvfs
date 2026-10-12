@@ -730,7 +730,7 @@ if (node) res.end(pages.read(node));
 | `zeroCopy`            | bool     | `false`       | Leases and borrowed stream chunks                                   |
 | `intake.seq`          | string   | `'source'`    | Who numbers the batches: `'source'` or `'intake'`                   |
 | `intake.window`       | number   | 10            | How long batches gather, ms                                         |
-| `intake.limit`        | number   | 10000         | Ops of one publication at most; a run goes in parts                 |
+| `intake.limit`        | number   | 1000          | Ops of one publication at most; a run goes in parts                 |
 | `intake.gapTimeout`   | number   | 2000          | How long a gap is waited for before `onGap`, ms                     |
 | `intake.spaceTimeout` | number   | 2000          | How long a batch waits for room in the pool, ms                     |
 

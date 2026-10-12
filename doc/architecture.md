@@ -1283,7 +1283,7 @@ snapshot — is [external-sources.md](external-sources.md).
 `containers`, `birthtime`, `aggregates`, `maxNodes`, `maxFileSize`
 (`defaults.memory.maxFileSize` unless given), `compress` (as a place's, by the extension of a node's
 name, without `retainRaw`), `zeroCopy` and `intake: { seq, window, limit,
-gapTimeout, spaceTimeout }` — `'source'`, 10 ms, 10 000 ops, 2 s, 2 s by
+gapTimeout, spaceTimeout }` — `'source'`, 10 ms, 1 000 ops, 2 s, 2 s by
 default. A tree takes no name of a place, in any case. The handlers of an
 intake are kernel options of the main thread, `trees: { <name>: { onGap,
 onError } }`, both required: `initialize()` refuses a tree without them.
@@ -1327,7 +1327,12 @@ pool, up to `spaceTimeout`, and a later one that finds none ends its
 part, so the batches before it publish first.** _Why:_ one publication
 for a run keeps every thread from seeing a state between two of its
 batches and costs one update and one round of ACKs for all of them; the
-limit bounds the synchronous step a run takes from the main thread.
+limit bounds the synchronous step a run takes from the main thread. That
+step is mostly a cost per batch — a commit of its own, a delta of its
+own on the port: on the stand ([benchmarks](benchmarks.md#the-limit-of-a-part-of-an-intakes-run))
+a part of 1 000 ops took 7.5 ms with batches of one op, 2.2 with batches
+of ten, 1.5 with batches of a hundred, and a part of 10 000 ops 73, 19 and
+11 ms, while the whole run took as long whatever the limit.
 Batches that wait hold no bytes, and a catch-up after a break does not
 allocate its whole tail at once. What the batches before a full pool
 replace is retired by their publication — it may be the very room the

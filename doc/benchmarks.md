@@ -673,6 +673,32 @@ figure this page can stand behind. The mechanism is not in question (the
 array is built only when `listenerCount('publish') > 0`, `#publish` in
 `lib/kernel.js`); its cost at this N is not resolved at this sample size.
 
+## The limit of a part of an intake's run
+
+`bench/scenarios/intake.js` (opt-in: `node --expose-gc bench/run.js
+--only intake`): a tree of client ids takes a run of 20 000 ops at once
+— new nodes with a 64-byte payload each, under 100 parents — as batches
+of 1, 10 or 100 ops, with one linked worker, and the intake publishes it
+in parts of at most `limit` ops. `intake.part` is the longest
+synchronous step of a part on the main thread, from its first commit to
+the update posted to the worker; `intake.run` the whole run, until every
+batch settled. One run on the machine above, the median of 5 rounds after
+a warm-up, ms:
+
+| ops a batch | part, limit 1 000 | 2 000 | 5 000 | 10 000 | run, limit 1 000 | 10 000 |
+| ----------: | ----------------: | ----: | ----: | -----: | ---------------: | -----: |
+|           1 |               7.5 |  16.0 |  38.8 |   73.1 |              220 |    207 |
+|          10 |               2.2 |   4.1 |  10.1 |   18.8 |               72 |     60 |
+|         100 |               1.5 |   2.8 |   7.1 |   10.6 |               49 |     42 |
+
+The step grows with the batches more than with the ops: each batch is a
+commit and a delta of its own, ~7 µs a batch of one op where an op of a
+batch of a hundred costs ~1 µs. A source that commits one row a change
+sends batches of one op, so the default limit is 1 000 — a part of them
+holds the main thread ~7.5 ms here — while the time of the whole run
+moves by a few per cent whatever the limit. A batch larger than the limit
+is never cut: one of 10 000 ops is one commit of ~8–10 ms.
+
 ## Node trees against the flat index
 
 Every indexed place became a tree of nodes in every thread

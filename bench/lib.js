@@ -113,6 +113,34 @@ const settledUsage = async () => {
   return last;
 };
 
+// The [start, end] of every commit of the tree of client ids `name`, from
+// now on, as it happens.
+const timeCommits = (k, name) => {
+  const { tree } = k.trees.get(name);
+  const commit = tree.commit.bind(tree);
+  const times = [];
+  tree.commit = (...args) => {
+    const start = performance.now();
+    const result = commit(...args);
+    times.push([start, performance.now()]);
+    return result;
+  };
+  return times;
+};
+
+// When each vfs-update was posted to the kernel's links, from now on.
+const timePosts = (k) => {
+  const times = [];
+  for (const port of k.links.values()) {
+    const post = port.postMessage.bind(port);
+    port.postMessage = (msg, transfer) => {
+      post(msg, transfer);
+      if (msg?.name === 'vfs-update') times.push(performance.now());
+    };
+  }
+  return times;
+};
+
 const memory = (b, id, k) => {
   const { rss } = usage();
   b.value(`mem.${id}.rss`, 'MiB', 'lower', rss);
@@ -121,6 +149,8 @@ const memory = (b, id, k) => {
 
 module.exports = {
   quiet,
+  timeCommits,
+  timePosts,
   tmpDir,
   writeTree,
   cleanup,

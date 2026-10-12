@@ -233,7 +233,7 @@ export interface IntakeConfig {
   seq?: 'source' | 'intake';
   /** How long batches gather before a publication, ms. Default 10. */
   window?: number;
-  /** The most ops one publication takes; a run is cut there. Default 10000. */
+  /** The most ops one publication takes; a run is cut there. Default 1000. */
   limit?: number;
   /** How long a gap is waited for before `onGap`, ms. Default 2000. */
   gapTimeout?: number;

@@ -1151,7 +1151,7 @@ describe('VfsConfig: trees of client ids', () => {
       intake: {
         seq: 'source',
         window: 10,
-        limit: 10000,
+        limit: 1000,
         gapTimeout: 2000,
         spaceTimeout: 2000,
       },
