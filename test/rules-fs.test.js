@@ -267,6 +267,34 @@ describe('rules: the patched node:fs under strict', () => {
     }
   });
 
+  it("without strict a recursive mkdir under a hidden directory is node:fs's; under a read-only one EROFS", async () => {
+    const root = writeTree(tmpDir('vfs-rules'), { 'w/a.txt': 'a' });
+    const k = await kernel(root, {
+      w: {
+        fs: { ext: ['txt'], writable: true },
+        rules: {
+          '/hidden': { fs: false },
+          '/ro': { fs: { writable: false } },
+          '/ro/rw': { fs: { writable: true } },
+        },
+      },
+    });
+    fsPatch.install(k);
+    const at = (rel) => path.join(root, 'w', rel);
+    try {
+      fs.mkdirSync(at('hidden/x/y'), { recursive: true });
+      assert.ok(onDisk(at('hidden/x/y')));
+      assert.equal(
+        code(() => fs.mkdirSync(at('ro/rw/x'), { recursive: true })),
+        'EROFS',
+      );
+    } finally {
+      fsPatch.uninstall();
+      k.close();
+      rm(root);
+    }
+  });
+
   it('a recursive mkdir makes no directory its rules refuse above the path', async () => {
     const root = writeTree(tmpDir('vfs-rules'), { 'w/a.txt': 'a' });
     const k = await kernel(
