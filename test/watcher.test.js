@@ -138,8 +138,8 @@ describe('watcher pipeline', () => {
   });
 
   // The tests below read the updates the port delivers, so they wait for
-  // those, not for the projection: #flush applies an update to the main
-  // thread's projection before it posts it, and the port delivers it later.
+  // those, not for the tree: #flush commits to the main thread's tree
+  // before it posts the update, and the port delivers it later.
 
   it('syntax error: source published, stale bytecode gone with the old payload', async () => {
     const n = msgs.length;

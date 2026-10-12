@@ -987,8 +987,8 @@ describe('prepare pipeline: the preparer contract', () => {
   // The preparer of the smallest file throws; the larger ones, published
   // first (#publishAll: largest first), have staged their sources and
   // representations by then. initialize() rejects with that very error and
-  // closes the kernel: nothing is committed, published or versioned, every
-  // projection is empty, and the kernel keeps no runtime reference — the
+  // closes the kernel: nothing is committed, published or versioned, no
+  // tree is left, and the kernel keeps no runtime reference — the
   // pool goes whole with what the failed attempt allocated in it. Last, as
   // an extra check, V8 collects that pool.
   it('a preparer that throws in initialize(): rejected, closed, nothing kept', async () => {

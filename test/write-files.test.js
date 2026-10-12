@@ -778,7 +778,7 @@ describe('writeFiles: among other mutations', () => {
     }
   });
 
-  it('no thread sees part of a set: the projection, a snapshot and a new link wait for its commit', async () => {
+  it('no thread sees part of a set: the tree, a snapshot and a new link wait for its commit', async () => {
     const root = tmpDir('vfs-batch');
     const k = await kernel(root, VIRTUAL);
     const w = worker(k);

@@ -856,7 +856,7 @@ describe('VfsKernel: snapshot, workers, ACK', () => {
     }
   });
 
-  it('link() + attach(): a worker gets the projection, deltas and ACKs them', async () => {
+  it('link() + attach(): a worker gets the replicas, deltas and ACKs them', async () => {
     const k = await kernel(root, places, { watchTimeout: 50, watch: true });
     let worker = null;
     try {

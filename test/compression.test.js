@@ -116,7 +116,7 @@ describe('compression: representations in SAB', () => {
   });
 
   // A representation is no node: no key names it, the NUL-separated form
-  // of the old companions included.
+  // of the keys that once named them included.
   it('representations never show in listings, exists or the patched fs', () => {
     assert.deepEqual(site.readdir('/'), [
       'app.js',

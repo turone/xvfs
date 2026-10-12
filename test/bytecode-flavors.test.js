@@ -455,11 +455,11 @@ describe('bytecode flavors: failure and rollback', () => {
         const file = path.join(root, name, 'h.js');
         assert.deepEqual(shape(err ?? {}), doesNotCompile(file), label);
         assert.deepEqual(bundle(k.fs(name)), before[name], label);
-        const [source, companion] = version(name);
+        const [source, flavor] = version(name);
         assert.equal(source, versions[name][0], `${label}: the same version`);
-        assert.equal(companion, versions[name][1], `${label}: its flavor`);
+        assert.equal(flavor, versions[name][1], `${label}: its flavor`);
       }
-      assert.deepEqual(bundle(w.kernel.fs('v')), before.v, 'worker projection');
+      assert.deepEqual(bundle(w.kernel.fs('v')), before.v, 'worker replica');
       assert.equal(k.nextUpdateId, updates, 'nothing published');
       assert.equal(k.nextRetireId, retires, 'nothing retired');
       assert.equal(leakedBytes(k), 0, 'nothing allocated');

@@ -30,11 +30,12 @@ const { COPYFILE_EXCL, COPYFILE_FICLONE, COPYFILE_FICLONE_FORCE } =
 // A copy hands the source's raw input to the destination: the raw disk file
 // of a disk-origin place — prepared or not — or the canonical bytes of an
 // unprepared virtual entry, which are its raw input; never a prepared
-// result, never a companion. The destination publishes it through its own
-// pipeline: a disk place through its watcher, a virtual place through its
-// store, its preparer running once, with no file on disk. A prepared virtual
-// entry has no raw input left (ENOTSUP), a hidden source is EACCES, and a
-// recursive copy stays out of managed territory (ENOTSUP).
+// result, never a derived representation. The destination publishes it
+// through its own pipeline: a disk place through its watcher, a virtual
+// place through its store, its preparer running once, with no file on
+// disk. A prepared virtual entry has no raw input left (ENOTSUP), a hidden
+// source is EACCES, and a recursive copy stays out of managed territory
+// (ENOTSUP).
 
 const calls = { upper: 0, wrap: 0 };
 const PREPARERS = {
@@ -554,8 +555,8 @@ describe('single-file copies hand the raw input to the destination', () => {
     );
   });
 
-  it('compression: a companion is never copied as content', async () => {
-    // A disk-origin source: the raw disk file, not its gzip companion.
+  it('compression: a compressed representation is never copied as content', async () => {
+    // A disk-origin source: the raw disk file, not its gzip representation.
     assert.ok(k.fs('site').storedEncodings('/index.html').includes('gzip'));
     const html = fresh('i.html');
     fs.copyFileSync(at('site', 'index.html'), html);

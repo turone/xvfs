@@ -13,7 +13,7 @@ const { writeFileSync: writeDisk, unlinkSync: unlinkDisk } = fs;
 // opendir lists the same filtered territory as readdir: published entries
 // from the VFS, plus the directories and uncached files of an
 // `fs.fallback: 'disk'` place from the disk — never an unpublished file of
-// a cached extension, a companion or an unmanaged sibling. Outside appRoot
+// a cached extension, a representation or an unmanaged sibling. Outside appRoot
 // it stays node:fs.
 
 const drain = async (dir) => {
@@ -195,7 +195,7 @@ describe('opendir: the filtered territory of readdir', () => {
     }
   });
 
-  it("fallback: 'deny' and virtual places list their projection only", async () => {
+  it("fallback: 'deny' and virtual places list their tree only", async () => {
     const closed = await drain(await fs.promises.opendir(at('closed')));
     assert.deepEqual(names(closed), ['index.html']);
     assert.deepEqual(names(drainSync(fs.opendirSync(at('mem')))), ['m.txt']);

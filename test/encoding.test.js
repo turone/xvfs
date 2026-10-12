@@ -10,7 +10,7 @@ const { tmpDir, writeTree, rm, kernel } = require('./helpers.js');
 // Disk edits behind the VFS's back: captured before any patch is installed.
 const { writeFileSync: writeDisk } = fs;
 
-// Listing names in the requested encoding: every listing (projection, disk
+// Listing names in the requested encoding: every listing (the tree, disk
 // territory, their merge, the managed appRoot; readdir in each form and
 // opendir) sorts and deduplicates the string names, then encodes them —
 // 'buffer' gives Buffer names, in the same order as the strings.
@@ -81,7 +81,7 @@ describe('listing names follow the requested encoding', () => {
     rm(outside);
   });
 
-  // Every kind of listing: VFS + disk merge, disk-only nested, projection
+  // Every kind of listing: VFS + disk merge, disk-only nested, the tree
   // only, virtual (nested, non-ASCII), the managed appRoot.
   const DIRS = [
     ['site'],

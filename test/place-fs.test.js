@@ -540,7 +540,7 @@ describe('PlaceFs: memory mutations', () => {
 });
 
 // A rename is not a write: like a rename on disk it keeps the mtime, and the
-// moved entry keeps its companions.
+// moved file keeps its representations.
 describe('PlaceFs: a virtual rename keeps the metadata', () => {
   const PLACES = {
     'sab + virtual': {

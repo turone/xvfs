@@ -65,7 +65,6 @@ const refused = (err, code, syscall, where, dest) => {
   assert.equal(err.dest, dest);
 };
 
-// Every key a place projects, companions included.
 // Every key a place's tree holds, a directory's with a trailing slash.
 const keysOf = (k, name) => {
   const { tree } = k.registry.get(name);

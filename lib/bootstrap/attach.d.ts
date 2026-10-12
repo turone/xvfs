@@ -14,7 +14,7 @@ export interface AttachOptions {
 }
 
 /**
- * Rebuilds a read-only projection over the shared segments, installs the
+ * Builds read-only replicas of the trees over the shared segments, installs the
  * hooks the config asks for, applies and ACKs the deltas (`vfs-update`)
  * arriving through the `MessagePort` created by `kernel.link()` (`link.port`,
  * an in-process channel to the main thread) and publishes the kernel as
