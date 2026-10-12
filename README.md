@@ -1893,8 +1893,9 @@ vfs-links   { name: 'vfs-links', add: [path], generation }                    ma
 tree        the place's tree in pre-order as columns — ids, parents, names,
             classes, payloads — typed arrays and arrays of strings, no SAB
 delta       one commit's log of steps on nodes by id (create, attach,
-            detach, kill, payload, relocate…) as columns, and the
-            representations it retires: { id, kind, retireId }
+            detach, kill, payload, relocate…) as columns over one
+            buffer, and the representations it retires: { id, kind,
+            retireId }
 payload     version, size, mtimeMs (+ birthtimeMs), scriptOptions?, meta?, and
             each representation as kind, segmentId, offset, length; a source
             kept on disk has none: its key names its file

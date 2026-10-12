@@ -390,12 +390,18 @@ not a delta once `apply` has, not the ops once `commit` has. A tree's
 strings are its own flat ones. A numeric column — ids, versions, sizes — is
 an `Int32Array` while every value of it is a small integer of any build,
 else a `Float64Array`, chosen for each snapshot and each delta; times are
-always a `Float64Array`.** _Why:_ a worker that kept its snapshot paid
+always a `Float64Array`. A delta's columns are views over one
+`ArrayBuffer`, the 8-byte ones first (`Columns`, `lib/tree-node.js`).**
+_Why:_ a worker that kept its snapshot paid
 1.9 MiB at 10⁴ files and 18.3 MiB at 10⁵, about 30 % of its index. A slice
 of a string of 13 characters or more keeps its whole parent alive, and a
 name of 16 characters copied takes 32 B against 40 and the parent. Columns
 clone 10⁵ records in 2.9 ms where objects took 119. A boxed integer turns
-the field of every node of its class.
+the field of every node of its class. A port clones a buffer of its own
+for every typed array: the fourteen columns of a one-file write took
+5.3 µs to clone, on each side of the port, where the flat index's entries
+took 2.0; one buffer under them all takes 3.5, and the reader indexes
+the same columns of the same types.
 
 **A lookup walks: `get` goes from the root by the names of the key, one
 `Map` of children a level, in the depth of the key. There is no cache of
@@ -2318,8 +2324,9 @@ vfs-links   { name: 'vfs-links', add: [path], generation }                    ma
 tree        the place's tree in pre-order as columns — ids, parents, names,
             classes, payloads — typed arrays and arrays of strings, no SAB
 delta       one commit's log of steps on nodes by id (create, attach,
-            detach, kill, payload, relocate…) as columns, and the
-            representations it retires: { id, kind, retireId }
+            detach, kill, payload, relocate…) as columns over one
+            buffer, and the representations it retires: { id, kind,
+            retireId }
 payload     version, size, mtimeMs (+ birthtimeMs), scriptOptions?, meta?, and
             each representation as kind, segmentId, offset, length; a source
             kept on disk has none: its key names its file
