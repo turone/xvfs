@@ -97,11 +97,11 @@ The gzip representations are built once, at publication (180 ms for the
 |       8 | 95.6 ±5% | 87.1 ±10% | 47.2 ±23% |
 
 A bare worker takes ~22 ms. A cache worker adds its 10 ms of reads;
-`attach()` adds the library's modules and the projection of the snapshot
-— offsets, not bytes — and costs more at this set size: `sab` pools are
+`attach()` adds the library's modules and the replicas built from the
+snapshot — offsets, not bytes — and costs more at this set size: `sab` pools are
 ready 6, 8 and 11 ms after `cache` pools at 1, 2 and 4 workers (at 2
 workers every `sab` run lies above every `cache` run), 8 ms at 8. The
-cache's share grows with the set, the projection's does not.
+cache's share grows with the set, the replicas' does not.
 
 ### Memory of the process, MiB (the workers' `arrayBuffers` in brackets)
 
@@ -632,7 +632,7 @@ own behind.
 
 ## Publication events
 
-`bench/scenarios/events.js`: the cost `#apply` pays to build and deliver
+`bench/scenarios/events.js`: the cost `#publish` pays to build and deliver
 a `'publish'` event — nothing is built with no listener
 (`listenerCount('publish') === 0`); with some, one frozen event is built
 once and delivered to each.
@@ -670,5 +670,235 @@ Directionally the listener costs a little more — it is the only row of
 this scenario where the array is built at all, over 2000 keys — but at 5
 samples per run the noise (±21–44 %) is wider than the ~3 % gap: not a
 figure this page can stand behind. The mechanism is not in question (the
-array is built only when `listenerCount('publish') > 0`, `#apply` in
+array is built only when `listenerCount('publish') > 0`, `#publish` in
 `lib/kernel.js`); its cost at this N is not resolved at this sample size.
+
+## The limit of a part of an intake's run
+
+`bench/scenarios/intake.js` (opt-in: `node --expose-gc bench/run.js
+--only intake`): a shared tree takes a run of 20 000 ops at once
+— new nodes with a 64-byte payload each, under 100 parents — as batches
+of 1, 10 or 100 ops, with one linked worker, and the intake publishes it
+in parts of at most `limit` ops. `intake.part` is the longest
+synchronous step of a part on the main thread, from its first commit to
+the update posted to the worker; `intake.run` the whole run, until every
+batch settled. One run on the machine above, the median of 5 rounds after
+a warm-up, ms:
+
+| ops a batch | part, limit 1 000 | 2 000 | 5 000 | 10 000 | run, limit 1 000 | 10 000 |
+| ----------: | ----------------: | ----: | ----: | -----: | ---------------: | -----: |
+|           1 |               7.5 |  16.0 |  38.8 |   73.1 |              220 |    207 |
+|          10 |               2.2 |   4.1 |  10.1 |   18.8 |               72 |     60 |
+|         100 |               1.5 |   2.8 |   7.1 |   10.6 |               49 |     42 |
+
+The step grows with the batches more than with the ops: each batch is a
+commit and a delta of its own, ~7 µs a batch of one op where an op of a
+batch of a hundred costs ~1 µs. A source that commits one row a change
+sends batches of one op, so the default limit is 1 000 — a part of them
+holds the main thread ~7.5 ms here — while the whole run takes 6 to
+17 % longer than with a limit of 10 000: more publications, each an
+update and a round of ACKs. A batch larger than the limit is never cut:
+one of 10 000 ops is one commit of ~8–10 ms.
+
+## Node trees against the flat index
+
+Every indexed place became a tree of nodes in every thread
+([architecture → Node trees](architecture.md#node-trees)); the flat index
+it replaced is gone from the library, so the two are compared as two
+revisions: `main` at `ffb3e26`, the last with the flat index, against the
+trees at `7f199bf`, `node bench/ab.js main 7f199bf --pairs 4` over every
+scenario, on the machine above, Node 24.20, quiet. Every figure of the
+tables below comes from that one run but where its note names a probe of
+its own. Of its 618 figures 5 are better beyond the threshold
+(`bench/ab.js`), 63 worse, 144 move the same way in every pair without
+passing it, 4 disagree between pairs, and the others stay. The rest of
+this page was measured before the trees and stands as it was; where a
+figure there differs from one here, this section is the later.
+
+### Reads, ns/op
+
+| figure                         |   flat |   tree |
+| ------------------------------ | -----: | -----: |
+| `read.sab.1k.view`             |     89 |    126 |
+| `read.map.1k.view`             |     42 |     63 |
+| `views.acquireRelease`         |    101 |    144 |
+| `views.acquire` (N held) ¹     |    108 |    320 |
+| `views.withFileView.sync`      |    170 |    221 |
+| `read.sab.stat`                |     52 |     81 |
+| `read.sab.version`             |     18 |     37 |
+| `read.sab.exists`              |     18 |     36 |
+| `read.sab.1k.readFile`         |    345 |    371 |
+| `patch.strict.vfs.statSync`    |    421 |    510 |
+| `router.open.read.file`        |    211 |    241 |
+| `router.open.read.dir`         |    234 |    230 |
+| `router.open.read.miss`        |    265 |    272 |
+| `read.sab.readdir100`          | 49 300 | 41 340 |
+| `patch.vfs.readdirSync`        | 50 600 | 41 890 |
+| `patch.strict.vfs.readdirSync` | 13 130 |  4 756 |
+
+¹ Five rounds of 20 000 leases held at once, each after a full collection,
+right after the scenario starts: the longer code of a lookup takes about
+ten such rounds to settle. Round by round, the flat index settles at about
+50 ns and the trees at about 75 — the cost of the walk below.
+
+A lookup walks the names of its key, a `Map` of children a level, with
+no cache of paths (architecture, "A lookup walks"): a key of one name
+costs 27 ns where a hit of the flat `Map` with the key's hash cached
+cost 6, which `stat`, `version`, `exists` and a lease pay once per
+call. A representation keeps the view of its first read, so every lease
+and stream of it shares one (architecture, "Node trees"). The router
+walks once — to a file, a directory, or where the path broke off,
+`ENOTDIR` past a file — so a directory and a miss cost what they did.
+Listings read a directory's children and are faster: 16 % for a hundred
+files of a place, 64 % through the patched `readdirSync` under strict.
+
+### Writes and updates, µs p50
+
+| figure                        | flat | tree |
+| ----------------------------- | ---: | ---: |
+| `publish.map.raw` ²           |  1.9 |  2.8 |
+| `publish.sab.raw`             |  6.1 |  6.3 |
+| `batch.series.1`              |  4.3 |  4.7 |
+| `batch.writeFiles.1` ³        |  5.6 |  8.8 |
+| `events.publish.1`            |  4.6 |  5.3 |
+| `ack.inthread.1` (one link)   | 16.0 | 20.5 |
+| `ack.worker.1`                | 17.0 | 22.9 |
+| `retain.worker.1.held`        | 34.8 | 40.2 |
+| `batch.series.linked.1`       |  5.1 |  7.0 |
+| `batch.series.linked.512`     | 2935 | 4036 |
+| `batch.writeFiles.linked.512` | 1029 | 1018 |
+| `watch.epoch.100`             | 2340 | 2508 |
+| `pool.sab.1.update`           |  201 |  237 |
+| `compact.on` ³                |  190 |  248 |
+| `compact.off` ³               | 11.1 | 17.0 |
+
+² p99 6.4 against 22.4 µs over 400 calls; in a steady loop of the same
+1 KiB writes over 64 keys p99 is 4.2 against 4.7 µs, p50 1.2 against 1.6.
+³ Cold: 200 single calls after 20 of warm-up for `batch`, a new kernel
+for each of 20 calls for `compact`. In a steady loop a one-file
+`writeFiles` costs 3.0 against 4.3 µs, a `writeFile` 3.5 against 4.2.
+
+A commit plans its ops against the tree, logs them and applies the log as
+a delta — the main tree as every replica does — whether a link is there
+to send it to or not (architecture, "Snapshots and deltas"): 0.5–0.7 µs a
+write in a steady loop, which a `map` place pays alone, about 0.4 of it
+making the delta's columns — one `ArrayBuffer`, a view of it a column.
+With a link the delta travels in one structured clone on each side of the
+port: an update to a linked worker costs about 5 µs more than the flat
+index's entries did, a series of linked writes 2 µs more a write, while
+512 files in one `writeFiles` — one delta — cost what they did.
+`compact.on` is the unlink of a 700 KiB file that relocates 256 files of
+1 KiB in one commit; `compact.off`, the same unlink without compaction.
+The watcher's epoch of 100 files costs about what it did: the disk is
+asked how it spells a name only where fs.watch reported a rename
+(architecture, "Publication").
+
+### Compaction
+
+Not a scenario of `bench/`: `n` files of 1000 B in 1 MiB segments, the
+files of the first segment unlinked one by one; the unlink whose free
+takes a segment below the threshold compacts. The cost of that free
+cycle, ms, measured at `359086a`:
+
+|                 | 10⁵ files | 10⁶ files |
+| --------------- | --------: | --------: |
+| flat index      |       4.8 |   27 – 75 |
+| a walk of trees |        30 | 340 – 360 |
+| books (now)     |       2.0 |       2.2 |
+
+A compaction needs the owners of what its segment holds. The flat index
+scanned every entry; a walk of the trees did the same, six times slower,
+and in a nearly full pool — where a relocation finds no room — every
+free cycle with a candidate paid it again. The kernel keeps books of the
+published extents now (architecture, "Lifetime of shared bytes"), and a
+compaction costs its segment. A failed attempt still copies and rolls
+back what it placed, and the allocator looks for room per
+representation: 1–2 ms in that nearly full pool of 10⁶ files.
+
+### Memory
+
+| figure, MiB (the A/B run) |  flat |  tree |
+| ------------------------- | ----: | ----: |
+| `memory.start.heap`       |  6.39 |  6.77 |
+| `memory.published.heap`   |  6.92 |  7.29 |
+| `pool.sab.4.workers.heap` | 30.63 | 32.38 |
+| `mem.ack.worker.rss`      | 140.9 | 148.5 |
+| `mem.retain.main.rss`     |  76.1 |  89.1 |
+| `mem.retain.worker.rss`   | 164.8 | 166.2 |
+| `mem.publish.rss`         |  98.6 | 104.8 |
+| `mem.compact.rss`         |  85.9 |  83.5 |
+| `mem.views.rss`           | 304.7 | 192.2 |
+| `mem.read.rss`            | 201.5 | 255.6 |
+
+| figure, per file (probes; the trees at `6fcddbc`)      | flat | tree |
+| ------------------------------------------------------ | ---: | ---: |
+| main thread, heap (10⁵ files of 100 B, books incl.)    |  535 |  415 |
+| a worker's replica (10⁵ files, `bench … --only tree`)  |    — |  421 |
+| a replica with `stat.birthtime` and `stat.directories` |    — |  450 |
+| a snapshot on the port                                 |    — |   68 |
+
+The engine's code takes 0.4 MiB of every thread's heap
+(`memory.start.heap`, each worker of `pool` too). Per file the trees
+hold less than the flat index did; the books take 37 B a file on the
+main thread. A worker attaches 10⁵ files in 44 ms:
+19 to take the snapshot, 7 to clone it, 19 to build the replica. RSS after
+a scenario moves with the collector's timing: `mem.read.rss` and
+`mem.views.rss` range by a third between runs of the same code, and of
+the rows above only `mem.retain.main.rss` passes the threshold in every
+pair (+17 %), `mem.ack.worker.rss` and `mem.publish.rss` grow 5–6 % in
+every pair without passing it; a run of 200 000 writes under a link
+keeps the heap after a collection flat — nothing grows with writes.
+
+## Shared trees and rules of subtrees
+
+The shared trees
+([architecture → Shared trees](architecture.md#shared-trees)) — the
+README's page and route trees — and the rules of subtrees
+([→ Rules of subtrees](architecture.md#rules-of-subtrees)) came after the
+node trees. No scenario configures either but `intake`
+([above](#the-limit-of-a-part-of-an-intakes-run)), so the others measure
+what both cost the code that does not use them:
+`node bench/ab.js ad9f20f 6fcddbc --pairs 4` — the node trees before them
+against the branch's head — over every scenario, on the machine above,
+Node 24.20. Of its 618 figures none is better or worse beyond the
+threshold, 95 move the same way in every pair without passing it, 4
+disagree between pairs, and the others stay.
+
+- **Strict routing through a link is faster** in every pair, 15–24 % by
+  the medians: `router.strict.read.linked` 646 → 537 ns,
+  `router.strict.read.through` 855 → 647, `router.strict.mutate.linked`
+  637 → 539 — beyond the threshold in an earlier run of the same code
+  (633 → 532, 839 → 641, 631 → 516), not in this one, whose base runs
+  spread wider. The index of links walks a path name by name down a trie
+  (`PathTrie`, the rules' own), where it built the key of each directory
+  on the way and looked it up in a set.
+- **Their code** takes 0.26 MiB more of every thread's heap —
+  `memory.start.heap` 6.77 → 7.03 MiB, `pool.sab.8.workers.heap`
+  64.7 → 66.9 for eight workers — and 1.7 ms more of a `require` of the
+  kernel, 24.5 → 26.3 ms (a probe: a fresh process each time, 30 a side,
+  alternating), 1 ms of it `lib/intake.js` and `lib/shared-tree.js`: a
+  worker pays it once, as it starts.
+- **Per call and per file, nothing measurable.** The leases (`views`),
+  8–10 % slower in every pair of the earlier run, stay in this one; run
+  alone, 8 pairs of `views` move within 8 % both ways. Per file the trees
+  hold what they did at `ad9f20f`: 415 B on the main thread, 421 B a
+  replica, 450 B with `stat.birthtime` and `stat.directories` (the table
+  above). `mem.compact.rss` grows in every pair of both runs, 86 → 100
+  and 86 → 105 MiB by the medians: it is taken right after one
+  collection, while the segments of the 103 kernels the scenario made and
+  closed before it may still wait for the OS; settled, a probe of the
+  same kernels finds 1 MiB between the two revisions and every closed
+  kernel collected.
+
+The branch as a whole against `main`,
+`node bench/ab.js main 6fcddbc --pairs 4` over every scenario: of 618
+figures 4 are better beyond the threshold, 63 worse, 137 move the same
+way in every pair without passing it, 4 disagree — the balance of the
+node trees' run above. Every figure of its tables but memory lies within
+9 % of this run's — the A/A band of an `ns/op` figure is 14 % — and of
+memory the heap is 0.26 MiB more a thread, while `mem.compact.rss` and
+`mem.views.rss` move with the collector; `mem.retain.main.rss`, 17 %
+above `main` in that run, is level with it in this one (88.6 against
+89.3 MiB: `main`'s own figure moved). The three strict figures of links,
+level with `main` there, are better than `main` here in every pair,
+15–23 % by the medians.

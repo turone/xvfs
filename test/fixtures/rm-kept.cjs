@@ -8,7 +8,7 @@
 // loads it first, synchronously, over node:fs itself, whatever made the
 // kernel it routes to — one mode per run:
 //   initialized  initialize(), as the bootstrap does;
-//   projected    a projection and no initialize(), as a worker's attach().
+//   replicated   replicas and no initialize(), as a worker's attach().
 // In each, every form removes a tree holding files the routed listing does
 // not show — written after the scan, or never published — and one that
 // exists on disk only. Prints one JSON line.
@@ -52,7 +52,7 @@ const MODES = {
     k.watcher.close();
     return k;
   },
-  projected: async (root) =>
+  replicated: async (root) =>
     VfsKernel.fromSnapshot({ segments: [], places: {} }, config(PLACES), {
       appRoot: root,
       console: quiet,

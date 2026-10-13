@@ -8,6 +8,7 @@ import type { VfsKernel } from './lib/kernel.js';
 
 export * from './lib/bootstrap/attach.js';
 export * from './lib/cache.js';
+export * from './lib/shared-tree.js';
 export * from './lib/config.js';
 export * from './lib/errors.js';
 export * from './lib/kernel.js';

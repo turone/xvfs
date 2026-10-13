@@ -30,11 +30,12 @@ const { COPYFILE_EXCL, COPYFILE_FICLONE, COPYFILE_FICLONE_FORCE } =
 // A copy hands the source's raw input to the destination: the raw disk file
 // of a disk-origin place — prepared or not — or the canonical bytes of an
 // unprepared virtual entry, which are its raw input; never a prepared
-// result, never a companion. The destination publishes it through its own
-// pipeline: a disk place through its watcher, a virtual place through its
-// store, its preparer running once, with no file on disk. A prepared virtual
-// entry has no raw input left (ENOTSUP), a hidden source is EACCES, and a
-// recursive copy stays out of managed territory (ENOTSUP).
+// result, never a derived representation. The destination publishes it
+// through its own pipeline: a disk place through its watcher, a virtual
+// place through its store, its preparer running once, with no file on
+// disk. A prepared virtual entry has no raw input left (ENOTSUP), a hidden
+// source is EACCES, and a recursive copy stays out of managed territory
+// (ENOTSUP).
 
 const calls = { upper: 0, wrap: 0 };
 const PREPARERS = {
@@ -458,6 +459,7 @@ describe('single-file copies hand the raw input to the destination', () => {
     const native = await outcome(() => fs.promises.cp(from, dir));
     assert.equal(native.code, 'ERR_FS_CP_NON_DIR_TO_DIR');
     await k.fs('vs').writeFile('/src.txt', 'src');
+    k.fs('vmp').mkdir('/dir');
     k.fs('vmp').writeFile('/dir/in.txt', 'in');
     const store = at('vmp', 'dir');
     // Onto a virtual directory, and from a virtual source onto a disk one,
@@ -553,8 +555,39 @@ describe('single-file copies hand the raw input to the destination', () => {
     );
   });
 
-  it('compression: a companion is never copied as content', async () => {
-    // A disk-origin source: the raw disk file, not its gzip companion.
+  // A virtual place's directories are nodes of its own: copyFile into a
+  // missing one is ENOENT; cp makes the ones it lacks first, as node:fs cp
+  // does, and past a file in the way is refused as the copy (ENOTDIR).
+  it('into a virtual place: cp makes the directories it lacks, copyFile is ENOENT', async () => {
+    const src = external('v');
+    for (const place of ['vs', 'vmp']) {
+      const missing = at(place, `no${++n}`, 'x.txt');
+      refusal(
+        await outcome(() => fs.promises.copyFile(src, missing)),
+        'ENOENT',
+        'copyfile',
+        src,
+        missing,
+      );
+      const name = `new${++n}`;
+      const deep = at(place, name, 'deep', 'x.txt');
+      assert.equal(await outcome(() => fs.promises.cp(src, deep)), 'ok', place);
+      const files = k.fs(place);
+      assert.equal(files.readFile(`/${name}/deep/x.txt`, 'utf8'), 'v', place);
+      assert.ok(files.stat(`/${name}/deep`).isDirectory(), place);
+      const under = at(place, name, 'deep', 'x.txt', 'y.txt');
+      refusal(
+        await outcome(() => fs.promises.cp(src, under)),
+        'ENOTDIR',
+        'cp',
+        src,
+        under,
+      );
+    }
+  });
+
+  it('compression: a compressed representation is never copied as content', async () => {
+    // A disk-origin source: the raw disk file, not its gzip representation.
     assert.ok(k.fs('site').storedEncodings('/index.html').includes('gzip'));
     const html = fresh('i.html');
     fs.copyFileSync(at('site', 'index.html'), html);

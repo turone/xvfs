@@ -65,8 +65,15 @@ const refused = (err, code, syscall, where, dest) => {
   assert.equal(err.dest, dest);
 };
 
-// Every key a place projects, companions included.
-const keysOf = (k, name) => [...k.registry.get(name).files.keys()].sort();
+// Every key a place's tree holds, a directory's with a trailing slash.
+const keysOf = (k, name) => {
+  const { tree } = k.registry.get(name);
+  const keys = [];
+  for (const [node] of tree.walk(tree.get(''))) {
+    keys.push(tree.pathOf(node) + (tree.isDirectory(node) ? '/' : ''));
+  }
+  return keys.sort();
+};
 
 // What a read stream ends with: its error, or 'ok' once read to the end.
 const streamOutcome = (filePath) =>
@@ -150,6 +157,7 @@ describe('a trailing separator names a directory', () => {
         ]) {
           const dir = `/${label}`;
           const abs = (key) => at(name, key);
+          await place.mkdir(`${dir}/d`, { recursive: true });
           await place.writeFile(`${dir}/f.txt`, 'f');
           await place.writeFile(`${dir}/d/a.txt`, 'a');
           const keys = keysOf(k, name);
@@ -237,7 +245,7 @@ describe('a trailing separator names a directory', () => {
         // moves that directory.
         const v = k.fs('v');
         await v.writeFile('/x', 'x');
-        await v.writeFile('/dir/a', 'a');
+        await v.writeFiles({ '/dir/a': 'a' });
         const moves = await Promise.allSettled([
           v.unlink('/x'),
           v.rename('/dir', '/x'),

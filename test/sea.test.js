@@ -63,7 +63,10 @@ describe('SEA provider', () => {
       );
       assert.throws(() => bundle.writeFile('/x', 'y'), { code: 'EROFS' });
       const snap = k.snapshot();
-      assert.ok(snap.places.bundle.entries.length >= 3);
+      const { tree } = k.registry.get('bundle');
+      const files = [...tree.walk(tree.get(''), { containers: 'skip' })];
+      assert.ok(files.length >= 3, 'the assets');
+      assert.ok(snap.places.bundle, 'the tree of the place');
       w = VfsKernel.fromSnapshot(snap, k.config, { appRoot: root });
       assert.equal(w.fs('bundle').readFile('/sub/style.css', 'utf8'), 'a{}');
       assert.equal(k.watcher, null, 'nothing to watch');

@@ -1406,6 +1406,7 @@ describe('strict: the facade takes no key in a stream or 8.3 spelling', () => {
       for (const key of keys) assert.equal(v.readFile(key, 'utf8'), key);
       const m = k.fs('m');
       m.writeFiles([['/A~1.TXT', 'm']]);
+      m.mkdir('/SUB~1');
       await m.rename('/A~1.TXT', '/SUB~1/b.txt');
       assert.equal(m.readFile('/SUB~1/b.txt', 'utf8'), 'm');
     } finally {

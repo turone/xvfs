@@ -13,7 +13,6 @@ const { VfsConfig } = require('../lib/config.js');
 const { VfsKernel } = require('../lib/kernel.js');
 const fsPatch = require('../lib/adapters/fs-patch.js');
 const moduleHook = require('../lib/adapters/module-hook.js');
-const { bytecodeKey, compressedKey } = require('../lib/companion.js');
 const {
   tmpDir,
   writeTree,
@@ -31,6 +30,7 @@ const {
   activeResources,
   activeSince,
 } = require('./helpers.js');
+const { fileOf, publishedReps } = require('./helpers.js');
 
 // `prepare` is declared by one domain (fs, require, import) and prepares the
 // file itself: one preparer per extension in a place, run once per
@@ -560,7 +560,11 @@ describe('prepare pipeline: every consumer sees the canonical content', () => {
       assert.ok(Object.isFrozen(bundle.meta.nested), 'meta is deep-frozen');
       assert.equal(app.meta('/a.js'), bundle.meta);
       assert.equal(app.script('/s.css'), null, 'not a script source');
-      assert.deepEqual(app.readdir('/'), ['a.js', 's.css'], 'no companions');
+      assert.deepEqual(
+        app.readdir('/'),
+        ['a.js', 's.css'],
+        'no representation listed',
+      );
     } finally {
       done();
     }
@@ -573,7 +577,7 @@ describe('prepare pipeline: every consumer sees the canonical content', () => {
     try {
       assert.equal(fs.readFileSync(at('app', 'a.js'), 'utf8'), PREPARED);
       assert.equal(require(at('app', 'a.js')), 'PREPARED');
-      assert.ok(k.bytecode(at('app', 'a.js')), 'require.compile companion');
+      assert.ok(k.bytecode(at('app', 'a.js')), 'require.compile flavor');
       const mod = await import(pathToFileURL(at('esm', 'm.mjs')).href);
       assert.equal(mod.default, 'PREPARED');
     } finally {
@@ -720,6 +724,7 @@ describe('prepare pipeline: the preparer contract', () => {
     });
     try {
       const before = Date.now();
+      await v.mkdir('/d');
       await v.writeFile('/d/a.js', 'raw bytes');
       const [{ raw, file }] = seen;
       assert.ok(Buffer.isBuffer(raw));
@@ -956,7 +961,7 @@ describe('prepare pipeline: the preparer contract', () => {
     }
   });
 
-  it('a throwing preparer keeps the previous version and its companions', async () => {
+  it('a throwing preparer keeps the previous version and its representations', async () => {
     let fail = false;
     const { k, v, done } = await virtual(
       (raw) => {
@@ -968,11 +973,12 @@ describe('prepare pipeline: the preparer contract', () => {
     try {
       await v.writeFile('/a.js', 'module.exports = 1;');
       const place = k.registry.get('v');
-      const bytecode = place.bytecode('/a.js');
+      const payload = place.file('/a.js');
+      assert.ok(payload.others.requireBytecode);
       fail = true;
       await assert.rejects(v.writeFile('/a.js', 'module.exports = 2;'), /bad/);
       assert.equal(v.readFile('/a.js', 'utf8'), 'module.exports = 1;');
-      assert.equal(place.bytecode('/a.js'), bytecode);
+      assert.equal(place.file('/a.js'), payload, 'the very version');
     } finally {
       done();
     }
@@ -980,9 +986,9 @@ describe('prepare pipeline: the preparer contract', () => {
 
   // The preparer of the smallest file throws; the larger ones, published
   // first (#publishAll: largest first), have staged their sources and
-  // companions by then. initialize() rejects with that very error and
-  // closes the kernel: nothing is committed, published or versioned, every
-  // projection is empty, and the kernel keeps no runtime reference — the
+  // representations by then. initialize() rejects with that very error and
+  // closes the kernel: nothing is committed, published or versioned, no
+  // tree is left, and the kernel keeps no runtime reference — the
   // pool goes whole with what the failed attempt allocated in it. Last, as
   // an extra check, V8 collects that pool.
   it('a preparer that throws in initialize(): rejected, closed, nothing kept', async () => {
@@ -1010,6 +1016,7 @@ describe('prepare pipeline: the preparer contract', () => {
       const baseline = activeResources();
       const boom = new Error('bad input');
       let pool = null; // the kernel's pool, as its preparer saw it
+      let tree = null; // the place's tree, as its preparer saw it
       let closed = false;
       let late = 0; // preparer calls once initialize() rejected
       const k = new VfsKernel(config({ app: place }, { watch: true }), {
@@ -1018,6 +1025,7 @@ describe('prepare pipeline: the preparer contract', () => {
         preparers: {
           p: (raw) => {
             pool ??= k.cache;
+            tree ??= k.registry.get('app').tree;
             if (closed) late++;
             if (raw.toString() === 'bad') throw boom;
             return raw;
@@ -1045,14 +1053,15 @@ describe('prepare pipeline: the preparer contract', () => {
         for (const id of pool.pool.segments.keys()) {
           used += pool.registry.used(id);
         }
-        if (provider === 'sab') assert.ok(used > 0, 'staged, then left');
-        const index = pool.indexes.get('app')?.entries ?? new Map();
-        assert.deepEqual([...index], [], `${provider}: nothing committed`);
+        if (provider === 'sab') {
+          assert.ok(used > 0, 'staged, then left');
+          const nodes = [...tree.walk(tree.get(''))];
+          assert.deepEqual(nodes, [], `${provider}: nothing committed`);
+        }
         assert.equal(k.version, 0, `${provider}: no version`);
         assert.equal(k.nextUpdateId, 0, `${provider}: no vfs-update`);
-        // Empty projections.
-        assert.equal(k.registry.get('app').files.size, 0, provider);
-        assert.equal(k.sources.size, 0, provider);
+        // No tree.
+        assert.equal(k.registry.get('app').tree, null, provider);
         // No runtime reference: no pool, no watcher, no work left.
         assert.equal(k.cache, null, provider);
         assert.equal(k.compressor, null, provider);
@@ -1137,7 +1146,7 @@ describe('prepare pipeline: the preparer contract', () => {
       const v = k.fs('v');
       await v.writeFile('/a.js', 'x => x');
       assert.equal(v.readFile('/a.js', 'utf8'), '(x => x)');
-      assert.ok(!k.cache.entry('v', bytecodeKey('/a.js', 'script')));
+      assert.equal(fileOf(k, 'v', '/a.js').others, null);
       assert.throws(() => v.script('/a.js'), { code: 'ENOTSUP' });
     } finally {
       k.close();
@@ -1147,7 +1156,7 @@ describe('prepare pipeline: the preparer contract', () => {
 });
 
 describe('prepare pipeline: publication', () => {
-  it('source and companions travel in one update; raw bytes never stay', async () => {
+  it('a source and its representations travel in one update; raw bytes never stay', async () => {
     const { k, at, epoch, done } = await disk(
       { 'app/a.js': RAW },
       {
@@ -1163,11 +1172,12 @@ describe('prepare pipeline: publication', () => {
       { code },
     );
     try {
-      // The pool holds exactly the published entries: no raw copy anywhere.
+      // The pool holds exactly the published representations: no raw copy
+      // anywhere.
       const pooled = () => {
         let published = 0;
-        for (const entry of k.cache.index('app').entries.values()) {
-          published += entry.length;
+        for (const rep of publishedReps(k.registry.get('app'))) {
+          published += rep.length;
         }
         let used = 0;
         for (const id of k.cache.pool.segments.keys()) {
@@ -1183,15 +1193,10 @@ describe('prepare pipeline: publication', () => {
       await epoch([[at('app', 'a.js'), 'change']]);
       await acked;
       const [msg] = t.updates();
-      assert.deepEqual(
-        msg.places.app.entries.map(([key]) => key).sort(),
-        [
-          '/a.js',
-          bytecodeKey('/a.js', 'require'),
-          bytecodeKey('/a.js', 'script'),
-          compressedKey('/a.js', 'gzip'),
-        ].sort(),
-      );
+      assert.deepEqual(msg.places.app.replaced, ['/a.js']);
+      const { source, others } = fileOf(k, 'app', '/a.js');
+      assert.ok(source && others.requireBytecode && others.scriptBytecode);
+      assert.ok(others.gzip, 'with every representation');
       assert.equal(k.retired.size, 0, 'the old version went with the ACK');
       const [usedAfter, publishedAfter] = pooled();
       assert.equal(usedAfter, publishedAfter);
@@ -1202,7 +1207,8 @@ describe('prepare pipeline: publication', () => {
 
   // The files of a new directory reach the pipeline through a rescan of
   // it: each gets its prepared source and the bytecode built from it — every
-  // file and every companion in the one vfs-update of the epoch.
+  // file, with its directories and its representations, in the one
+  // vfs-update of the epoch.
   it('new files in a new directory: prepared sources and bytecode in one update', async () => {
     const prep = counted(code);
     const { k, at, epoch, done } = await disk(
@@ -1226,16 +1232,12 @@ describe('prepare pipeline: publication', () => {
       const [update, ...more] = t.updates();
       assert.deepEqual(more, [], 'one update');
       const published = ['/new/b.js', '/new/deep/c.js'];
-      assert.deepEqual(
-        update.places.app.entries.map(([key]) => key).sort(),
-        published
-          .flatMap((key) => [
-            key,
-            bytecodeKey(key, 'require'),
-            bytecodeKey(key, 'script'),
-          ])
-          .sort(),
-      );
+      assert.deepEqual(update.places.app.created.slice().sort(), published);
+      for (const key of published) {
+        const { others } = fileOf(k, 'app', key);
+        assert.ok(others.requireBytecode && others.scriptBytecode, key);
+      }
+      assert.ok(k.fs('app').stat('/new/deep').isDirectory());
       assert.deepEqual(prep.calls.slice(1).sort(), published, 'prepared once');
       const app = k.fs('app');
       for (const key of published) {
@@ -1250,12 +1252,12 @@ describe('prepare pipeline: publication', () => {
   });
 
   // Compaction moves published versions as they are: a prepared source and
-  // its companions leave the emptied segment together, in the one
+  // its representations leave the emptied segment together, in the one
   // vfs-update of the compaction, their bytes unchanged and nothing
   // prepared, compiled or compressed again. Forced: the file that filled the
   // segment is deleted, and its free — once the link ACKs its removal —
   // leaves the segment below the threshold.
-  it('compaction moves a prepared source and its companions together', async () => {
+  it('compaction moves a prepared source and its representations together', async () => {
     const prep = counted(code);
     const { k, at, epoch, done } = await disk(
       {
@@ -1286,39 +1288,43 @@ describe('prepare pipeline: publication', () => {
       },
     );
     try {
-      const keys = [
-        '/a.js',
-        bytecodeKey('/a.js', 'require'),
-        bytecodeKey('/a.js', 'script'),
-        compressedKey('/a.js', 'gzip'),
-      ];
-      const entries = () => keys.map((key) => k.cache.entry('app', key));
+      // The source and its derived representations, by kind.
+      const reps = () => {
+        const { source, others } = fileOf(k, 'app', '/a.js');
+        return [
+          source,
+          others.requireBytecode,
+          others.scriptBytecode,
+          others.gzip,
+        ];
+      };
       // Largest first: fill1 opens the first segment, fill2 the second, and
-      // the prepared source and its companions join fill1.
-      const segment = k.cache.entry('app', '/fill1.bin').segmentId;
-      assert.notEqual(k.cache.entry('app', '/fill2.bin').segmentId, segment);
-      const before = entries();
-      assert.ok(before.every((entry) => entry?.segmentId === segment));
-      const bytes = keys.map((key) =>
-        Buffer.from(k.registry.get('app').files.get(key).data),
-      );
+      // the prepared source and its representations join fill1.
+      const segment = fileOf(k, 'app', '/fill1.bin').source.segmentId;
+      assert.notEqual(fileOf(k, 'app', '/fill2.bin').source.segmentId, segment);
+      const before = reps();
+      assert.ok(before.every((rep) => rep?.segmentId === segment));
+      const bytes = before.map((rep) => Buffer.from(rep.data));
+      const { version } = fileOf(k, 'app', '/a.js');
       const t = tap(k);
       fs.unlinkSync(at('app', 'fill1.bin'));
       await epoch([[at('app', 'fill1.bin'), 'delete']]);
       assert.ok(await until(() => t.updates().length === 2, 4000), 'moved');
       const [removal, moved] = t.updates();
-      assert.deepEqual(removal.places.app.removals, ['/fill1.bin']);
+      assert.deepEqual(removal.places.app.removed, ['/fill1.bin']);
+      const { delta, ...files } = moved.places.app;
+      assert.ok(delta, 'one delta of the tree');
       assert.deepEqual(
-        moved.places.app.entries.map(([key]) => key).sort(),
-        [...keys].sort(),
-        'the source and its companions, in one update',
+        files,
+        { created: [], replaced: [], removed: [], moved: [] },
+        'a relocation names no file',
       );
-      const after = entries();
-      assert.ok(after.every((entry) => entry.segmentId !== segment));
-      const { files } = k.registry.get('app');
-      keys.forEach((key, i) => {
-        assert.deepEqual(Buffer.from(files.get(key).data), bytes[i], key);
+      const after = reps();
+      assert.ok(after.every((rep) => rep.segmentId !== segment));
+      after.forEach((rep, i) => {
+        assert.deepEqual(Buffer.from(rep.data), bytes[i], String(i));
       });
+      assert.equal(fileOf(k, 'app', '/a.js').version, version, 'kept');
       const app = k.fs('app');
       assert.equal(app.readFile('/a.js', 'utf8'), PREPARED);
       assert.equal(app.script('/a.js').source, PREPARED);

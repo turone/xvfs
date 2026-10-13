@@ -10,7 +10,6 @@ const { pathToFileURL } = require('node:url');
 const { VfsConfig } = require('../lib/config.js');
 const moduleHook = require('../lib/adapters/module-hook.js');
 const { createBytecode } = require('../lib/pipeline.js');
-const { bytecodeKey } = require('../lib/companion.js');
 const {
   tmpDir,
   writeTree,
@@ -88,7 +87,7 @@ describe('V8 cached data facts (script domain)', () => {
   // V8 validates cached data against the source *length* (plus version and
   // flags), not its content: a same-length divergent source is silently
   // accepted. That is why the VFS publishes the prepared source as the
-  // canonical content and never lets source and companion drift apart.
+  // canonical content and never lets source and bytecode drift apart.
   it('is rejected for a source of a different length (control)', async () => {
     const produced = createBytecode(SOURCE, {});
     const other = SOURCE.replace('hello', 'good evening');
@@ -110,7 +109,7 @@ describe('V8 cached data facts (script domain)', () => {
 // Live reload through the real pipeline: preparer → SAB → script bytecode →
 // one vfs-update → linked worker. Two versions of identical length are the
 // hard case: V8 would accept the stale cached data for the new source, so
-// only the epoch discipline (source and companion replaced together)
+// only the epoch discipline (source and bytecode replaced together)
 // guarantees the worker runs the new code.
 describe('script domain: live reload in a linked worker', () => {
   const V1 = '({ user }) => `hello ${user}`';
@@ -218,8 +217,12 @@ describe('script domain: live reload in a linked worker', () => {
     await until(() => k.acks.size === 0 && k.retired.size === 0, 4000);
 
     const msg = observer.updates().at(-1);
-    const keys = msg.places.api.entries.map(([key]) => key).sort();
-    assert.deepEqual(keys, ['/h.js', bytecodeKey('/h.js', 'script')].sort());
+    assert.deepEqual(msg.places.api.replaced, ['/h.js']);
+    const { others } = k.registry.get('api').file('/h.js');
+    assert.ok(
+      others.scriptBytecode,
+      'one payload: the source and its bytecode',
+    );
 
     const r = await ask('/h.js');
     assertPrepared(V2, r.source);
@@ -229,10 +232,10 @@ describe('script domain: live reload in a linked worker', () => {
   });
 });
 
-// A bundle without a companion has `cachedData` undefined — never null,
+// A bundle without bytecode has `cachedData` undefined — never null,
 // which vm.Script refuses — so `{ ...scriptOptions, cachedData }` holds for
 // every bundle. A rejection is one isolate's: the source runs as it is
-// there, and the file, its companion and its version stay as published.
+// there, and the file, its bytecode and its version stay as published.
 describe('script domain: no cached data, and cached data an isolate rejects', () => {
   const RUN = `
     const vm = require('node:vm');
@@ -290,7 +293,7 @@ describe('script domain: no cached data, and cached data an isolate rejects', ()
     }
   });
 
-  it('cached data a worker rejects: the source runs there; the file, its companion and its version stay', async () => {
+  it('cached data a worker rejects: the source runs there; the file, its bytecode and its version stay', async () => {
     const root = tmpDir('script-reject');
     const k = await kernel(root, {
       v: {

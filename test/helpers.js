@@ -6,7 +6,7 @@ const os = require('node:os');
 const path = require('node:path');
 const { createHook } = require('node:async_hooks');
 const { VfsConfig } = require('../lib/config.js');
-const { VfsKernel } = require('../lib/kernel.js');
+const { VfsKernel, takeSnapshot } = require('../lib/kernel.js');
 const disk = require('../lib/disk.js');
 
 // Shared test helpers: temp trees, quiet kernels, small configs.
@@ -75,12 +75,14 @@ const until = async (predicate, ms = 3000, step = 25) => {
   return predicate();
 };
 
-// A worker stand-in on a real link(), in this thread: records every message
-// the main kernel posts and, unless `ack: false`, ACKs each vfs-update like
-// an attached worker that reads nothing. `id` is its link id on main.
+// A worker stand-in on a real link(), in this thread: takes the snapshot off
+// the port first, as attach() does, then records every message the main
+// kernel posts and, unless `ack: false`, ACKs each vfs-update like an
+// attached worker that reads nothing. `id` is its link id on main.
 const tap = (k, { ack = true } = {}) => {
   const { vfs } = k.link();
   const id = [...k.links.keys()].at(-1);
+  const snapshot = takeSnapshot(vfs.port);
   const messages = [];
   vfs.port.on('message', (msg) => {
     messages.push(msg);
@@ -90,16 +92,17 @@ const tap = (k, { ack = true } = {}) => {
   });
   vfs.port.unref();
   const updates = () => messages.filter((m) => m.name === 'vfs-update');
-  return { id, port: vfs.port, messages, updates };
+  return { id, port: vfs.port, snapshot, messages, updates };
 };
 
-// A worker kernel attached to a real link(), in this thread: it projects the
-// snapshot, applies deltas and ACKs them through the port exactly like
-// attach(), without spawning a thread.
+// A worker kernel attached to a real link(), in this thread: it takes the
+// snapshot off the port, replicates its trees, applies deltas and ACKs them through
+// the port exactly like attach(), without spawning a thread.
 const worker = (k, options = {}) => {
   const { vfs } = k.link();
   const id = [...k.links.keys()].at(-1);
-  const w = VfsKernel.fromSnapshot(vfs.snapshot, new VfsConfig(vfs.config), {
+  const snapshot = takeSnapshot(vfs.port);
+  const w = VfsKernel.fromSnapshot(snapshot, new VfsConfig(vfs.config), {
     appRoot: vfs.appRoot,
     console: quiet,
     port: vfs.port,
@@ -143,21 +146,55 @@ const nextEvent = (emitter, event, ms = WAIT) => {
 
 const nextMessage = (port, ms) => nextEvent(port, 'message', ms);
 
+// The payload published under `key` in the place `name` of a kernel — its
+// version, attributes and representations (lib/tree.js) — or null.
+const fileOf = (k, name, key) => k.registry.get(name).file(key);
+
+// The representations a shared place's tree publishes, each once.
+const publishedReps = function* (place) {
+  const { tree } = place;
+  for (const [node] of tree.walk(tree.get(''), { containers: 'skip' })) {
+    const { source, others } = tree.payloadOf(node);
+    if (source) yield source;
+    for (const field in others) if (others[field]) yield others[field];
+  }
+};
+
+// The representations a shared tree publishes: the payload of any
+// node, the root's included.
+const treeReps = function* (tree) {
+  const root = tree.get('');
+  if (root === null) return;
+  const nodes = [root];
+  for (const [node] of tree.walk(root)) nodes.push(node);
+  for (const node of nodes) {
+    const payload = tree.payloadOf(node);
+    if (payload === null) continue;
+    if (payload.source) yield payload.source;
+    for (const field in payload.others) {
+      if (payload.others[field]) yield payload.others[field];
+    }
+  }
+};
+
 // The bytes of a main kernel's pool in allocations that neither a published
-// entry nor a retired version accounts for: what a failed publication left
-// behind. 0 whenever no publication is in flight, whatever the ACKs still
-// pending; the count of segments hides such a leak inside a segment.
+// representation nor a retired one accounts for: what a failed publication
+// left behind. 0 whenever no publication is in flight, whatever the ACKs
+// still pending; the count of segments hides such a leak inside a segment.
 const leakedBytes = (k) => {
   let used = 0;
   for (const id of k.cache.pool.segments.keys()) {
     used += k.cache.registry.used(id);
   }
-  for (const { entries } of k.cache.indexes.values()) {
-    for (const entry of entries.values()) {
-      if (entry.kind === 'shared') used -= entry.length;
-    }
+  for (const place of k.registry.all()) {
+    if (place.provider !== 'sab' && place.provider !== 'sea') continue;
+    for (const rep of publishedReps(place)) used -= rep.length;
   }
-  for (const record of k.retired.values()) used -= record.entry.length;
+  for (const host of k.trees.values()) {
+    if (host.tree !== null)
+      for (const rep of treeReps(host.tree)) used -= rep.length;
+  }
+  for (const record of k.retired.values()) used -= record.extent.length;
   return used;
 };
 
@@ -305,6 +342,8 @@ module.exports = {
   within,
   WAIT,
   diskCalls,
+  fileOf,
+  publishedReps,
   leakedBytes,
   turn,
   restOf,

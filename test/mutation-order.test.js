@@ -153,7 +153,7 @@ describe('mutation ordering: same key', () => {
         results.map((r) => r.reason?.code ?? r.status),
         ['fulfilled', 'fulfilled', 'fulfilled'],
       );
-      assert.equal(v.exists('/c'), false);
+      assert.ok(v.stat('/c').isDirectory(), 'the directory mkdir made');
       assert.equal(k.mutations.size, 0);
     } finally {
       k.close();
@@ -312,8 +312,8 @@ describe('mutation ordering: independent keys', () => {
 });
 
 describe('mutation ordering: rename and rm coordination', () => {
-  // `require.compile` gives every .js source a bytecode companion, so these
-  // tests can also prove no orphan companion survives.
+  // `require.compile` gives every .js source a bytecode representation,
+  // compiled under its path: a rename publishes the file anew, with its own.
   const compiled = {
     v: {
       origin: 'virtual',
@@ -321,9 +321,8 @@ describe('mutation ordering: rename and rm coordination', () => {
       require: { compile: ['js'] },
     },
   };
-  const requireCompanion = (key) => `${key}\0require:bytecode`;
 
-  it('rename(src→dst) racing write(dst): deterministic result, no orphan companion', async () => {
+  it('rename(src→dst) racing write(dst): deterministic result, the destination its own bytecode', async () => {
     const root = tmpDir('vfs-order');
     const k = await kernel(root, compiled);
     try {
@@ -344,15 +343,11 @@ describe('mutation ordering: rename and rm coordination', () => {
         'write always follows the rename it raced',
       );
       assert.equal(v.exists('/r1.js'), false);
-      assert.equal(
-        k.registry.get('v').files.has(requireCompanion('/r1.js')),
-        false,
-        'no orphan companion of the renamed-away source',
-      );
+      assert.equal(k.registry.get('v').file('/r1.js'), null, 'nothing left');
       assert.notEqual(
         k.registry.get('v').bytecode('/r2.js', 'require'),
         null,
-        'destination has its own companion',
+        'destination has its own bytecode',
       );
       assert.equal(k.mutations.size, 0);
     } finally {
@@ -381,11 +376,7 @@ describe('mutation ordering: rename and rm coordination', () => {
       assert.equal(v.readFile('/a.js', 'utf8'), 'A');
       assert.equal(v.exists('/b.js'), false);
       const place = k.registry.get('v');
-      assert.equal(
-        place.files.has(requireCompanion('/b.js')),
-        false,
-        'no orphan companion left on /b.js',
-      );
+      assert.equal(place.file('/b.js'), null, 'nothing left on /b.js');
       assert.notEqual(place.bytecode('/a.js', 'require'), null);
       assert.equal(k.mutations.size, 0);
     } finally {
@@ -394,34 +385,25 @@ describe('mutation ordering: rename and rm coordination', () => {
     }
   });
 
-  it('recursive rm(dir) racing write(dir/child.js): deterministic result, no orphan, no resurrection', async () => {
+  it('recursive rm(dir) racing write(dir/child.js): deterministic result, no resurrection', async () => {
     const root = tmpDir('vfs-order');
     const k = await kernel(root, compiled);
     try {
       const v = k.fs('v');
+      await v.mkdir('/d');
       await v.writeFile('/d/one.js', '1');
       // `rm(null, ...)` takes the exclusive place barrier synchronously before
       // `writeFile('/d/two.js', ...)` is evaluated, so the write is
-      // deterministically queued behind the whole recursive removal.
+      // deterministically queued behind the whole recursive removal — and
+      // finds no directory any more.
       const [removed, wrote] = await Promise.all([
         settle(v.rm('/d', { recursive: true })),
         settle(v.writeFile('/d/two.js', '2')),
       ]);
       assert.equal(removed.ok, true);
-      assert.equal(wrote.ok, true);
-      assert.deepEqual(
-        v.readdir('/d'),
-        ['two.js'],
-        'the write always follows the rm it raced',
-      );
-      const place = k.registry.get('v');
-      assert.equal(place.files.has('/d/one.js'), false);
-      assert.equal(
-        place.files.has(requireCompanion('/d/one.js')),
-        false,
-        'no orphan companion of the removed file',
-      );
-      assert.notEqual(place.bytecode('/d/two.js', 'require'), null);
+      assert.deepEqual(wrote, { ok: false, code: 'ENOENT' });
+      assert.equal(v.exists('/d'), false, 'the write always follows the rm');
+      assert.equal(k.registry.get('v').file('/d/one.js'), null);
       assert.equal(k.mutations.size, 0);
     } finally {
       k.close();
@@ -436,7 +418,7 @@ describe('mutation ordering: rename and rm coordination', () => {
     });
     try {
       const v = k.fs('v');
-      await v.writeFile('/d/one.txt', '1');
+      await v.writeFiles({ '/d/one.txt': '1' });
       const gate = Promise.withResolvers();
       let atGate = false;
       const original = k.publishVirtual.bind(k);
@@ -486,7 +468,7 @@ describe('mutation ordering: rename and rm coordination', () => {
       const gone = v.unlink('/x');
       const moved = v.rename('/x', '/y');
       await within(gone, 'the unlink of /x, with /y at its gate');
-      await within(v.writeFile('/x/a', 'a'), 'the write of /x/a');
+      await within(v.writeFiles({ '/x/a': 'a' }), 'the write of /x/a');
       assert.equal(atGate, true, 'the write of /y is at its gate');
       gate.resolve();
       await within(held, 'the write of /y, its gate open');
@@ -517,10 +499,10 @@ describe('mutation ordering: rename and rm coordination', () => {
     });
     try {
       const v = k.fs('v');
-      await v.writeFile('/d/one.txt', '1');
+      await v.writeFiles({ '/d/one.txt': '1' });
       await Promise.all([
         settle(v.rm('/d', { recursive: true })),
-        settle(v.writeFile('/other/file.js', 'kept')),
+        settle(v.writeFiles({ '/other/file.js': 'kept' })),
       ]);
       assert.equal(v.readFile('/other/file.js', 'utf8'), 'kept');
     } finally {
@@ -538,8 +520,7 @@ describe('mutation lifecycle and cleanup', () => {
     });
     try {
       const v = k.fs('v');
-      await v.writeFile('/a.txt', 'a');
-      await v.writeFile('/d/b.txt', 'b');
+      await v.writeFiles({ '/a.txt': 'a', '/d/b.txt': 'b' });
       // Every kind of turn: a key, several keys, the place's barrier.
       const queued = [
         ['writeFile', v.writeFile('/late.txt', 'late')],
@@ -552,6 +533,7 @@ describe('mutation lifecycle and cleanup', () => {
         ],
         ['unlink', v.unlink('/a.txt')],
         ['mkdir', v.mkdir('/n')],
+        ['rmdir', v.rmdir('/d')],
         ['rename', v.rename('/a.txt', '/c.txt')],
         ['rm', v.rm('/d', { recursive: true })],
       ];
@@ -578,32 +560,47 @@ describe('mutation lifecycle and cleanup', () => {
 
   // A mutation whose kernel closes after its publication's last step and
   // before the commit published nothing: it rejects as the closed kernel,
-  // never resolves. The seam: #publishEntry records the source of a
-  // disk-origin place (`sources`) once it staged the file, the last step
-  // before the commit; a virtual place has no record there, so the test
-  // puts one that closes the kernel.
+  // never resolves. The seam: the compressor's last question about the
+  // key, asked in the publication's last step but one (publication.js,
+  // compress) — its second, or its only one where the key compiles and
+  // nothing asks it first; two microtasks later the publication has
+  // returned and its write is staged, and the kernel closes then — before
+  // the commit, which finds it closed (#commit). A rename that publishes
+  // the file anew (into a compiled extension) has the same seam; one that
+  // moves it as it is commits in the turn its checks pass.
   it('a mutation whose kernel closes before its commit rejects as the closed kernel', async () => {
     const mutations = [
-      ['writeFile', (v) => v.writeFile('/b.txt', 'b')],
-      ['appendFile', (v) => v.appendFile('/a.txt', '+')],
-      ['rename', (v) => v.rename('/a.txt', '/c.txt')],
+      ['writeFile', (v) => v.writeFile('/b.txt', 'b'), 2],
+      ['appendFile', (v) => v.appendFile('/a.txt', '+'), 2],
+      ['rename', (v) => v.rename('/a.txt', '/c.js'), 1],
     ];
-    for (const [what, mutate] of mutations) {
+    const compiled = {
+      v: {
+        origin: 'virtual',
+        fs: { writable: true },
+        require: { compile: ['js'] },
+      },
+    };
+    for (const [what, mutate, last] of mutations) {
       const root = tmpDir('vfs-order');
-      const k = await kernel(root, {
-        v: { origin: 'virtual', fs: { writable: true } },
-      });
+      const k = await kernel(root, compiled);
       try {
         const v = k.fs('v');
         await v.writeFile('/a.txt', 'a');
         const updates = k.nextUpdateId;
         let closed = 0;
-        k.sources.set('v', {
-          set: () => {
-            closed++;
-            k.close();
-          },
-        });
+        let asked = 0;
+        k.compressor.compressible = () => {
+          if (++asked === last) {
+            queueMicrotask(() =>
+              queueMicrotask(() => {
+                closed++;
+                k.close();
+              }),
+            );
+          }
+          return false;
+        };
         await assert.rejects(
           mutate(v),
           {
@@ -622,41 +619,30 @@ describe('mutation lifecycle and cleanup', () => {
     }
   });
 
-  // The rename of a subtree copies its sources, checks the kernel after
-  // each copy, then commits the copies in a later microtask. The last copy
-  // hands its entry over through a thenable that closes the kernel in the
-  // microtask right after the one that goes on with it: after that check,
-  // before the commit.
-  it('a subtree rename whose kernel closes before its commit rejects as the closed kernel', async () => {
+  // A subtree moves as it is: nothing is copied, and the move is
+  // committed in the turn its checks pass — no await for a close to come
+  // in (Т23).
+  it('a subtree rename copies nothing and commits in its turn', async () => {
     const root = tmpDir('vfs-order');
     const k = await kernel(root, {
       v: { origin: 'virtual', fs: { writable: true } },
     });
     try {
       const v = k.fs('v');
-      await v.writeFile('/d/a.txt', 'a');
-      await v.writeFile('/d/b.txt', 'b');
+      await v.writeFiles({ '/d/a.txt': 'a', '/d/b.txt': 'b' });
       const updates = k.nextUpdateId;
-      const allocate = k.cache.allocate.bind(k.cache);
       let copies = 0;
+      const allocate = k.cache.allocate.bind(k.cache);
       k.cache.allocate = (file, options) => {
-        const entry = allocate(file, options);
-        if (++copies < 2) return entry;
-        return {
-          then(resolve, reject) {
-            entry.then((value) => {
-              resolve(value);
-              queueMicrotask(() => k.close());
-            }, reject);
-          },
-        };
+        copies++;
+        return allocate(file, options);
       };
-      await assert.rejects(v.rename('/d', '/e'), {
-        code: 'ERR_VFS_CLOSED',
-        message: '[vfs] kernel closed before publication',
-      });
-      assert.equal(copies, 2, 'both sources copied');
-      assert.equal(k.nextUpdateId, updates, 'nothing published');
+      const moved = v.rename('/d', '/e');
+      await new Promise((r) => setImmediate(r));
+      k.close();
+      await moved;
+      assert.equal(copies, 0, 'nothing copied');
+      assert.equal(k.nextUpdateId, updates + 1, 'published before the close');
       assert.equal(k.mutations.size, 0);
     } finally {
       k.close();

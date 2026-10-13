@@ -1131,3 +1131,116 @@ describe('VfsConfig.fromArgv: lists', () => {
     );
   });
 });
+
+describe('VfsConfig: shared trees', () => {
+  const tree = (raw, defaults) =>
+    new VfsConfig({ defaults, trees: { pages: raw } }).tree('pages');
+
+  it('resolves a tree: the engine settings, compression, views, the intake', () => {
+    const t = tree({ ids: 'number', containers: [2, 1] });
+    assert.deepEqual(t, {
+      name: 'pages',
+      ids: 'number',
+      containers: [2, 1],
+      birthtime: false,
+      aggregates: { classes: false, subtreeVersion: false },
+      maxNodes: 2 ** 24,
+      maxFileSize: 10_000_000,
+      compress: null,
+      zeroCopy: false,
+      intake: {
+        seq: 'source',
+        window: 10,
+        limit: 1000,
+        gapTimeout: 2000,
+        spaceTimeout: 2000,
+      },
+    });
+    assert.ok(Object.isFrozen(t) && Object.isFrozen(t.intake));
+    const s = tree(
+      {
+        ids: 'string',
+        birthtime: true,
+        aggregates: { classes: true },
+        maxNodes: 1000,
+        maxFileSize: '1 mib',
+        compress: { encodings: ['br'] },
+        zeroCopy: true,
+        intake: { seq: 'intake', window: 0, limit: 1, gapTimeout: 0 },
+      },
+      { memory: { segmentSize: '16 mib', limit: '32 mib' } },
+    );
+    assert.equal(s.maxFileSize, 1024 * 1024);
+    assert.deepEqual(s.aggregates, { classes: true, subtreeVersion: false });
+    assert.deepEqual(
+      s.compress.codecs.map((c) => c.encoding),
+      ['br'],
+    );
+    assert.deepEqual(s.intake, {
+      seq: 'intake',
+      window: 0,
+      limit: 1,
+      gapTimeout: 0,
+      spaceTimeout: 2000,
+    });
+    assert.deepEqual(new VfsConfig({}).trees, []);
+    assert.equal(new VfsConfig({}).tree('pages'), null);
+  });
+
+  it('refuses what a tree cannot be', () => {
+    for (const [raw, re] of [
+      [{}, /trees\.pages\.ids must be "number" or "string"/],
+      [{ ids: 'number', containers: 1 }, /containers must be an array/],
+      [{ ids: 'number', containers: [-1] }, /a class is an integer/],
+      [{ ids: 'number', containers: [3, 3] }, /class 3 twice/],
+      [{ ids: 'number', maxNodes: 0 }, /maxNodes must be an integer/],
+      [{ ids: 'number', maxNodes: 2 ** 24 + 1 }, /must not exceed 2\^24/],
+      [{ ids: 'number', maxFileSize: '1 gib' }, /must not exceed .*segment/],
+      [
+        { ids: 'number', compress: { encodings: ['gzip'], retainRaw: true } },
+        /a tree keeps its sources/,
+      ],
+      [{ ids: 'number', intake: { seq: 'auto' } }, /intake\.seq must be/],
+      [{ ids: 'number', intake: { limit: 0 } }, /intake\.limit must be/],
+      [{ ids: 'number', intake: { window: 1.5 } }, /intake\.window must be/],
+      [{ ids: 'number', intake: { every: 1 } }, /unknown option "every"/],
+      [{ ids: 'number', aggregates: { all: true } }, /unknown option "all"/],
+      [{ ids: 'number', root: 1 }, /unknown option "root"/],
+    ]) {
+      fails({ trees: { pages: raw } }, re);
+    }
+    fails({ trees: 1 }, /trees must be an object/);
+    fails({ trees: { 'bad name': { ids: 'number' } } }, /invalid tree name/);
+  });
+
+  it('a tree takes no name of a place, in any case, nor of another tree', () => {
+    fails(
+      { places: { site: { fs: true } }, trees: { Site: { ids: 'number' } } },
+      /tree "Site" takes the name of "site"/,
+    );
+    fails(
+      { trees: { a: { ids: 'number' }, A: { ids: 'string' } } },
+      /tree "A" takes the name of "a"/,
+    );
+  });
+
+  it('--vfs.trees.<name>.* overrides a tree, its containers as numbers', () => {
+    const c = VfsConfig.fromArgv(
+      [
+        'node',
+        '--',
+        '--vfs.trees.my.pages.intake.window=20',
+        '--vfs.trees.my.pages.containers=1,2',
+        '--vfs.trees.my.pages.compress.encodings=gzip,br',
+      ],
+      { trees: { 'my.pages': { ids: 'number' } } },
+    );
+    const t = c.tree('my.pages');
+    assert.equal(t.intake.window, 20);
+    assert.deepEqual(t.containers, [1, 2]);
+    assert.deepEqual(
+      t.compress.codecs.map((x) => x.encoding),
+      ['gzip', 'br'],
+    );
+  });
+});

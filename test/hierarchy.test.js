@@ -16,11 +16,13 @@ const {
 } = require('./helpers.js');
 
 // A virtual place keeps the hierarchy a filesystem has: a path is a file or
-// a directory, never both. A key under a file is ENOTDIR, a file where a
-// directory is EISDIR — for writes, appends, copies, file renames and
-// subtree moves alike, checked by one helper before anything is published.
-// A key whose publication has begun counts already, so two mutations
-// running together cannot create /f and /f/x both as files.
+// a directory, never both, and a directory is a node of its own, which
+// mkdir makes. A key under a file is ENOTDIR, a file where a directory is
+// EISDIR, a file in a directory that is not there ENOENT — for writes,
+// appends, copies, file renames and subtree moves alike, checked by one
+// helper before anything is published. A key whose publication has begun
+// counts already, so two mutations running together cannot create /f and
+// /f/x both as files.
 
 const PLACES = {
   v: {
@@ -87,8 +89,15 @@ const refused = (err, code, syscall, where, dest) => {
   assert.equal(err.dest, dest);
 };
 
-// Every key a place projects, companions included.
-const keysOf = (k, name) => [...k.registry.get(name).files.keys()].sort();
+// Every key a place's tree holds, a directory's with a trailing slash.
+const keysOf = (k, name) => {
+  const { tree } = k.registry.get(name);
+  const keys = [];
+  for (const [node] of tree.walk(tree.get(''))) {
+    keys.push(tree.pathOf(node) + (tree.isDirectory(node) ? '/' : ''));
+  }
+  return keys.sort();
+};
 
 describe('virtual hierarchy', () => {
   for (const name of ['m', 'v']) {
@@ -96,9 +105,12 @@ describe('virtual hierarchy', () => {
       await withPlaces(async (k, { at }) => {
         const place = k.fs(name);
         await place.writeFile('/f.txt', 'f');
+        await place.mkdir('/dir');
         await place.writeFile('/dir/a.txt', 'a');
         const keys = keysOf(k, name);
         for (const [run, code, key] of [
+          [() => place.writeFile('/none/x', 'x'), 'ENOENT', '/none/x'],
+          [() => place.appendFile('/none/x', 'x'), 'ENOENT', '/none/x'],
           [() => place.writeFile('/f.txt/x', 'x'), 'ENOTDIR', '/f.txt/x'],
           [() => place.writeFile('/f.txt/y/z', 'z'), 'ENOTDIR', '/f.txt/y/z'],
           [() => place.appendFile('/f.txt/x', 'x'), 'ENOTDIR', '/f.txt/x'],
@@ -120,13 +132,17 @@ describe('virtual hierarchy', () => {
     it(`${name}: a rename never puts a key under a file or a file on a directory`, async () => {
       await withPlaces(async (k, { at }) => {
         const place = k.fs(name);
-        await place.writeFile('/f.txt', 'f');
-        await place.writeFile('/a.txt', 'a');
-        await place.writeFile('/old/b.txt', 'b');
-        await place.writeFile('/old/sub/c.txt', 'c');
-        await place.writeFile('/dir/d.txt', 'd');
+        await place.writeFiles({
+          '/f.txt': 'f',
+          '/a.txt': 'a',
+          '/old/b.txt': 'b',
+          '/old/sub/c.txt': 'c',
+          '/dir/d.txt': 'd',
+        });
         const keys = keysOf(k, name);
         for (const [from, to, code] of [
+          ['/a.txt', '/none/x', 'ENOENT'],
+          ['/old', '/none/new', 'ENOENT'],
           ['/a.txt', '/f.txt/x', 'ENOTDIR'],
           ['/a.txt', '/a.txt/x', 'ENOTDIR'],
           ['/a.txt', '/dir', 'EISDIR'],
@@ -180,20 +196,28 @@ describe('virtual hierarchy', () => {
   it('v: mutations running together cannot create a file and a key under it', async () => {
     await withPlaces(async (k) => {
       const v = k.fs('v');
-      for (const [first, second] of [
-        ['/f', '/f/x'],
-        ['/g/x', '/g'],
+      // A file on its way under a key already a file: ENOTDIR; a file on
+      // its way, its directory made with it, under a key written as a
+      // file: EISDIR.
+      for (const [first, second, code] of [
+        [
+          () => v.writeFile('/f', 'first'),
+          () => v.writeFile('/f/x', 'x'),
+          'ENOTDIR',
+        ],
+        [
+          () => v.writeFiles({ '/g/x': 'first' }),
+          () => v.writeFile('/g', 'g'),
+          'EISDIR',
+        ],
       ]) {
-        const results = await Promise.allSettled([
-          v.writeFile(first, 'first'),
-          v.writeFile(second, 'second'),
-        ]);
-        assert.equal(results[0].status, 'fulfilled', first);
-        assert.equal(results[1].status, 'rejected', second);
-        const code = second.length > first.length ? 'ENOTDIR' : 'EISDIR';
+        const results = await Promise.allSettled([first(), second()]);
+        assert.equal(results[0].status, 'fulfilled');
+        assert.equal(results[1].status, 'rejected');
         assert.equal(results[1].reason.code, code);
-        assert.equal(v.exists(second), second.length < first.length);
       }
+      assert.equal(v.exists('/f/x'), false);
+      assert.ok(v.stat('/g').isDirectory());
       // A rename into a key while a file takes its parent's name.
       await v.writeFile('/a.txt', 'a');
       const [written, moved] = await Promise.allSettled([
@@ -207,7 +231,7 @@ describe('virtual hierarchy', () => {
     });
   });
 
-  it('mkdir creates no entry; the place root answers at once', async () => {
+  it('mkdir makes a directory; the place root answers at once', async () => {
     await withPlaces(async (k, { at }) => {
       for (const name of ['m', 'v']) {
         fs.mkdirSync(at(name), { recursive: true });
@@ -217,7 +241,8 @@ describe('virtual hierarchy', () => {
           path: at(name),
         });
         await fs.promises.mkdir(at(name, 'd', 'e'), { recursive: true });
-        assert.equal(k.fs(name).exists('/d'), false, `${name}: no entry`);
+        assert.ok(k.fs(name).stat('/d/e').isDirectory(), name);
+        assert.deepEqual(fs.readdirSync(at(name, 'd', 'e')), [], 'empty');
       }
       fs.mkdirSync(at('m', 'd', 'e'), { recursive: true });
       // A shared virtual place publishes through the main kernel.
@@ -241,8 +266,10 @@ describe('virtual hierarchy', () => {
           ['worker', 'v', w.kernel.fs('v')],
         ]) {
           const dir = `/${label}`;
-          await place.writeFile(`${dir}/f.txt`, 'f');
-          await place.writeFile(`${dir}/d/a.txt`, 'a');
+          await place.writeFiles({
+            [`${dir}/f.txt`]: 'f',
+            [`${dir}/d/a.txt`]: 'a',
+          });
           const keys = keysOf(k, name);
           for (const [key, options, code] of [
             [`${dir}/f.txt/x`, {}, 'ENOTDIR'],
@@ -250,14 +277,13 @@ describe('virtual hierarchy', () => {
             [`${dir}/f.txt`, {}, 'EEXIST'],
             [`${dir}/f.txt`, { recursive: true }, 'EEXIST'],
             [`${dir}/d`, {}, 'EEXIST'],
+            [`${dir}/new/deep`, {}, 'ENOENT'],
           ]) {
             const err = await outcome(() => place.mkdir(key, options));
             refused(err, code, 'mkdir', at(name, key), undefined);
           }
-          // A directory that exists, or none yet: mkdir creates no entry.
+          // A directory there already: with recursive, nothing to do.
           await place.mkdir(`${dir}/d`, { recursive: true });
-          await place.mkdir(`${dir}/new/deep`);
-          assert.equal(place.exists(`${dir}/new`), false, label);
           const err = await outcome(() => place.unlink(`${dir}/d`));
           refused(err, 'EISDIR', 'unlink', at(name, `${dir}/d`), undefined);
           // rm of a directory without recursive: node:fs's own SystemError.
@@ -277,6 +303,10 @@ describe('virtual hierarchy', () => {
             label,
           );
           assert.deepEqual(keysOf(k, name), keys, `${label}: nothing changed`);
+          // With recursive, every directory missing down to the key.
+          await place.mkdir(`${dir}/new/deep`, { recursive: true });
+          assert.ok(place.stat(`${dir}/new`).isDirectory(), label);
+          assert.deepEqual(place.readdir(`${dir}/new/deep`), [], label);
         }
         // A file on its way already refuses a directory under it.
         const v = k.fs('v');
@@ -295,8 +325,7 @@ describe('virtual hierarchy', () => {
   it('v: refusals leak no allocation, lock, barrier or pending key', async () => {
     await withPlaces(async (k) => {
       const v = k.fs('v');
-      await v.writeFile('/f.txt', 'f');
-      await v.writeFile('/tree/t.txt', 't');
+      await v.writeFiles({ '/f.txt': 'f', '/tree/t.txt': 't' });
       const refusals = await Promise.allSettled([
         v.writeFile('/f.txt/x', 'x'),
         v.rename('/tree', '/f.txt/tree'),
@@ -311,7 +340,7 @@ describe('virtual hierarchy', () => {
       assert.equal(leakedBytes(k), 0, 'nothing allocated');
       // A publication that fails releases its key: nothing blocks it after.
       await assert.rejects(v.writeFile('/p.bad', 'x'), /boom/);
-      await v.writeFile('/p.bad/child.txt', 'c');
+      await v.writeFiles({ '/p.bad/child.txt': 'c' });
       // The barrier is free: a subtree operation runs.
       await v.rename('/tree', '/moved');
       await v.rm('/moved', { recursive: true });

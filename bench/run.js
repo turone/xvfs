@@ -8,12 +8,14 @@ const { mkdirSync, writeFileSync } = require('node:fs');
 // Benchmarks of the hot paths. Not part of `npm test` or CI.
 //
 //   npm run bench [-- --only read,patch] [--repeats 5] [--target 60]
-//                    [--out file.json]
+//                    [--n 10000,100000] [--out file.json]
 //   node bench/compare.js base.json new.json [--noise base2.json] [--md]
 //
 // Every scenario runs as one function in its own process (`--expose-gc`);
 // results go to `.work/bench/<platform>-<node>-<time>.json` unless `--out`
 // names a file. A figure is the median of `repeats` rounds after a warm-up.
+// `tree` (the tree engine) and `intake` (the limit of a part of a tree's
+// run) run only when `--only` names them; `--n` sets the sizes of `tree`.
 
 const SCENARIOS = [
   'read',
@@ -34,6 +36,7 @@ const SCENARIOS = [
   'batch',
   'events',
 ];
+const OPT_IN = ['tree', 'intake'];
 
 const ROOT = path.join(__dirname, '..');
 
@@ -74,7 +77,7 @@ const child = async (name, options) => {
   const { Bench } = require('./harness.js');
   const b = new Bench(options);
   try {
-    await require(`./scenarios/${name}.js`)(b);
+    await require(`./scenarios/${name}.js`)(b, options);
     return { metrics: b.metrics };
   } catch (err) {
     return { metrics: b.metrics, error: err.stack || String(err) };
@@ -98,11 +101,19 @@ const main = async (argv) => {
   const only = argOf(argv, 'only', null);
   const names = only ? only.split(',').map((s) => s.trim()) : SCENARIOS;
   for (const name of names) {
-    if (!SCENARIOS.includes(name)) throw new Error(`unknown scenario ${name}`);
+    if (!SCENARIOS.includes(name) && !OPT_IN.includes(name)) {
+      throw new Error(`unknown scenario ${name}`);
+    }
+  }
+  const sizes = argOf(argv, 'n', null);
+  const n = sizes === null ? null : sizes.split(',').map(Number);
+  if (n !== null && !n.every((x) => Number.isSafeInteger(x) && x > 0)) {
+    throw new Error(`--n takes positive integers, got ${sizes}`);
   }
   const options = {
     repeats: Number(argOf(argv, 'repeats', 5)),
     targetMs: Number(argOf(argv, 'target', 60)),
+    n,
   };
   const result = { meta: meta(options), scenarios: {} };
   let failed = false;

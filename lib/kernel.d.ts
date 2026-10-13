@@ -1,11 +1,11 @@
 // Types of kernel.js: VfsKernel, the orchestrator of the main thread and
-// the projection of a worker. README, "VfsKernel (main thread)",
-// "Versions", "Publication events", "Diagnostics", "Adapter API" and
-// "VfsKernel (worker)".
+// the replicas of a worker. README, "VfsKernel (main thread)",
+// "Versions", "Publication events", "Diagnostics", "Adapter API",
+// "VfsKernel (worker)" and "Page and route trees".
 
 import { EventEmitter } from 'node:events';
 import type { MessagePort } from 'node:worker_threads';
-import type { PoolUsage, ProjectedFile, VfsSnapshot } from './cache.js';
+import type { PoolUsage, VfsSnapshot } from './cache.js';
 import type {
   DeepReadonly,
   Encoding,
@@ -13,8 +13,9 @@ import type {
   VfsConfig,
   VfsRawConfig,
 } from './config.js';
+import type { SharedTree, TreeRefusal } from './shared-tree.js';
 import type { PreparerTable } from './pipeline.js';
-import type { Place } from './place.js';
+import type { FilePayload, Place } from './place.js';
 import type { PlaceFs } from './place-fs.js';
 import type { MutationRoute, ReadRoute } from './registry.js';
 
@@ -48,6 +49,25 @@ export interface VfsKernelOptions {
    * uses must be here.
    */
   preparers?: PreparerTable;
+  /**
+   * The handlers of the intake of each tree of `trees.<name>`, main
+   * thread: both required — `initialize()` refuses a tree without them.
+   */
+  trees?: { [name: string]: TreeHandlers };
+}
+
+/**
+ * What the intake of a shared tree tells its source, on the main
+ * thread; what a handler throws is its own, an uncaught exception.
+ */
+export interface TreeHandlers {
+  /**
+   * A gap older than `intake.gapTimeout`: the numbers of the batches
+   * missing, once per gap.
+   */
+  onGap(gap: { readonly from: number; readonly to: number }): void;
+  /** A batch or a load refused: as its promise rejects. */
+  onError(err: TreeRefusal): void;
 }
 
 export interface FromSnapshotOptions extends VfsKernelOptions {
@@ -55,9 +75,12 @@ export interface FromSnapshotOptions extends VfsKernelOptions {
   port?: MessagePort | null;
 }
 
-/** The `vfs` object of `kernel.link()`: a worker's `workerData.vfs`. */
+/**
+ * The `vfs` object of `kernel.link()`: a worker's `workerData.vfs`. The
+ * snapshot is not in it: it is the first message of `port`, which
+ * `attach()` takes and drops.
+ */
 export interface VfsLink {
-  snapshot: VfsSnapshot;
   config: DeepReadonly<VfsRawConfig>;
   appRoot: string;
   port: MessagePort;
@@ -69,7 +92,7 @@ export interface LinkResult {
   transferList: [MessagePort];
 }
 
-/** A source, or one of its companions: retired and freed on its own. */
+/** A file's source, or one derived from it: retired and freed on its own. */
 export type Representation =
   'source' | 'require:bytecode' | 'script:bytecode' | `fs:${Encoding}`;
 
@@ -126,14 +149,30 @@ export interface LinkDiagnostics {
 export interface VfsDiagnostics {
   readonly pool: PoolUsage;
   /**
-   * What the shared places (`sab`, `sea`) publish: sources, and the bytes
-   * their versions take of the pool, companions included.
+   * What the shared places (`sab`, `sea`) publish: files, and the bytes
+   * their representations take of the pool.
    */
   readonly published: { readonly files: number; readonly bytes: number };
   readonly retired: RetiredRepresentations;
   /** What this thread's streams and leases still read. */
   readonly main: { readonly held: HeldRepresentations };
   readonly links: readonly LinkDiagnostics[];
+  /**
+   * Each shared tree: its live nodes, the payloads among them and
+   * the bytes their representations take of the pool, the number of the
+   * last batch it shows; whether its intake holds the batches, and how
+   * many wait in it.
+   */
+  readonly trees: {
+    readonly [tree: string]: {
+      readonly nodes: number;
+      readonly payloads: number;
+      readonly bytes: number;
+      readonly last: number | null;
+      readonly held: boolean;
+      readonly waiting: number;
+    };
+  };
   /** Published sources read from disk; `fallback`: for want of room. */
   readonly disk: {
     readonly files: number;
@@ -179,18 +218,28 @@ export type ModuleResolution =
   | {
       readonly place: Place;
       readonly key: string;
-      readonly file: ProjectedFile;
+      readonly payload: FilePayload;
     }
   | { readonly denied: true }
   | null;
 
-/** What one publication changed in one place: source keys, no companion. */
+/**
+ * What one publication changed in one place: the keys of files, and the
+ * nodes it moved — a file, or a directory with what lies below it.
+ */
 export interface PlaceChanges {
   /** Keys that had no file before. */
   readonly created: readonly string[];
   /** Keys whose file it replaced. */
   readonly replaced: readonly string[];
+  /** Files it removed, a file a move replaced included. */
   readonly removed: readonly string[];
+  /**
+   * `[from, to]` per node a rename moved — a file, or a directory with
+   * all below it, as one pair. A file the rename published anew, its new
+   * key taking another pipeline, is in `replaced` too.
+   */
+  readonly moved: readonly (readonly [string, string])[];
 }
 
 /**
@@ -202,24 +251,40 @@ export interface PlaceChanges {
 export interface PublishEvent {
   readonly version: number;
   readonly places: { readonly [name: string]: PlaceChanges };
+  /** The shared trees it changed; empty when none. */
+  readonly trees: readonly TreePublication[];
+}
+
+/**
+ * What one publication shows of a shared tree: the numbers of the
+ * batches of its source from `seqFrom` to `seqTo`; `loaded` when it
+ * began with a load, which replaced the tree's state whole.
+ */
+export interface TreePublication {
+  readonly tree: string;
+  readonly seqFrom: number;
+  readonly seqTo: number;
+  readonly loaded: boolean;
 }
 
 /**
  * The events of a kernel, in every thread: `'publish'` once per
  * publication it applies, in the order of their versions — shared places
- * only; `'close'` once, last. Never `'error'`.
+ * only; `'close'` once, last — in a worker whose view broke, with what
+ * broke it (`broken`). Never `'error'`.
  */
 export interface VfsKernelEvents {
   publish: [event: PublishEvent];
-  close: [];
+  close: [cause?: unknown];
 }
 
 /**
- * Main thread: fills the places from their origin through one publication
- * pipeline, watches disk-origin places and sends each epoch as one
- * `vfs-update` to the linked workers, freeing a replaced version only
+ * Main thread: fills the places' trees from their origin through one
+ * publication pipeline, watches disk-origin places and sends each commit as
+ * one `vfs-update` to the linked workers, freeing a replaced version only
  * after every worker ACKs and no thread still reads it. Worker thread
- * (`fromSnapshot()`, `attach()`): the same segments projected read-only.
+ * (`fromSnapshot()`, `attach()`): replicas of the trees over the same
+ * segments, read-only.
  * Both emit the events of `VfsKernelEvents`: `'publish'` in a microtask
  * after the commit — before the promise of the mutation that published
  * settles — and never once `close()` has returned; a listener that throws
@@ -231,9 +296,9 @@ export class VfsKernel extends EventEmitter<VfsKernelEvents> {
   static get current(): VfsKernel | null;
   static set current(kernel: VfsKernel | null);
   /**
-   * A worker's projection of `snapshot`; with `port`, it applies deltas,
-   * ACKs them and sends mutations of shared virtual places. Prefer
-   * `attach()`.
+   * A worker over `snapshot`: replicas of the shared places' trees; with
+   * `port`, it applies deltas, ACKs them and sends mutations of shared
+   * virtual places. Prefer `attach()`.
    */
   static fromSnapshot(
     snapshot: VfsSnapshot | null | undefined,
@@ -259,6 +324,12 @@ export class VfsKernel extends EventEmitter<VfsKernelEvents> {
    */
   get instance(): string;
   /**
+   * What broke this worker's view — a delta it could not apply — or null:
+   * from then on every VFS call of the thread is `ERR_VFS_CLOSED` with it as
+   * its `cause`.
+   */
+  get broken(): unknown;
+  /**
    * Scan / SEA / map through the publication pipeline: preparers,
    * bytecode, compression. A failure closes the kernel. Once, from `new`.
    */
@@ -266,16 +337,21 @@ export class VfsKernel extends EventEmitter<VfsKernelEvents> {
   /**
    * Final: stops the watcher and every stream, rejects queued mutations
    * and those still publishing — all with `ERR_VFS_CLOSED` — and drops
-   * every projection.
+   * every tree.
    * The first call emits `'close'` in a microtask, then drops every
    * listener.
    */
   close(): void;
   /** The `PlaceFs` of an indexed place with an fs domain; throws otherwise. */
   fs(name: string): PlaceFs;
-  /** Published entries only, with `version` and `instance`; main thread. */
+  /** A shared tree of the config, in every thread; throws otherwise. */
+  tree(name: string): SharedTree;
+  /** The trees as published, with `version` and `instance`; main thread. */
   snapshot(): VfsSnapshot;
-  /** Everything a worker needs: snapshot, config, appRoot, a MessagePort. */
+  /**
+   * Everything a worker needs: config, appRoot and a MessagePort whose first
+   * message is the snapshot.
+   */
   link(): LinkResult;
   /** Main thread, ready kernel: throws otherwise. */
   diagnostics(): VfsDiagnostics;

@@ -145,19 +145,37 @@ export class PlaceFs {
   /** The place's directory: `appRoot/<name>`. */
   get root(): string;
   get provider(): IndexedProvider;
+  /** The place's own `fs.writable`; a key's: `writableAt()`. */
   get writable(): boolean;
   get zeroCopy(): boolean;
+  /**
+   * Whether the place takes writes at `key`: the fs domain on there and
+   * writable, by the settings in force at the key (`rules`).
+   */
+  writableAt(key: string): boolean;
   /** Absolute OS path of a key, also for entries that exist only in memory. */
   pathOf(key: string): string;
-  /** A file, or an implicit directory. */
+  /** A file, or a directory. */
   exists(key: string): boolean;
   /**
    * The version of the commit that published the file of a shared place
    * (`sab`, `sea`): equal for the files one commit published, the same in
-   * every thread. Null for a missing key, a `map` place's file and the disk
-   * territory.
+   * every thread; a move keeps it. A directory's is the commit's that
+   * last changed its children, where the place keeps directory attributes
+   * (`stat.directories`). Null for a missing key, a directory without
+   * them, a `map` place's file and the disk territory.
    */
   version(key: string): number | null;
+  /**
+   * The id of the node `key` names — a directory, or a file the fs domain
+   * sees — as `stat().ino` gives it: kept by a move, never another node's
+   * until the ids wrap; the same in every thread for a shared place
+   * (`sab`, `sea`), the thread's own count for a `map` place, whose tree
+   * is the thread's. Null for nothing there and the disk territory.
+   */
+  idOf(key: string): number | null;
+  /** The key of the node with this id now, `''` for the place's; or null. */
+  keyOf(id: number): string | null;
   stat(key: string, options?: { bigint?: false }): VfsStats | null;
   stat(key: string, options: { bigint: true }): VfsBigIntStats | null;
   stat(key: string, options: StatOptions): VfsStats | VfsBigIntStats | null;
@@ -191,9 +209,9 @@ export class PlaceFs {
     options?: ReadStreamOptions | BufferEncoding,
   ): VfsReadStream | null;
   /**
-   * Directory listing, implicit directories included, merged with the disk
-   * territory of a partial cache; lexicographic order of the string names.
-   * Throws `ENOENT` / `ENOTDIR`.
+   * Directory listing — files and directories, empty ones included —
+   * merged with the disk territory of a partial cache; lexicographic
+   * order of the string names. Throws `ENOENT` / `ENOTDIR`.
    */
   readdir(
     key: string,
@@ -286,15 +304,20 @@ export class PlaceFs {
   ): MutationResult;
   unlink(key: string): MutationResult;
   /**
-   * Creates no entry in an indexed place (directories are implicit) but
-   * checks the hierarchy; on disk, node:fs's own — the first directory
-   * created with `recursive`.
+   * A directory of a virtual place is a node of its tree: mkdir makes it,
+   * its parent there — with `recursive`, every one missing down to it; on
+   * disk, node:fs's own — the first directory created with `recursive`.
    */
   mkdir(key: string, options?: MkdirOptions): MutationResult | string;
+  /** An empty directory goes: `ENOTEMPTY` with children, `ENOTDIR` a file. */
+  rmdir(key: string): MutationResult;
   rm(key: string, options?: RmOptions): MutationResult;
   /**
-   * A prepared key of a virtual place is `ENOTSUP`; a directory moves as a
-   * raw-only subtree.
+   * As on Linux, in one commit: a file onto a file replaces it, a
+   * directory onto an empty one too; the destination's directory must
+   * exist. The node moves with its id, payload and version, nothing copied.
+   * A prepared key of a virtual place is `ENOTSUP`, and so is a directory
+   * holding one, a compiled one or one with metadata.
    */
   rename(from: string, to: string): MutationResult;
 }

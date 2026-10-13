@@ -8,17 +8,14 @@ import type { MessagePort } from 'node:worker_threads';
 import { VfsConfig, VfsKernel } from 'xvfs';
 import pkg = require('xvfs');
 import type {
-  CacheEntry,
   DeepReadonly,
-  FileStat,
+  FilePayload,
   Place,
   PlaceChanges,
   Preparer,
   PreparerFile,
-  ProjectedFile,
   PublishEvent,
   ResolvedPlace,
-  ScriptOptions,
   VfsRawConfig,
 } from 'xvfs';
 import { expectType } from './expect.js';
@@ -108,8 +105,15 @@ const onPublish = (event: PublishEvent) => {
         readonly created: readonly string[];
         readonly replaced: readonly string[];
         readonly removed: readonly string[];
+        readonly moved: readonly (readonly [string, string])[];
       };
     };
+    readonly trees: readonly {
+      readonly tree: string;
+      readonly seqFrom: number;
+      readonly seqTo: number;
+      readonly loaded: boolean;
+    }[];
   }>()(event);
   for (const [name, changes] of Object.entries(event.places)) {
     expectType<string>()(name);
@@ -119,6 +123,8 @@ const onPublish = (event: PublishEvent) => {
 expectType<VfsKernel>()(kernel.on('publish', onPublish));
 kernel.on('publish', (event) => expectType<PublishEvent>()(event));
 kernel.once('close', () => {});
+kernel.once('close', (cause) => expectType<unknown>()(cause));
+expectType<unknown>()(kernel.broken);
 kernel.off('publish', onPublish);
 expectType<number>()(kernel.listenerCount('publish'));
 const emitter: EventEmitter = kernel;
@@ -137,7 +143,13 @@ void listen;
 expectType<{
   readonly segments: { readonly id: number; readonly sab: SharedArrayBuffer }[];
   readonly places: {
-    readonly [name: string]: { readonly entries: [string, CacheEntry][] };
+    readonly [name: string]: object;
+  };
+  readonly trees: {
+    readonly [name: string]: {
+      readonly snapshot: object;
+      readonly last: number | null;
+    };
   };
   readonly version: number;
   readonly instance: string;
@@ -149,21 +161,6 @@ expectType<{
 const { vfs, transferList } = kernel.link();
 expectType<{
   vfs: {
-    snapshot: {
-      readonly segments: {
-        readonly id: number;
-        readonly sab: SharedArrayBuffer;
-      }[];
-      readonly places: {
-        readonly [name: string]: { readonly entries: [string, CacheEntry][] };
-      };
-      readonly version: number;
-      readonly instance: string;
-      readonly links?: {
-        readonly known: readonly string[];
-        readonly generation: number;
-      };
-    };
     config: DeepReadonly<VfsRawConfig>;
     appRoot: string;
     port: MessagePort;
@@ -172,7 +169,7 @@ expectType<{
 }>()(kernel.link());
 new Worker('./worker.js', { workerData: { vfs }, transferList });
 new VfsConfig(vfs.config);
-VfsKernel.fromSnapshot(vfs.snapshot, new VfsConfig(vfs.config), {
+VfsKernel.fromSnapshot(kernel.snapshot(), new VfsConfig(vfs.config), {
   appRoot: vfs.appRoot,
   port: vfs.port,
   preparers: { api },
@@ -232,6 +229,16 @@ expectType<{
     readonly files: number;
     readonly bytes: number;
     readonly fallback: { readonly files: number; readonly bytes: number };
+  };
+  readonly trees: {
+    readonly [tree: string]: {
+      readonly nodes: number;
+      readonly payloads: number;
+      readonly bytes: number;
+      readonly last: number | null;
+      readonly held: boolean;
+      readonly waiting: number;
+    };
   };
   readonly preparation: {
     readonly failures: number;
@@ -298,6 +305,9 @@ if (read.kind === 'file') {
     readonly origin: 'disk' | 'virtual' | null;
     readonly root: string;
     readonly virtual: boolean;
+    readonly dev: number;
+    file(key: string): FilePayload | null;
+    isDirectory(key: string): boolean;
     pathOf(key: string): string;
   }>()(read.place);
   expectType<string>()(read.key);
@@ -307,20 +317,19 @@ expectType<
   | {
       readonly place: Place;
       readonly key: string;
-      readonly file: ProjectedFile;
+      readonly payload: FilePayload;
     }
   | { readonly denied: true }
   | null
 >()(found);
 if (found && !('denied' in found)) {
-  expectType<{
-    readonly data: Buffer | null;
-    readonly stat: FileStat;
-    readonly meta?: object;
-    readonly scriptOptions?: ScriptOptions;
-    readonly version?: number;
-    readonly path?: string | null;
-  }>()(found.file);
+  const { payload } = found;
+  expectType<number>()(payload.version);
+  expectType<number>()(payload.size);
+  expectType<number>()(payload.mtimeMs);
+  expectType<number | undefined>()(payload.birthtimeMs);
+  if (payload.source) expectType<Buffer>()(payload.source.data);
+  expectType<object | null | undefined>()(payload.extras?.meta);
 }
 kernel.resolveModule('/abs/path', 'import');
 expectType<Buffer | null>()(kernel.bytecode('/abs/path'));
@@ -363,7 +372,7 @@ kernel.appRoot = '/elsewhere';
 kernel.on('published', () => {});
 // @ts-expect-error a 'publish' listener gets the event
 kernel.on('publish', (event: string) => void event);
-// @ts-expect-error 'close' has no argument
+// @ts-expect-error the cause of 'close' is unknown
 kernel.on('close', (reason: Error) => void reason);
 kernel.on('publish', (event) => {
   // @ts-expect-error an event is frozen

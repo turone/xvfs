@@ -20,7 +20,7 @@ const { median } = require('./harness.js');
 //   npm run bench:ab -- <base> <new> [--only read,patch] [--pairs 4]
 //                       [--bench <rev>] [--label name] [--out dir] [--keep]
 //                       [--repeats 5] [--target 60] [--timeout 900]
-//                       [--filter text] [--md] [--verbose]
+//                       [--filter text] [--md] [--verbose] [--n 10000]
 //   node bench/ab.js --report <dir> [--filter text] [--md]
 //
 // Both revisions are exported with `git archive` into sibling directories
@@ -65,6 +65,7 @@ const VALUED = new Set([
   'timeout',
   'filter',
   'report',
+  'n',
 ]);
 const FLAGS = new Set(['keep', 'md', 'verbose', 'help']);
 
@@ -72,7 +73,7 @@ const USAGE =
   'usage: bench/ab.js <base> <new> [--only a,b] [--pairs 4] [--bench <rev>]\n' +
   '                   [--label name] [--out dir] [--keep] [--repeats 5]\n' +
   '                   [--target 60] [--timeout 900] [--filter text] [--md]\n' +
-  '                   [--verbose]\n' +
+  '                   [--verbose] [--n 10000,100000]\n' +
   '       bench/ab.js --report <dir> [--filter text] [--md]\n';
 
 const parse = (argv) => {
@@ -259,6 +260,14 @@ const copyDependencies = (dest) => {
 
 // --- Runs ---
 
+// Each side measures the tree engine of its own revision: TREE_ENGINE
+// (test/tree-engine.js) would give both sides one module.
+const benchEnv = () => {
+  const env = { ...process.env };
+  delete env.TREE_ENGINE;
+  return env;
+};
+
 // One `bench/run.js` of `dir`; a run over the timeout is killed. Returns
 // what happened: ok, or the failure (a timeout, a signal, an exit code).
 const runBench = (dir, out, options) => {
@@ -272,9 +281,11 @@ const runBench = (dir, out, options) => {
     String(options.target),
   ];
   if (options.only) args.push('--only', options.only);
+  if (options.n) args.push('--n', options.n);
   const t0 = Date.now();
   const result = spawnSync(process.execPath, args, {
     cwd: dir,
+    env: benchEnv(),
     encoding: 'utf8',
     stdio: options.verbose ? 'inherit' : ['ignore', 'pipe', 'pipe'],
     maxBuffer: MAX_BUFFER,
@@ -556,8 +567,14 @@ const main = (argv) => {
         'other\n',
     );
   }
+  if (process.env.TREE_ENGINE) {
+    process.stderr.write(
+      'note: TREE_ENGINE is ignored — each side runs its own lib/tree.js\n',
+    );
+  }
   const settings = {
     only: options.only || null,
+    n: options.n || null,
     repeats: positive('repeats', options.repeats, 5),
     target: positive('target', options.target, 60),
     timeout: positive('timeout', options.timeout, DEFAULT_TIMEOUT),
@@ -623,6 +640,7 @@ const main = (argv) => {
       bench,
       pairs,
       only: settings.only,
+      n: settings.n,
       repeats: settings.repeats,
       target: settings.target,
       timeout: settings.timeout,

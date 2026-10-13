@@ -5,7 +5,7 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
 const { Worker } = require('node:worker_threads');
-const { bytecodeKey } = require('../lib/companion.js');
+const { fromSnapshot } = require('../lib/tree.js');
 const {
   tmpDir,
   writeTree,
@@ -82,17 +82,11 @@ describe('writeFiles: one publication', () => {
       assert.equal(k.version, 1);
       assert.equal(k.nextUpdateId, 1, 'one update');
       const update = await delivered;
-      assert.deepEqual(
-        update.places.v.entries.map(([key]) => key),
-        [
-          '/a.js',
-          bytecodeKey('/a.js'),
-          '/lib/b.js',
-          bytecodeKey('/lib/b.js'),
-          '/c.txt',
-        ],
-        'every file and companion',
-      );
+      assert.deepEqual(update.places.v.created, keys, 'every file');
+      for (const key of ['/a.js', '/lib/b.js']) {
+        assert.ok(k.registry.get('v').file(key).others.requireBytecode, key);
+      }
+      assert.ok(v.stat('/lib').isDirectory(), 'the directory it lacked');
       for (const key of keys) assert.equal(v.version(key), 1, key);
       const mtimes = new Set(keys.map((key) => v.stat(key).mtimeMs));
       assert.equal(mtimes.size, 1, 'one mtime');
@@ -103,7 +97,10 @@ describe('writeFiles: one publication', () => {
       assert.deepEqual(events, [
         {
           version: 1,
-          places: { v: { created: keys, replaced: [], removed: [] } },
+          places: {
+            v: { created: keys, replaced: [], removed: [], moved: [] },
+          },
+          trees: [],
         },
       ]);
       // An object, a Map; replaced and created keys in one set.
@@ -115,8 +112,8 @@ describe('writeFiles: one publication', () => {
       assert.deepEqual(
         events.slice(1).map((event) => event.places.v),
         [
-          { created: ['/d'], replaced: ['/a.js'], removed: [] },
-          { created: [], replaced: ['/c.txt'], removed: [] },
+          { created: ['/d'], replaced: ['/a.js'], removed: [], moved: [] },
+          { created: [], replaced: ['/c.txt'], removed: [], moved: [] },
         ],
       );
       // The bytes are taken when it is called.
@@ -282,8 +279,7 @@ describe('writeFiles: all or nothing', () => {
     const k = await kernel(root, VIRTUAL);
     try {
       const v = k.fs('v');
-      await v.writeFile('/f', 'file');
-      await v.writeFile('/dir/x', 'x');
+      await v.writeFiles({ '/f': 'file', '/dir/x': 'x' });
       const version = k.version;
       const events = record(k);
       for (const [files, options, code, key] of [
@@ -559,12 +555,15 @@ describe('writeFiles: among other mutations', () => {
     try {
       const v = k.fs('v');
       const gate = Promise.withResolvers();
-      const original = k.publishVirtual.bind(k);
-      k.publishVirtual = async (place, key, raw) => {
-        if (key === '/d/x') await gate.promise;
-        return original(place, key, raw);
+      const original = k.publishVirtualBatch.bind(k);
+      k.publishVirtualBatch = async (place, files, failOf) => {
+        if (files[0][0] === '/d/x') await gate.promise;
+        return original(place, files, failOf);
       };
-      const held = v.writeFile('/d/x', 'x');
+      // A set in flight makes its directories with its commit: below one
+      // of its keys nothing may be written meanwhile, nor a file put where
+      // one of its directories will be.
+      const held = v.writeFiles({ '/d/x': 'x' });
       await assert.rejects(
         v.writeFiles([
           ['/e', 'e'],
@@ -636,7 +635,7 @@ describe('writeFiles: among other mutations', () => {
       ]);
       assert.equal(creating.size, 0, 'published');
       await v.unlink('/d');
-      await v.writeFile('/d/x', 'x');
+      await v.writeFiles({ '/d/x': 'x' });
       await assert.rejects(
         v.writeFiles([
           ['/f', 'f'],
@@ -645,7 +644,7 @@ describe('writeFiles: among other mutations', () => {
         refused(v, 'ENOTSUP', '/g.js'),
       );
       assert.equal(creating.size, 0, 'refused');
-      await v.writeFile('/f/x', 'x');
+      await v.writeFiles({ '/f/x': 'x' });
       const reached = Promise.withResolvers();
       const gate = Promise.withResolvers();
       const allocate = k.cache.allocate.bind(k.cache);
@@ -671,8 +670,10 @@ describe('writeFiles: among other mutations', () => {
   });
 
   // Keys in flight are indexed by the directories above them (KeysInFlight):
-  // a write in flight three levels down makes each directory above it one,
-  // for writes and sets alike, as long as a key in flight is below it.
+  // a set in flight three levels down makes each directory above it one,
+  // for writes and sets alike, as long as a key in flight is below it. Its
+  // directories exist once it commits: a plain write into one finds none
+  // before.
   it('a key in flight makes every directory above it one, until the last below it settles', async () => {
     const root = tmpDir('vfs-batch');
     const k = await kernel(root, VIRTUAL);
@@ -688,39 +689,48 @@ describe('writeFiles: among other mutations', () => {
         gates.set(key, gate);
         return gate;
       };
-      const original = k.publishVirtual.bind(k);
-      k.publishVirtual = async (place, key, raw) => {
-        const gate = gates.get(key);
+      const original = k.publishVirtualBatch.bind(k);
+      k.publishVirtualBatch = async (place, files, failOf) => {
+        const gate = gates.get(files[0][0]);
         if (gate) {
           gate.reached.resolve();
           await gate.opened;
         }
-        return original(place, key, raw);
+        return original(place, files, failOf);
       };
       const deep = hold('/d/x/y');
-      const held = v.writeFile('/d/x/y', 'y');
+      const held = v.writeFiles({ '/d/x/y': 'y' });
       await within(deep.reached.promise, 'the publication of /d/x/y');
-      for (const key of ['/d', '/d/x']) {
+      // A plain write needs its directory there: /d is not yet.
+      for (const [key, code] of [
+        ['/d', 'EISDIR'],
+        ['/d/x', 'ENOENT'],
+      ]) {
         await assert.rejects(
           v.writeFile(key, 'f'),
-          { code: 'EISDIR', path: v.pathOf(key) },
+          { code, path: v.pathOf(key) },
           key,
         );
+      }
+      for (const key of ['/d', '/d/x']) {
         await assert.rejects(
           v.writeFiles([[key, 'f']]),
           refused(v, 'EISDIR', key),
           key,
         );
       }
-      await assert.rejects(v.writeFile('/d/x/y/z', 'z'), {
+      await assert.rejects(v.writeFiles({ '/d/x/y/z': 'z' }), {
         code: 'ENOTDIR',
         path: v.pathOf('/d/x/y/z'),
       });
-      await v.writeFile('/d/z', 'z');
+      await assert.rejects(v.writeFile('/d/z', 'z'), {
+        code: 'ENOENT',
+        path: v.pathOf('/d/z'),
+      });
       deep.open();
       await held;
-      await v.unlink('/d/x/y');
-      await v.unlink('/d/z');
+      await v.writeFile('/d/z', 'z');
+      await v.rm('/d', { recursive: true });
       assert.equal(creating.size, 0);
       assert.equal(creating.below('/d'), false, 'nothing below /d any more');
       await v.writeFile('/d', 'a file now');
@@ -728,15 +738,15 @@ describe('writeFiles: among other mutations', () => {
       // have settled.
       const first = hold('/q/a');
       const second = hold('/q/b');
-      const a = v.writeFile('/q/a', 'a');
-      const b = v.writeFile('/q/b', 'b');
+      const a = v.writeFiles({ '/q/a': 'a' });
+      const b = v.writeFiles({ '/q/b': 'b' });
       await within(first.reached.promise, 'the publication of /q/a');
       await within(second.reached.promise, 'the publication of /q/b');
       first.open();
       await a;
       assert.equal(creating.below('/q'), true, '/q/b is still in flight');
       await v.unlink('/q/a');
-      await assert.rejects(v.writeFile('/q', 'q'), { code: 'EISDIR' });
+      await assert.rejects(v.rmdir('/q'), { code: 'ENOTEMPTY' });
       second.open();
       await b;
       assert.equal(creating.below('/q'), false);
@@ -751,7 +761,7 @@ describe('writeFiles: among other mutations', () => {
     const k = await kernel(root, VIRTUAL);
     try {
       const v = k.fs('v');
-      await v.writeFile('/d/one', '1');
+      await v.writeFiles({ '/d/one': '1' });
       const [, version] = await Promise.all([
         v.rm('/d', { recursive: true }),
         v.writeFiles([
@@ -769,7 +779,7 @@ describe('writeFiles: among other mutations', () => {
     }
   });
 
-  it('no thread sees part of a set: the projection, a snapshot and a new link wait for its commit', async () => {
+  it('no thread sees part of a set: the tree, a snapshot and a new link wait for its commit', async () => {
     const root = tmpDir('vfs-batch');
     const k = await kernel(root, VIRTUAL);
     const w = worker(k);
@@ -793,7 +803,8 @@ describe('writeFiles: among other mutations', () => {
       ]);
       await within(reached.promise, 'the allocation of /b');
       assert.equal(v.exists('/a'), false, '/a is staged, not published');
-      assert.deepEqual(k.snapshot().places.v.entries, []);
+      const replica = fromSnapshot(k.snapshot().places.v, k.segmentsMap);
+      assert.equal(replica.get('/a'), null, 'nor in a snapshot');
       late = worker(k);
       assert.equal(late.kernel.fs('v').exists('/a'), false, 'a link made now');
       assert.equal(w.kernel.fs('v').exists('/a'), false);
@@ -801,10 +812,7 @@ describe('writeFiles: among other mutations', () => {
       gate.resolve();
       assert.equal(await pending, 1);
       const update = await applied;
-      assert.deepEqual(
-        update.places.v.entries.map(([key]) => key),
-        ['/a', '/b'],
-      );
+      assert.deepEqual(update.places.v.created, ['/a', '/b']);
       assert.equal(k.nextUpdateId, 1, 'one update');
       assert.equal(late.kernel.fs('v').readFile('/b', 'utf8'), 'b');
     } finally {
@@ -1038,20 +1046,23 @@ describe('writeFiles: close()', () => {
     }
   });
 
-  // The seam of the mutations' test (mutation-order.test.js): the record of
-  // a staged source closes the kernel, after the last file of the set and
-  // before its commit.
+  // The seam of the mutations' test (mutation-order.test.js): the
+  // compressor's last question about the last file of the set — its fourth,
+  // two for each file — closes the kernel two microtasks later, once that
+  // file is staged and before the commit.
   it('a kernel closed after the last file and before the commit: the set is refused as closed', async () => {
     const root = tmpDir('vfs-batch');
     const k = await kernel(root, VIRTUAL);
     try {
       const v = k.fs('v');
       const events = record(k);
-      k.sources.set('v', {
-        set: (key) => {
-          if (key === '/b') k.close();
-        },
-      });
+      let asked = 0;
+      k.compressor.compressible = () => {
+        if (++asked === 4) {
+          queueMicrotask(() => queueMicrotask(() => k.close()));
+        }
+        return false;
+      };
       await assert.rejects(
         v.writeFiles([
           ['/a', 'a'],

@@ -69,7 +69,8 @@ const shutdown = async () => {
   ticker = setInterval(publish, 500);
 
   for (let id = 1; id <= WORKERS; id++) {
-    // One link per worker: snapshot, config and a private port for updates.
+    // One link per worker: config and a private port — the snapshot first on
+    // it, then the updates.
     const { vfs, transferList } = kernel.link();
     const port = PORT === 0 ? 0 : PORT + id - 1;
     const worker = new Worker(path.join(__dirname, 'worker.js'), {

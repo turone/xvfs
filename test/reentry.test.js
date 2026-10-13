@@ -663,7 +663,7 @@ describe("Node's rimraf keeps the node:fs it first loads with", () => {
     assert.deepEqual(wrapped('capture'), expected);
   });
 
-  for (const mode of ['initialized', 'projected']) {
+  for (const mode of ['initialized', 'replicated']) {
     it(`loaded by install(), a kernel ${mode}: every form removes whole trees`, () => {
       assert.deepEqual(run(mode), {
         mode,

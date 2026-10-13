@@ -81,6 +81,7 @@ const main = async () => {
     );
     for (const file of late) writeDisk(file, 'hidden');
     k.fs('mem').writeFile('/m.txt', 'm');
+    k.fs('mem').mkdir('/dir');
     k.fs('mem').writeFile('/dir/n.txt', 'n');
     fsPatch.install(k);
     try {

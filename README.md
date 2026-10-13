@@ -1,15 +1,25 @@
 # xvfs
 
-Extended virtual filesystem for Node.js: places over the application's
-real paths, each with its own storage and content origin; content
-prepared once and published atomically, with a version, to every thread;
-one shared copy for all `worker_threads` where a place asks for it; and
-strict routing of what the application may reach — through `node:fs` and
-`module.registerHooks` adapters or the explicit `PlaceFs` API.
+Extended virtual filesystem for Node.js, and shared page and route trees,
+for every `worker_threads` thread:
+
+- **places** over the application's real paths, each with its own
+  storage and content origin, served through `node:fs` and
+  `module.registerHooks` adapters or the explicit `PlaceFs` API;
+- **page and route trees** — a site's URL structure, stable ids from its
+  database, access policies and the pages' content, available in every
+  worker thread, the content's bytes stored once in shared memory and
+  the tree kept current by ordered changes from the application's source
+  of truth ([Page and route trees](#page-and-route-trees)).
+
+Content is prepared once and published atomically, with a version, to
+every thread; one shared copy serves all `worker_threads` where a place
+or a tree asks for it; and strict routing decides what the application
+may reach.
 
 A place is a directory under `appRoot`. Its **provider** says where the
 bytes live: `sab` — one copy in pooled `SharedArrayBuffer` segments that
-every thread reads zero-copy; `map` — each thread's own `Map`, written
+every thread reads zero-copy; `map` — each thread's own memory, written
 synchronously and seen by that thread only; `sea` — the assets of a
 single executable, in the shared pool; `disk` and `node-default` — the
 file system itself, under the place's policy. Its **origin** says where
@@ -26,13 +36,14 @@ bytecode (`require.compile`) is compiled once and stored in SAB so
 workers skip parse + compile. There is no ESM bytecode cache.
 
 What it is used for: worker pools over one copy of static assets,
-templates, configuration and modules; worker-local workspaces of agents,
-sessions or tenants (`map` + `virtual`); code generated and compiled at
-run time, loaded with `require()` and never written to disk; applications
-packaged as a single executable; and a declared, reviewable map of what
-an application may touch under `appRoot` — which places, which of them
-writable, what a link on their disks may do. Strict routing is a policy
-for code that
+templates, configuration and modules; the pages and routes of a site,
+served by a worker pool from one tree, with no query to the database per
+request; worker-local workspaces of agents, sessions or tenants (`map` +
+`virtual`); code generated and compiled at run time, loaded with
+`require()` and never written to disk; applications packaged as a single
+executable; and a declared, reviewable map of what an application may
+touch under `appRoot` — which places, which of them writable, what a
+link on their disks may do. Strict routing is a policy for code that
 goes through the patched `node:fs` and the module hooks, not an OS
 sandbox or a security boundary ([Strict routing](#strict-routing)).
 [doc/alternatives.md](doc/alternatives.md) walks through the production
@@ -45,26 +56,43 @@ is unsupported.
 ## Contents
 
 [Features](#features) · [Install](#install) · [Quick start](#quick-start) ·
-[Providers](#providers) · [Preparation](#preparation-prepare) ·
-[Compression](#compression) · [Strict routing](#strict-routing) ·
+[Page and route trees](#page-and-route-trees) · [Providers](#providers) ·
+[Preparation](#preparation-prepare) · [Compression](#compression) ·
+[Rules of subtrees](#rules-of-subtrees) ·
+[Strict routing](#strict-routing) ·
 [Lifetime of shared bytes](#lifetime-of-shared-bytes) · [API](#api) ·
 [Patched `node:fs`](#patched-nodefs) · [Errors](#errors) ·
 [Protocol](#protocol) · [Examples](#examples) ·
 [Architecture](#architecture) · [Support](#support) ·
 [Design decisions](doc/architecture.md) · [Alternatives](doc/alternatives.md) ·
-[Benchmarks](doc/benchmarks.md)
+[Benchmarks](doc/benchmarks.md) · [Feeding a shared tree](doc/external-sources.md)
 
 ## Features
+
+Pages and routes:
+
+- **Page and route trees** — a site's pages and routes as a tree of URL
+  segments in every worker thread: stable ids from its database, access
+  policies checked on the way down, redirects, breadcrumbs and id → URL;
+  the pages' bytes and their compressed forms stored once in shared
+  memory; kept current by ordered changes from the source of truth,
+  published atomically — [Page and route trees](#page-and-route-trees).
 
 Storage and origins:
 
 - **Five providers** — `sab` (shared memory), `map` (each thread's own
   memory), `sea` (SEA assets in shared memory), `disk` (a managed mount),
   `node-default` (ordinary Node) — over the same paths, API and routing.
-- **Zero-copy sharing** — a `sab` place's projections are
-  `Buffer.from(sab, offset, length)` views: one copy for every thread.
+- **Zero-copy sharing** — a `sab` place's bytes are in shared memory
+  once; every thread reads them as `Buffer.from(sab, offset, length)`
+  views: one copy for every thread.
 - **Pooled segments** — files packed into 64 MiB SAB segments; emptied
   segments are reused, never returned to the OS.
+- **A tree of nodes** — every thread holds each place as a tree:
+  directories are nodes of their own (`mkdir`, `rmdir`, an empty one
+  listed), a rename moves a file or a whole directory without copying a
+  byte, and `stat().ino` is the node's id — the same in every thread
+  for a shared place, the thread's own count for a `map` one.
 - **Worker-local places** — a `map` place keeps its files in each
   thread's own memory; with `origin: 'virtual'` it is that thread's own
   filesystem: synchronous writes, a filesystem's hierarchy, `require()` of
@@ -83,9 +111,8 @@ Publication:
   file's one canonical content (bundling, wrapping, templating…), shared by
   every domain. Runs once per publication, never on read.
 - **`fs.script`** — sources for callers that build their own `vm.Script`
-  (`PlaceFs.script()`), with a V8 bytecode companion of the canonical
-  source for the extensions of `fs.script.compile`, independent of
-  `require.compile`.
+  (`PlaceFs.script()`), with V8 bytecode of the canonical source for the
+  extensions of `fs.script.compile`, independent of `require.compile`.
 - **V8 bytecode** — built for the extensions a `compile` list names and
   for nothing else: `require.compile` (CommonJS — `js`, `cjs`, or any
   other extension a module requires by its full name, a template say) and
@@ -110,6 +137,10 @@ Control:
   read-only places stay read-only through every `node:fs` form, and
   `fs.fallback` and `links` decide what reaches a place's disk — a
   declared policy, not OS-level isolation.
+- **Rules of subtrees** — `places.<name>.rules` hide a path from a
+  domain, show fewer extensions there, make it read-only or writable, or
+  change its fallback, from that path down —
+  [Rules of subtrees](#rules-of-subtrees).
 - **Immutable published versions** — a reader finishes the version it
   started with; a failed preparation keeps the last good one; nothing is
   freed on a timeout.
@@ -174,6 +205,10 @@ const kernel = attach(); // reads workerData.vfs
 `kernel.link()` creates a `MessageChannel`: one end stays with the main
 kernel, the other — `vfs.port`, in `transferList` — goes to the worker,
 and `attach({ link })` takes it (`link` defaults to `workerData.vfs`).
+The first message on it is the snapshot of what the main kernel has
+published: `attach()` takes it off the port before anything else and
+drops it once the worker's kernel is built — `workerData`, which lives
+as long as the worker, never holds it.
 This `MessagePort` is an in-process channel between the main thread and
 that worker — neither a file-system link nor a network port. Through it
 the worker sends its mutations of `sab + virtual` places as RPC; the main
@@ -252,21 +287,334 @@ synchronously and returns `undefined`; `await` is still correct for both.
 Bytecode is not on `PlaceFs` — it is [adapter API](#adapter-api), except
 for `fs.script` bundles, which are `PlaceFs.script(key)` (below).
 
+## Page and route trees
+
+A site's pages and routes are a tree: each URL segment a node, each node
+a page or a section with a stable id from the site's database, an access
+policy and the page's bytes. xvfs makes that tree available in every
+worker thread — its structure replicated in each thread for fast walks,
+the pages' bytes stored once in shared memory — and keeps it current by
+ordered changes from the application's source of truth: each change is a
+numbered batch, applied in order and published to every thread at once.
+A worker answers a request from memory: no query to the database, no
+copy of a page per worker.
+
+```
+GET /guide/intro   → the page, in br or gzip, with an ETag
+GET /admin/stats   → 403 unless the user is an admin
+GET /docs/intro    → 301 to /guide/intro: /docs has moved
+GET /products/42   → 404 past /products — or '/42' for the application
+```
+
+It is a tree, not a cache: it holds the whole tree, a lookup walks its
+names and never goes to the source — nothing is fetched on a miss and
+nothing evicted. Nor is it a router: the application turns a request
+into a key and a node into a response, as below. The mechanism is
+general — a **shared tree**, declared under `trees.<name>` and read
+through `kernel.tree(name)` (`SharedTree`) in every thread — and holds
+any hierarchy its source names by ids: a menu, a catalogue, the tenants
+of a service. Where the changes come from — a database's log, Redis, the
+application itself — is in
+[doc/external-sources.md](doc/external-sources.md).
+
+### Quick start: from a request to a page
+
+[`examples/url-tree/server.mjs`](examples/url-tree/server.mjs), whole: a
+tree loaded at change 41 of the database, then its change 42, which
+moves a section and leaves a redirect at its old path.
+
+<!-- quickstart: examples/url-tree/server.mjs -->
+
+```js
+import http from 'node:http';
+import { VfsConfig, VfsKernel, Denied, NotFound } from 'xvfs';
+
+const SECTION = 0; // a node's class: the application's own small integer
+const PAGE = 1;
+
+const kernel = new VfsKernel(
+  new VfsConfig({
+    trees: {
+      site: {
+        ids: 'number', // the pages' keys in the database
+        containers: [SECTION], // classes whose nodes hold others
+        compress: { encodings: ['br', 'gzip'] }, // every page, once
+      },
+    },
+  }),
+  // A gap in the changes' numbers: replay them from the log; a refused
+  // change: load the whole state again.
+  { trees: { site: { onGap: console.warn, onError: console.error } } },
+);
+await kernel.initialize();
+const site = kernel.tree('site'); // in a worker: attach().tree('site')
+
+// The database's state at change 41...
+const page = (title) => ({ data: `<h1>${title}</h1>`, meta: { title } });
+await site.load(
+  [
+    { id: 1, parentId: null, name: '', class: SECTION },
+    { id: 2, parentId: 1, name: 'docs', class: SECTION },
+    { id: 3, parentId: 2, name: 'intro', class: PAGE, payload: page('Intro') },
+    {
+      id: 4,
+      parentId: 1,
+      name: 'admin',
+      class: SECTION,
+      policy: { role: 'admin' },
+    },
+    { id: 5, parentId: 4, name: 'stats', class: PAGE, payload: page('Stats') },
+    {
+      id: 6,
+      parentId: 1,
+      name: 'products',
+      class: PAGE,
+      payload: page('Products'),
+    },
+  ],
+  41,
+);
+// ...and its change 42: /docs moves to /guide, and a node of the old name
+// sends what was below it there.
+await site.submit({
+  seq: 42,
+  ops: [
+    ['put', 2, 1, 'guide', {}],
+    ['put', 7, 1, 'docs', { class: SECTION, policy: { redirect: '/guide' } }],
+  ],
+});
+```
+
+A node's policy is the application's own, and so is what `allow` makes
+of it: `true` lets a lookup through, anything else stops it — a `Denied`
+whose `decision` is that answer. A request gets one of four results:
+
+| `match()` gives             | When                                                               | The response                                                                     |
+| --------------------------- | ------------------------------------------------------------------ | -------------------------------------------------------------------------------- |
+| a node                      | the path leads to it, and every policy on the way lets it through  | 200 — the page, compressed where the client takes it — or 304; 404 for a section |
+| `Denied { node, decision }` | a policy on the way refused: the uppermost                         | 403, or 301 when it is a redirect: its target, then the rest of the path         |
+| `NotFound { node, rest }`   | a name is missing: the deepest node on the path, what lies past it | 404, or a dynamic tail the application serves                                    |
+| —                           | the URL makes no key (`keyOf`, below)                              | 400                                                                              |
+
+```js
+// A policy is the application's own: a role, or where a path has moved.
+const allow = (policy, node, user) =>
+  policy.redirect
+    ? { redirect: policy.redirect }
+    : user.roles.includes(policy.role);
+
+const server = http.createServer((req, res) => {
+  const key = keyOf(req.url); // the path as a key of the tree, below
+  if (key === null) return res.writeHead(400).end();
+  const user = { roles: req.headers['x-role'] ? [req.headers['x-role']] : [] };
+  const found = site.match(key, { allow, context: user });
+  if (found instanceof Denied) {
+    // the uppermost policy that refused: its node, and what allow answered
+    const to = found.decision?.redirect;
+    if (!to) return res.writeHead(403).end();
+    const rest = key.slice(site.pathOf(found.node).length);
+    return res.writeHead(301, { location: to + rest }).end();
+  }
+  if (found instanceof NotFound) {
+    // the deepest node on the path, and what lies past it: a 404 here, or a
+    // dynamic tail the application serves — '/42' of '/products/42'
+    const under = site.pathOf(found.node);
+    return res.writeHead(404, { 'x-under': under }).end(found.rest);
+  }
+  const info = site.payloadOf(found);
+  if (info === null) return res.writeHead(404).end(); // a section, no page
+  const etag = `"${kernel.instance}-${info.version}"`;
+  if (req.headers['if-none-match'] === etag) return res.writeHead(304).end();
+  const headers = { etag, 'content-type': 'text/html; charset=utf-8' };
+  // the first of br and gzip the page has and the client takes (q aside)
+  const accepted = req.headers['accept-encoding'] ?? '';
+  const encoding = ['br', 'gzip'].find(
+    (e) => info.encodings.includes(e) && accepted.includes(e),
+  );
+  if (!encoding) return res.writeHead(200, headers).end(site.read(found));
+  headers['content-encoding'] = encoding;
+  return res.writeHead(200, headers).end(site.readCompressed(found, encoding));
+});
+server.listen(Number(process.env.PORT ?? 3000), '127.0.0.1', () => {
+  console.log(`listening on http://127.0.0.1:${server.address().port}`);
+});
+```
+
+### From a request to a key
+
+`match()` takes a key of the tree — names joined by `/`; `''` or `'/'`
+is the root — never a raw request URL. It compares names exactly: a
+query, a percent-encoded name, a doubled or a trailing slash would miss,
+and a name in another case is another name. The application makes the
+key, by its own rules:
+
+```js
+// The path of a request as a key of the tree: no query or hash, '.' and
+// '..' resolved, each name decoded; a doubled or a trailing slash
+// collapses ('/guide/intro/' is '/guide/intro'); null — a 400 — when a
+// name holds a '/' (%2F) or does not decode.
+function keyOf(url) {
+  const { pathname } = new URL(url, 'http://localhost');
+  try {
+    const names = pathname.split('/').filter(Boolean).map(decodeURIComponent);
+    if (names.some((name) => name.includes('/'))) return null;
+    return '/' + names.join('/');
+  } catch {
+    return null;
+  }
+}
+```
+
+<!-- /quickstart -->
+
+A site that wants one canonical URL redirects a request whose path
+differs from its key; one that answers `/About` as `/about` stores its
+names lower-cased and lower-cases the key.
+
+### Ids, breadcrumbs and moves
+
+```js
+// A link by id, wherever the page lies now; null once it is removed.
+const node = site.byId(3);
+const href = node && site.pathOf(node); // '/guide/intro'
+
+// Breadcrumbs: the nodes from the root down to the one `match` found.
+const crumbs = site.trailOf(found).map((n) => ({
+  href: site.pathOf(n) || '/',
+  title: site.payloadOf(n)?.meta?.title ?? site.nameOf(n),
+}));
+```
+
+A `put` with another parent or name moves a node — a page, or a section
+with everything below it — and keeps its id, its payload and its
+version: a link by id follows it, and an ETag made of the version stays
+valid. Its old path is free; a node of the application's own there,
+whose policy names the new one, redirects that path and every path
+below it (quick start).
+
+### Reference
+
+| `trees.<name>.*`      | Type     | Default       | Description                                                         |
+| --------------------- | -------- | ------------- | ------------------------------------------------------------------- |
+| `ids`                 | string   | required      | `'number'` (safe integers) or `'string'`: the source's ids          |
+| `containers`          | number[] | `[]`          | Classes whose nodes hold others, at first, in every thread          |
+| `birthtime`           | bool     | `false`       | Payloads keep a birthtime                                           |
+| `aggregates`          | object   | both off      | `{ classes, subtreeVersion }`: counts by class, a subtree's version |
+| `maxNodes`            | number   | 2^24          | Live nodes at most                                                  |
+| `maxFileSize`         | size     | from defaults | A payload's bytes at most (`EFBIG`)                                 |
+| `compress`            | object   | off           | `{ encodings, ext? }`, as a place's but without `retainRaw`         |
+| `zeroCopy`            | bool     | `false`       | Leases and borrowed stream chunks                                   |
+| `intake.seq`          | string   | `'source'`    | Who numbers the batches: `'source'` or `'intake'`                   |
+| `intake.window`       | number   | 10            | How long batches gather, ms                                         |
+| `intake.limit`        | number   | 1000          | Ops of one publication at most; a run goes in parts                 |
+| `intake.gapTimeout`   | number   | 2000          | How long a gap is waited for before `onGap`, ms                     |
+| `intake.spaceTimeout` | number   | 2000          | How long a batch waits for room in the pool, ms                     |
+
+A tree takes no name of a place, in any case. A node's **class** is a
+small integer of the application's own — page, section, redirect…; the
+classes of `containers` hold other nodes.
+
+**Compression** is made once, when a payload is published: of every
+payload of the tree without `ext`; with it, of the payloads of nodes
+whose names end with one of its extensions — which a page's name seldom
+has. A node without a payload — a section — has nothing to compress.
+`payloadOf(node).encodings` names the forms a payload has: a form the
+pool had no room for is left out — the source never is — so a server
+checks it and falls back to `read()`.
+
+**Changes.** A tree changes only by the batches of its source, which
+the **intake** — a queue on the main thread — applies in the order of
+their numbers. Its handlers are kernel options of the main thread, both
+required: `initialize()` refuses a tree without them. What a handler
+throws is its own — an uncaught exception — and never stops the intake.
+
+`submit({ seq, ops })` gives one change of the source, from any thread:
+`seq` its number in the source's log, `ops` the final state of every
+node it touched — `['put', id, parentId, name, { class, payload,
+policy }]`, a node made, changed or moved under `parentId` (null: the
+root), and `['remove', id]`, a node gone with all below it — each id
+once. A `payload` is `{ data, mtimeMs?, meta?, scriptOptions? }`, `data`
+a `Uint8Array` or a string (UTF-8); `null` takes it off, an absent one
+keeps it; `policy` likewise. A batch is taken when submitted: its bytes
+copied, a `policy`, a `meta` and `scriptOptions` cloned — data
+structured clone carries, kept frozen in every thread — so what the
+caller does to its own objects after changes nothing. A wrong form, or a
+value structured clone cannot carry, throws `EINVAL` at once, with the
+`index` and `id` of the op. The promise resolves `{ seq, status }` once
+the batch is published and this thread's tree shows it — `'committed'`,
+`'duplicate'` (a number applied or waiting already: a worker's batch
+and the same change read back from the source's log collapse) or
+`'superseded'` (a load past it) — and rejects with a refusal: the
+commit's (`ENOENT`, `EEXIST`, …), `EFBIG`, `ENOSPC` after
+`spaceTimeout`, each with `seq`, `index` and `id`.
+
+- Batches are applied strictly by number, from `last + 1`: those of a
+  window go in parts of at most `limit` ops, each part one publication
+  — no thread sees a state between two batches of it.
+- A batch past a gap waits; a gap older than `gapTimeout` is told once
+  (`onGap`), until the missing batches come or a load.
+- A refused batch is told to `onError`; the batches before it publish,
+  it and everything after it wait for a load.
+- `load(rows, seq)` replaces the tree's state with the source's at
+  `seq` — rows `{ id, parentId, name, class, payload, policy }` — in one
+  commit; the batches waiting up to `seq` are `'superseded'`, those
+  after it join its publication. A load older than the tree is
+  `ESTALE`. In `'source'` mode nothing applies before the first load —
+  an empty source loads `[]`.
+- `intake.seq: 'intake'` is for a single writer over one channel that
+  loses nothing: the intake numbers the batches as they come, there are
+  no gaps, no repeats and no `ESTALE`, and `load(rows)` takes no number
+  — the batches submitted after it wait for it.
+
+**Reading.** A node is opaque: `get(key)`, `match(key)`, `byId(id)`,
+`root`, then `nodeId`, `nameOf`, `parentOf`, `pathOf`, `trailOf`,
+`classOf`, `policyOf`, `isContainer`, `childOf`, `children`,
+`childNodesOf`, `countOf`, `walk`; with aggregates `classCountOf`,
+`leafCountOf`, `subtreeVersionOf`. `payloadOf(node)` is a frozen `{
+version, size, mtimeMs, birthtimeMs?, meta, scriptOptions, encodings }`;
+the bytes come as a copy (`read`, `readCompressed`), a lease (`view`,
+`viewCompressed`, with `zeroCopy`) or a stream (`createReadStream`,
+`createReadStreamCompressed`), pinned while they read, as `PlaceFs`'s
+are. `last` is the number of the last batch this thread's tree shows;
+`version`, `structureVersion` and `policyVersion` the publications that
+last changed it, its structure, its policies.
+
+**Policies.** A lookup with `{ allow, context }` — `get`, `match` —
+passes each policy on its way, from the root down, to `allow(policy,
+node, context)`: `true` lets it through, anything else is a `Denied` —
+`{ node, decision }`, the uppermost refusal — and `match` gives a
+`NotFound` — `{ node, rest }` — for a miss past them.
+`check(node, { allow, context })` asks the same of a node in hand. A
+lookup without `allow` passes every policy.
+
+**Events.** A publication that changed a tree names it in `'publish'`:
+`trees: [{ tree, seqFrom, seqTo, loaded }]` — the numbers of the batches
+it shows, `loaded` when it began with a load, which replaced the state
+whole. A batch that changes nothing publishes nothing, and still moves
+`last` in every thread.
+
 ## Providers
 
-| Provider       | Storage             | VFS index | Origin              | Shared across workers |
+| Provider       | Storage             | Node tree | Origin              | Shared across workers |
 | -------------- | ------------------- | --------- | ------------------- | --------------------- |
 | `sab`          | SAB pool            | yes       | `disk` \| `virtual` | yes, zero-copy        |
-| `map`          | per-thread `Map`    | yes       | `disk` \| `virtual` | no, per-thread        |
+| `map`          | per-thread buffers  | yes       | `disk` \| `virtual` | no, per-thread        |
 | `sea`          | SAB from SEA assets | yes       | fixed (SEA assets)  | yes, zero-copy        |
 | `disk`         | OS filesystem       | no        | fixed (disk)        | n/a, managed mount    |
 | `node-default` | OS filesystem       | no        | fixed (disk)        | n/a, ordinary Node    |
 
-`INDEXED` = sab | map | sea (have a files Map). `SHARED` = sab | sea
+`INDEXED` = sab | map | sea (have a node tree). `SHARED` = sab | sea
 (bytes in SAB). `disk` and `node-default` are passthrough mounts: they
 are never scanned and hold no VFS entries. `disk` differs from
 `node-default` only in being _managed_ — the router applies the fs
 domain's writable policy and strict routing to it.
+
+An indexed place costs every thread its tree — about 420 B a file in the
+main thread and in each worker, 450 B with `stat.birthtime` and
+`stat.directories`, and about 100 B more for each representation the
+thread has read (its view, kept from the first read) — beside the bytes,
+which a `sab` or `sea` place keeps once, in shared memory
+([benchmarks](doc/benchmarks.md#node-trees-against-the-flat-index)).
 
 **`origin`** applies only to `sab` and `map`, defaults to `'disk'`, and is
 always explicit in the resolved config:
@@ -276,18 +624,23 @@ always explicit in the resolved config:
 | `sab` + `disk`    | scanner + watcher                | to disk, watcher republishes | snapshot/delta      |
 | `sab` + `virtual` | application writes               | main thread or worker RPC    | snapshot/delta      |
 | `map` + `disk`    | scanner + watcher, owned Buffers | to disk, watcher republishes | none (thread-local) |
-| `map` + `virtual` | application writes               | local `Map`, synchronous     | none (thread-local) |
+| `map` + `virtual` | application writes               | local tree, synchronous      | none (thread-local) |
 
 `origin: 'virtual'` requires the fs domain with `writable: true` —
 nothing else can ever give the place content. A virtual place is
-legitimately empty right after `initialize()`; workers project it from
-the snapshot and receive its first file like any other update.
+legitimately empty right after `initialize()`; workers replicate its
+tree from the snapshot and receive its first file like any other update.
 
 Writable disk-origin SAB/map is **eventual consistency**: mutations go
-to disk; the watcher brings them into the index. There is no
+to disk; the watcher brings them into the place's tree. There is no
 `waitForUpdate`. A `sab + virtual` mutation, in contrast, resolves its
 Promise only once the new version is already published. The watcher
 also starts when `defaults.watch` is on.
+
+A disk-origin place publishes every directory under its own — an empty
+one, and one holding only files the place does not cache, included:
+under `fs.fallback: 'deny'` (strict's default) such a directory lists
+empty.
 
 ### Map provider
 
@@ -324,7 +677,7 @@ const tool = require('/abs/path/agent/tool.js');
 `fs.script` marks the sources the library hands to callers that build
 their own `vm.Script` (`PlaceFs.script(key)`) — orthogonal to the
 `require` domain, which serves Node's CJS loader. Both may cover the same
-file with independent companions, both built from the one canonical
+file, each with its own cached data, both built from the one canonical
 (prepared) source. In each, `compile` lists the extensions that get V8
 cached data and `ext` those that get none:
 
@@ -340,7 +693,7 @@ places: {
 }
 ```
 
-Here `.js`, `.cjs` and `.dhtml` get both companions — a module of the
+Here `.js`, `.cjs` and `.dhtml` get both flavors — a module of the
 place loads `require('./view.dhtml')` as CommonJS through its cached
 data, and `require.resolve('./view.dhtml')` names that file; `.mjs` is a
 script source without cached data; `.json` gets none. The same config
@@ -363,17 +716,17 @@ on the CLI is in [CLI overrides](#cli-overrides).
   hook installed, `require.resolve()` names the file `require()` loads,
   on every supported Node — memory-only files and strict refusals
   included.
-- `fs.script.compile` builds `\0script:bytecode` — cached data of the
-  **bare** canonical source under the preparer's `scriptOptions`.
-  `require.compile` builds `\0require:bytecode` — cached data of
-  `Module.wrap(source)`. Neither substitutes for the other. A
+- `fs.script.compile` builds the `script:bytecode` representation —
+  cached data of the **bare** canonical source under the preparer's
+  `scriptOptions`. `require.compile` builds `require:bytecode` — cached
+  data of `Module.wrap(source)`. Neither substitutes for the other. A
   script-compile failure invalidates the whole publication
   (previous version kept) with `ENOTSUP`, and so does a script flavor
   that finds no room — `EFBIG` when it is larger than one segment and
   could never fit, `ENOSPC` when the pool merely has none right now —
   named by the operation: `open` of the source, or a rename with its
   source and `dest`; a require-compile failure is best-effort (only its
-  own companion is dropped).
+  own representation is dropped).
 - `kernel.fs(name).script(key)` →
   `{ source, cachedData, scriptOptions, meta, version } | null`; `ENOTSUP`
   when the place has no `fs.script`. It never prepares or compiles
@@ -401,12 +754,12 @@ on the CLI is in [CLI overrides](#cli-overrides).
   source but the bundle's. On rejection the consumer runs the canonical
   source without cached data — the `vm.Script` has compiled
   `bundle.source` itself. The refusal is that V8 isolate's alone: the
-  file, its companion and the published version of XVFS stay as they
+  file, its cached data and the published version of XVFS stay as they
   are, and nothing is published again.
 
 - **CommonJS keeps its own.** An ordinary `require()` uses the cached
   data `require.compile` builds for `Module.wrap(canonicalSource)` under
-  the module's filename (`\0require:bytecode`); the module hook applies
+  the module's filename (`require:bytecode`); the module hook applies
   it, and on rejection Node's compiler runs the module from its source,
   once. It and the bare cached data of `fs.script.compile` are cached
   data of different texts and never mix.
@@ -430,8 +783,8 @@ on the CLI is in [CLI overrides](#cli-overrides).
 ### SEA provider
 
 Loads `node:sea` assets matching `<name>/…` into SAB at `initialize()`,
-then behaves like a `sab` place — in `snapshot()`, projected to workers,
-no watcher.
+then behaves like a `sab` place — in `snapshot()`, replicated to
+workers, no watcher.
 
 ```js
 places: {
@@ -532,7 +885,7 @@ Here `.js` goes through `api` once; that one prepared source is what
   source of truth; the raw input is not kept next to the prepared content.
 - **All or nothing.** A preparer that throws, or a required
   `fs.script.compile` that fails, publishes nothing: the previous version
-  and its companions stay.
+  and its representations stay.
 - **Mutations and copies.** In a virtual place `appendFile`, `rename` and
   copies of a prepared key are `ENOTSUP`: its raw input is not kept, and
   its bundle may embed the old key. Renaming or copying an unprepared entry
@@ -590,12 +943,64 @@ true` compiles nothing and is fine) and no `fs.script` or `prepare`.
 `place.readFile()` and the patched `fs` then read the source from disk;
 `readFileView()` has no view of it.
 
-A compressed representation is never content of its own: a copy or a
-rename hands on the raw input — from disk with `retainRaw: false` — and
-the destination builds its own representations.
+A compressed representation is never content of its own: a copy hands
+on the raw input — from disk with `retainRaw: false` — and the
+destination builds its own representations. A rename within a virtual
+place moves the file's node, its representations with it (see
+[Copies and renames](#copies-and-renames)).
 
 Failures are per representation: a codec that does not fit is skipped
 with a warning; `storedEncodings()` reports what actually exists.
+
+## Rules of subtrees
+
+A place serves a path, and everything below it, by its rules where it
+has them: `places.<name>.rules`, keyed by path.
+
+```js
+places: {
+  site: {
+    fs: { ext: ['html', 'css', 'js', 'txt'], writable: true },
+    require: true,
+    rules: {
+      '/private': { fs: false }, //            not there for node:fs
+      '/private/public': { fs: true }, //      there again below
+      '/static': { fs: { ext: ['html', 'css'] }, require: false },
+      '/system': { fs: { writable: false } },
+      '/legacy': { fs: { fallback: 'disk' } }, // disk-origin places only
+    },
+  },
+}
+```
+
+- A rule sets, per domain, `false` — off from its path down — `true`
+  — on again below a rule that turned it off, with the settings it had —
+  or what it changes: `fs: { ext, writable, fallback }`, `require:
+{ ext }`, `import: { ext }`. The deepest rule on a path holds there.
+- Within what the place declares: fewer extensions, never more, and no
+  domain the place lacks. What a file is — its bytecode, compression,
+  preparer — is the place's; a rule changes how the file is served, not
+  what is published, scanned or watched.
+- Where the fs domain is off, a path is not there: a read is `EACCES`
+  under strict (`node:fs` handles it otherwise, as for a place without
+  fs), the facade has no such file or directory, and a listing names no
+  entry there and enters no such directory; a write there is `EACCES`.
+  Where it may not write, a write is `EROFS` (`placeFs.writableAt(key)`
+  says). Where `require` or `import` is off, the hooks serve no module:
+  under strict it is refused, otherwise Node's own loader takes it, as
+  for a place without that domain.
+- A recursive `rm`, and the move of a directory — at its source and its
+  destination — are refused before any change when a rule below the path
+  hides something (`EACCES`) or forbids writes there (`EROFS`): a tree
+  moved takes no rule with it. A recursive `mkdir` makes no directory
+  where its rules refuse one.
+- Paths compare as the place's keys do: exactly in a virtual place,
+  without case — and in one normalization form — in a disk-origin place
+  on Windows and macOS; two rules that differ only so are a config error
+  everywhere. A spelling the disk reads as another name — an 8.3 name, a
+  stream — is no way past a rule: strict refuses it, and the facade's
+  disk territory serves none. Places with a tree only (`sab`, `map`,
+  `sea`).
 
 ## Strict routing
 
@@ -722,8 +1127,8 @@ places.<name>: …`) before anything is read.
 - `appRoot` itself is a **managed root**: `readdir(appRoot)` and
   `opendir(appRoot)` list the enabled places and nothing else, and
   `stat(appRoot)` is a directory. `watch` of it — as of any managed
-  territory — is `ENOTSUP` (recognized but unsupported); writes to it and
-  the other guarded calls on it (`rmdir`, `statfs`, `watchFile`, …) are
+  territory — is `ENOTSUP` (recognized but unsupported); writes to it,
+  `rmdir` and the guarded calls on it (`statfs`, `watchFile`, …) are
   `EACCES`.
 - A trusted entry point and `package.json` must live **outside
   `appRoot`**, or inside an explicit `node-default` / `disk` place.
@@ -901,9 +1306,11 @@ places: {
   never stands in for canonical (prepared) content — nor under another
   name: on Windows the `PlaceFs` facade takes no key with a `:` and no
   file name in short-name form for a disk file, in either mode
-  (`/a.txt::$DATA` is `a.txt`, `/INDEX~1.HTM` may be `index.html`). `readdir` merges
+  (`/a.txt::$DATA` is `a.txt`, `/INDEX~1.HTM` may be `index.html`) —
+  and in a place with rules no name in short-name form anywhere in the
+  key (`/CONFID~1/x` may lie in a directory a rule hides by its name). `readdir` merges
   published entries with disk directories and files of the other
-  extensions (no companions, no duplicates) — also in a directory that
+  extensions (no duplicates) — also in a directory that
   exists only on disk, and in either mode: a file of a cached extension is
   listed only once published. The `PlaceFs` facade serves the same disk
   territory.
@@ -961,8 +1368,8 @@ no stream or view in any thread still reads them — never on a timeout.
 - Use `pipeline()`. It destroys the source when the destination fails;
   a manual `pipe()` does not — destroy the source yourself when the
   destination closes or aborts.
-- A compressed consumer pins only its representation; source and
-  companions are held independently.
+- A compressed consumer pins only its representation; the source and
+  the other representations are held independently.
 - `kernel.close()` stops active streams (`ERR_VFS_CLOSED`); a lease still
   held afterwards is a caller error. `map` places hold owned Buffers the
   GC keeps alive: their leases and releases are no-ops.
@@ -1036,6 +1443,17 @@ also per place — in [Links on a place's disk](#links-on-a-places-disk-links).
 | `require`         | domain | off           | `true` or `{ ext, compile, prepare }`                                        |
 | `import`          | domain | off           | `true` or `{ ext, prepare }`                                                 |
 | `links`           | string | from defaults | Under strict, a place with a directory on disk: `deny` \| `verify`           |
+| `stat`            | object | both off      | `{ birthtime, directories }`: what the tree keeps; sab/map/sea only          |
+| `rules`           | object | none          | By path: what holds below it ([Rules of subtrees](#rules-of-subtrees))       |
+
+`stat` says what a place's tree keeps beyond a file's size, mtime and
+version: `birthtime`, each file's own — the disk's in a disk-origin
+place, its first write's in a virtual one, kept by a rewrite and a
+move — and `directories`, a directory's times, its mtime changing with
+its children as on disk. Off, the default, a birthtime equals the
+mtime and a directory's times are 0; ctime and atime always equal
+mtime. `stat().ino` is the node's id and `dev` the place's number
+either way.
 
 Place name: ASCII `[A-Za-z0-9][A-Za-z0-9._-]*`, no trailing dot, no
 Windows reserved names, unique after lowercasing.
@@ -1053,15 +1471,15 @@ an extension once, and a list names it once (see
 [Preparation](#preparation-prepare). The resolved place carries one index,
 `place.prepare = { [ext]: name } | null`.
 
-| `places.<name>.require.*` | Type     | Default               | Description                                                        |
-| ------------------------- | -------- | --------------------- | ------------------------------------------------------------------ |
-| `ext`                     | string[] | `['js','cjs','json']` | Extensions without cached data                                     |
-| `compile`                 | string[] | —                     | Extensions with the `\0require:bytecode` companion; no json or mjs |
+| `places.<name>.require.*` | Type     | Default               | Description                                                    |
+| ------------------------- | -------- | --------------------- | -------------------------------------------------------------- |
+| `ext`                     | string[] | `['js','cjs','json']` | Extensions without cached data                                 |
+| `compile`                 | string[] | —                     | Extensions with `require:bytecode` cached data; no json or mjs |
 
-| `places.<name>.fs.script.*` | Type     | Default | Description                                                    |
-| --------------------------- | -------- | ------- | -------------------------------------------------------------- |
-| `ext`                       | string[] | —       | Sources without cached data: `cachedData` undefined            |
-| `compile`                   | string[] | —       | Sources with the `\0script:bytecode` companion; no json or mjs |
+| `places.<name>.fs.script.*` | Type     | Default | Description                                                |
+| --------------------------- | -------- | ------- | ---------------------------------------------------------- |
+| `ext`                       | string[] | —       | Sources without cached data: `cachedData` undefined        |
+| `compile`                   | string[] | —       | Sources with `script:bytecode` cached data; no json or mjs |
 
 `fs.script` is an object with `ext`, `compile` or both, or `false`.
 
@@ -1135,6 +1553,7 @@ JSON file and flags that say the same resolve to one config.
 | `console`   | `globalThis.console` | Logger                                                                                                                      |
 | `seaModule` | `node:sea` if any    | Inject for tests                                                                                                            |
 | `preparers` | `{}`                 | `{ name: (raw, file) => ... }` named by the domains' `prepare` — synchronous; every name an enabled place uses must be here |
+| `trees`     | —                    | `{ name: { onGap, onError } }`: the handlers of each tree's intake ([Page and route trees](#page-and-route-trees))          |
 
 States: `new → initializing → ready → closed` (final). `fs()`,
 `snapshot()`, `watch()`, `link()` require `ready`. `initialize()`
@@ -1149,18 +1568,20 @@ published.
 | -------------------- | ------------------------------------------------------------------------------------------------------------------------------------ |
 | `await initialize()` | Scan / SEA / map through the publication pipeline: preparers, bytecode, compression                                                  |
 | `fs(name)`           | `PlaceFs` for an indexed fs place                                                                                                    |
+| `tree(name)`         | `SharedTree` of a shared tree — pages and routes, a menu — in every thread ([Page and route trees](#page-and-route-trees))           |
 | `on('publish', fn)`  | What each publication changed, after its commit — [Publication events](#publication-events); `'close'` once, last                    |
 | `version`            | The version of the last publication this thread committed or applied; 0 before the first — [Versions](#versions)                     |
 | `instance`           | The main kernel's random id, the same in every thread linked to it                                                                   |
-| `snapshot()`         | `{ segments, places, version, instance }` — published entries only                                                                   |
+| `snapshot()`         | `{ segments, places, trees, version, instance }` — each shared place's tree and each shared tree, as committed                       |
 | `link()`             | `{ vfs, transferList }` for a worker — the only worker transport                                                                     |
 | `watch()`            | Start `DirWatcher` (also auto if writable disk-origin)                                                                               |
 | `diagnostics()`      | Read-only picture of the shared memory: pool, bytes waiting to be freed, each worker's ACKs and holds — [Diagnostics](#diagnostics)  |
 | `retirements()`      | Internal diagnostics (debugging, tests; not a stable API): retired versions still held — representation, bytes, age, ACKs or holders |
-| `close()`            | Stop watcher and streams, reject queued and publishing mutations, drop projections, collectable SAB                                  |
+| `close()`            | Stop watcher and streams, reject queued and publishing mutations, drop the trees, collectable SAB                                    |
 
-`link()` returns `{ vfs: { snapshot, config: raw, appRoot, port },
-transferList }`. The kernel posts every `vfs-update` to the port, reads
+`link()` returns `{ vfs: { config: raw, appRoot, port }, transferList }`.
+The kernel posts its snapshot to the port first — `attach()` takes it
+before anything else — then every `vfs-update`, reads
 `vfs-ack`, `vfs-release` and mutation requests, and treats port `close`
 as worker exit.
 
@@ -1179,22 +1600,30 @@ kernel.version; // 9: the last publication this thread has seen
 - **What takes one.** A commit that publishes: `initialize()` (one commit,
   version 1 when anything was published), each watcher epoch, each
   mutation of a `sab + virtual` place — a write, an append, an `unlink`, a
-  `rm`, the rename of a file or of a subtree, removals included. Writing
-  the same bytes again is a new version, as it is a new mtime on disk.
-- **What takes none.** What publishes nothing: a rename onto itself,
-  `mkdir`, a forced `rm` of nothing, a watcher epoch that finds nothing to
-  change; and a compaction, which moves bytes without changing any file:
-  every entry keeps its version.
-- **One commit, one version.** The files of one commit — a watcher epoch,
-  a `rm -r`, a subtree move — share it: equal versions mean published
-  together.
-- **Every thread.** An entry carries its version into every snapshot and
+  `rm`, a `mkdir`, a `rmdir`, the rename of a file or of a subtree,
+  removals included. Writing the same bytes again is a new version, as it
+  is a new mtime on disk.
+- **What takes none.** What publishes nothing: a rename onto itself, a
+  recursive `mkdir` of a directory that exists, a forced `rm` of nothing,
+  a watcher epoch that finds nothing to change; and a compaction, which
+  moves bytes without changing any file: every file keeps its version.
+- **One commit, one version.** The files one commit publishes — a
+  watcher epoch, a `writeFiles` set — share it: equal versions mean
+  published together.
+- **A move keeps it.** A rename moves the file's node as it is: the
+  file — or every file of a moved directory — keeps the version of the
+  commit that published it; the rename's own version is the kernel's. A
+  file its rename publishes anew, its new name taking another pipeline
+  ([Copies and renames](#copies-and-renames)), takes the rename's.
+- **Every thread.** A file carries its version into every snapshot and
   update: `files.version(key)` is the same number in the main thread and in
   every worker. A worker's `kernel.version` is the version of the last
   update it applied: it lags while an update is on its way, and is equal
   once the worker holds the same state.
-- **`null`** for a missing key, a file of a `map` place (per-thread
-  content, which no commit publishes) and the disk territory of
+- **`null`** for a missing key, a directory of a place without
+  `stat.directories` — with them, a directory has the version of the
+  commit that last changed its children — a file of a `map` place
+  (per-thread content, which no commit publishes) and the disk territory of
   `fs.fallback: 'disk'`. A published entry the place keeps on disk — a
   file larger than `maxFileSize`, the source of `retainRaw: false` — is no
   disk territory: its commit published it, and it has its version.
@@ -1217,23 +1646,27 @@ kernel.version; // 9: the last publication this thread has seen
 (`attach()` returns the worker's kernel):
 
 ```js
-kernel.on('publish', ({ version, places }) => {
-  for (const [name, { created, replaced, removed }] of Object.entries(places)) {
-    // the source keys of place `name` this publication created, replaced
-    // or removed
+kernel.on('publish', ({ version, places, trees }) => {
+  for (const [name, changes] of Object.entries(places)) {
+    const { created, replaced, removed, moved } = changes;
+    // the keys of the files of place `name` this publication created,
+    // replaced or removed, and the [from, to] of each node it moved
   }
 });
 ```
 
 - **`'publish'`** comes once per publication a thread applies — one
   commit: `initialize()`, a watcher epoch, a mutation of a `sab + virtual`
-  place — with its version and the source keys it changed, by place:
-  `created` (no file there before), `replaced`, `removed`. A rename is its
-  old key `removed` and its new one `created` or `replaced`, in one event;
-  companions are never named. What publishes nothing is not announced,
-  nor is a compaction.
+  place — with its version and what it changed, by place: the keys of
+  the files it `created` (no file there before), `replaced` and
+  `removed`, and `moved`, the `[from, to]` of each node a rename moved —
+  a file, or a directory with all below it, as one pair. A file a rename
+  replaced is in `removed`; a file its rename publishes anew, its new
+  name taking another pipeline, is in `replaced` too. `mkdir` and
+  `rmdir` announce their place with no key. Representations are never
+  named. What publishes nothing is not announced, nor is a compaction.
 - **When.** After the commit, in a microtask of its own — never inside
-  it: the index and the projection hold the publication already. On the
+  it: the thread's tree holds the publication already. On the
   main thread, and in a worker for its own mutation, the listeners run
   before the mutation's promise settles. A worker announces an update when
   it applies it, and ACKs it without waiting for the listeners. Events come
@@ -1246,12 +1679,17 @@ kernel.on('publish', ({ version, places }) => {
   be newer already — compare `files.version(key)` with `event.version`.
 - **Shared places only.** A `map` place is each thread's own: its writes
   publish nothing and announce nothing.
+- **Shared trees.** `trees` names each tree the publication changed:
+  `[{ tree, seqFrom, seqTo, loaded }]`, empty when it changed none
+  ([Page and route trees](#page-and-route-trees)).
 - **Errors.** What a listener throws is an uncaught exception, as from any
   emitter; the publication, its ACK and the mutation's promise are done by
   then. An async listener's rejection is its own. The kernel never emits
   `'error'`.
 - **`'close'`** comes once, last, in a microtask after the first
-  `close()`, which then drops every listener. Once `close()` has
+  `close()`, which then drops every listener — in a worker whose view
+  broke, with the failure as its argument
+  ([`VfsKernel` (worker)](#vfskernel-worker)). Once `close()` has
   returned, no `'publish'` listener is called — not even for a
   publication committed before it. Iterated with
   `events.on(kernel, 'publish', { close: ['close'] })`, the events end
@@ -1283,7 +1721,7 @@ of the call — a frozen plain object, a new one each time:
   },
   published: {          // what the shared places (sab, sea) publish
     files,              // their sources, those read from disk included
-    bytes,              // what their versions take of the pool, companions included
+    bytes,              // what their versions take of the pool, representations included
   },
   retired: {            // replaced or removed representations not freed yet
     representations, bytes, oldestMs,
@@ -1304,6 +1742,14 @@ of the call — a frozen plain object, a new one each time:
     files, bytes,
     fallback: { files, bytes }, // of them, those the pool had no room for
   },
+  trees: {              // each shared tree
+    [name]: {
+      nodes, payloads,  // its live nodes, the payloads among them
+      bytes,            // what their representations take of the pool
+      last,             // the number of the last batch it shows
+      held, waiting,    // its intake holds the batches; how many wait
+    },
+  },
   preparation: {
     failures,           // preparations that failed since initialize()
     places,             // { [place]: failures }, each place that declares `prepare`
@@ -1321,7 +1767,7 @@ of the call — a frozen plain object, a new one each time:
 ```
 
 - A **representation** is what is retired and freed on its own: a source,
-  or one of its companions — a compressed form, a bytecode flavor. One
+  or one made of it — a compressed form, a bytecode flavor. One
   replaced file with gzip and bytecode is three.
 - A **stuck worker** shows as a link whose `pending.oldestMs` grows: it
   receives updates but does not ACK them, and every representation they
@@ -1329,8 +1775,12 @@ of the call — a frozen plain object, a new one each time:
   retires one waits for ACKs; one that adds files never does. A worker
   that ACKs but keeps a stream or lease open shows as its `held`; the
   main thread's own streams and leases as `main.held`.
-- `pool.used` is `published.bytes` plus `retired.bytes`, plus the bytes of
-  the publications in progress: anything more is a leak.
+- `pool.used` is `published.bytes` plus the `bytes` of every tree, plus
+  `retired.bytes`, plus the bytes of the publications in progress:
+  anything more is a leak.
+- A **stuck intake** shows as a tree whose `waiting` grows: `held` —
+  a refused batch or no load yet, waiting for a load — or past a gap its
+  source has not filled.
 - `disk.fallback` counts sources a place caches but serves from disk, the
   pool having had no room when they were published — neither larger than
   `maxFileSize` nor kept on disk by `retainRaw: false`; they stay on disk
@@ -1345,8 +1795,9 @@ of the call — a frozen plain object, a new one each time:
 - Read-only: it frees, settles, compacts and publishes nothing, and costs
   nothing on reads or publications — every figure but the failures is
   taken from the pool, the retirement books, the links, the index and the
-  queues when asked. It walks the index: call it every few seconds, not
-  per request. Main thread only, on a ready kernel.
+  queues when asked. It walks the index, and every shared tree node by
+  node (~0.3 ms for 10⁴ nodes, ~8 ms for 10⁵): call it every
+  few seconds, not per request. Main thread only, on a ready kernel.
 
 #### Adapter API
 
@@ -1361,8 +1812,10 @@ Application code should use `kernel.fs(name)`.
 
 ### `VfsKernel` (worker)
 
-`attach({ link = workerData.vfs, preparers } = {})` projects the
-snapshot — at its `version`, with the main kernel's `instance` — installs
+`attach({ link = workerData.vfs, preparers } = {})` takes the snapshot
+off the link's port — its first message — and builds from it a replica
+of each shared place's tree at its `version`, with the main kernel's
+`instance`, keeping nothing of the snapshot but the replicas; installs
 hooks the config asks for, applies each `vfs-update` arriving through
 the `MessagePort` created by `kernel.link()` (`link.port`), each with
 its version, announcing each publication to its own `'publish'`
@@ -1374,6 +1827,19 @@ or `kernel` of the default import).
 `preparers` serve local writes to the worker's own `map` places; a
 worker never prepares shared places. The options object replaces the
 positional `attach(link)` of earlier versions.
+
+An update the worker cannot apply breaks its view in the step that
+applies it, so no one sees half of it: every call that reaches its
+places — its own `map` places too, one view, one refusal — through
+`kernel.fs()`, the patched `node:fs`, `require` or `import` — is then `ERR_VFS_CLOSED` with the failure as its `cause`, a
+mutation waiting for its answer rejects with the same, `'close'` comes
+with it, and `kernel.broken` holds it. The worker ACKs neither that
+update nor any later one; its streams stop, and its port stays open
+while it holds a lease or a borrowed chunk — the main kernel keeps their
+bytes until then — and closes with the last. The error is rethrown: by
+default an uncaught exception ends the worker, which closes the port
+too. There is no recovery: a new view is a new worker with a new
+`link()`.
 
 ### `PlaceFs`
 
@@ -1391,45 +1857,54 @@ rules. A recursive `readdir` names its entries with `/`, the form of keys,
 on every platform; `sep: path.sep` asks for the native separator — what
 the patched `node:fs` lists with — in the same order, the keys'.
 
-| Method                                       | Returns                                                        | Description                                                                                                                                       |
-| -------------------------------------------- | -------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `readFile(key, opts)`                        | Buffer \| string \| null                                       | Owned copy                                                                                                                                        |
-| `readFileView(key)`                          | lease \| null                                                  | `{ view, version, release, [Symbol.dispose] }`; needs `zeroCopy`; null when missing or on disk                                                    |
-| `withFileView(key, fn)`                      | Promise                                                        | `fn(view)` under a lease; `null` without calling `fn` when missing                                                                                |
-| `stat(key, opts)`                            | `VfsStats` \| null                                             | Lazy; `{ bigint }` ok                                                                                                                             |
-| `exists(key)`                                | bool                                                           | File or implicit directory                                                                                                                        |
-| `version(key)`                               | number \| null                                                 | The commit that published the file ([Versions](#versions)); null for a missing key, a `map` place, the disk territory                             |
-| `readdir(key, opts)`                         | string[] \| Buffer[] \| Dirent[]                               | Implicit dirs; lex order; `{ withFileTypes, recursive, encoding, sep }` or an encoding; recursive names `/`-separated unless `sep: path.sep`      |
-| `createReadStream(key, opts)`                | `VfsReadStream` \| null                                        | `{ start, end }` inclusive, `zeroCopy`; `release()`                                                                                               |
-| `storedEncodings(key)`                       | string[]                                                       | `'raw'` plus configured codecs                                                                                                                    |
-| `readFileCompressed(key, enc)`               | Buffer \| null                                                 | Owned copy                                                                                                                                        |
-| `readFileCompressedView(key, enc)`           | lease \| null                                                  | Pins that representation only; needs `zeroCopy`                                                                                                   |
-| `statCompressed(key, enc)`                   | object \| null                                                 | `{ size, sourceSize, encoding, … }`                                                                                                               |
-| `createReadStreamCompressed(key, enc, opts)` | `VfsReadStream` \| null                                        | Range is compressed bytes                                                                                                                         |
-| `pathOf(key)`                                | string                                                         | Absolute OS path                                                                                                                                  |
-| `script(key)`                                | `{ source, cachedData, scriptOptions, meta, version }` \| null | `ENOTSUP` when no `fs.script`; `cachedData` undefined outside `fs.script.compile` ([`fs.script`](#fsscript))                                      |
-| `meta(key)`                                  | object \| null                                                 | Frozen preparer metadata                                                                                                                          |
-| `writeFile` / `appendFile` / `unlink`        | void \| Promise                                                | Sync for map/disk; Promise for `sab + virtual`                                                                                                    |
-| `writeFiles(files, opts)`                    | void \| `Promise<number>`                                      | Several files of a virtual place as one publication, or none — [writeFiles](#several-files-as-one-writefiles); the version of its commit          |
-| `mkdir` / `rm` / `rename`                    | void \| Promise                                                | `mkdir` creates no entry, checks the hierarchy; a directory `rename` moves a raw-only subtree; `ENOTSUP` for `appendFile` / moving a prepared key |
+| Method                                       | Returns                                                        | Description                                                                                                                                                                            |
+| -------------------------------------------- | -------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `readFile(key, opts)`                        | Buffer \| string \| null                                       | Owned copy                                                                                                                                                                             |
+| `readFileView(key)`                          | lease \| null                                                  | `{ view, version, release, [Symbol.dispose] }`; needs `zeroCopy`; null when missing or on disk                                                                                         |
+| `withFileView(key, fn)`                      | Promise                                                        | `fn(view)` under a lease; `null` without calling `fn` when missing                                                                                                                     |
+| `stat(key, opts)`                            | `VfsStats` \| null                                             | Lazy; `{ bigint }` ok; `ino` the node's id, `dev` the place's number; times by `places.<name>.stat`                                                                                    |
+| `exists(key)`                                | bool                                                           | File or directory                                                                                                                                                                      |
+| `writableAt(key)`                            | bool                                                           | Whether the place takes writes at the key, by its rules; `writable` is the place's own `fs.writable`                                                                                   |
+| `version(key)`                               | number \| null                                                 | The commit that published the file ([Versions](#versions)); a directory's with `stat.directories`; null for a missing key, a directory without them, a `map` place, the disk territory |
+| `readdir(key, opts)`                         | string[] \| Buffer[] \| Dirent[]                               | Files and directories, empty ones too; lex order; `{ withFileTypes, recursive, encoding, sep }` or an encoding; recursive names `/`-separated unless `sep: path.sep`                   |
+| `createReadStream(key, opts)`                | `VfsReadStream` \| null                                        | `{ start, end }` inclusive, `zeroCopy`; `release()`                                                                                                                                    |
+| `storedEncodings(key)`                       | string[]                                                       | `'raw'` plus configured codecs                                                                                                                                                         |
+| `readFileCompressed(key, enc)`               | Buffer \| null                                                 | Owned copy                                                                                                                                                                             |
+| `readFileCompressedView(key, enc)`           | lease \| null                                                  | Pins that representation only; needs `zeroCopy`                                                                                                                                        |
+| `statCompressed(key, enc)`                   | object \| null                                                 | `{ size, sourceSize, encoding, … }`                                                                                                                                                    |
+| `createReadStreamCompressed(key, enc, opts)` | `VfsReadStream` \| null                                        | Range is compressed bytes                                                                                                                                                              |
+| `pathOf(key)`                                | string                                                         | Absolute OS path                                                                                                                                                                       |
+| `script(key)`                                | `{ source, cachedData, scriptOptions, meta, version }` \| null | `ENOTSUP` when no `fs.script`; `cachedData` undefined outside `fs.script.compile` ([`fs.script`](#fsscript))                                                                           |
+| `meta(key)`                                  | object \| null                                                 | Frozen preparer metadata                                                                                                                                                               |
+| `writeFile` / `appendFile` / `unlink`        | void \| Promise                                                | Sync for map/disk; Promise for `sab + virtual`                                                                                                                                         |
+| `writeFiles(files, opts)`                    | void \| `Promise<number>`                                      | Several files of a virtual place as one publication, or none — [writeFiles](#several-files-as-one-writefiles); the version of its commit                                               |
+| `mkdir` / `rmdir` / `rm` / `rename`          | void \| Promise                                                | `mkdir` makes a directory, `rmdir` removes an empty one; `rename` moves a file or a directory, copying nothing; `ENOTSUP` for `appendFile` / moving a prepared key                     |
+| `idOf(key)` / `keyOf(id)`                    | number \| null / string \| null                                | The node's id — `stat().ino`, kept by a move; one in every thread but for `map` — and the key that has it now                                                                          |
 
 A virtual place keeps the hierarchy of a filesystem: a path is a file or a
-directory, never both. A key under a file is `ENOTDIR`, a file where a
+directory, never both, and a directory is a node of its own, as on disk:
+`mkdir` makes one — with `recursive`, every one missing down to it — and
+an empty one is listed until `rmdir` or `rm` removes it. A write, an
+append, a `copyFile` or a rename into a directory that does not exist is
+`ENOENT`, as in `node:fs`; `writeFiles` makes the directories its files
+lack, in its commit, and a `cp` of one file makes them first, as
+`node:fs` `cp` does. A key under a file is `ENOTDIR`, a file where a
 directory is `EISDIR` — for writes, appends, copies, renames and subtree
-moves alike, and for mutations that run at the same time. Directories are
-implicit — `mkdir` creates no entry, a directory exists while a file is
-under it — yet answer as a filesystem does: `mkdir` of a file is `EEXIST`,
-under a file `ENOTDIR`, of an existing directory `EEXIST` without
-`recursive`; `unlink` of a directory is `EISDIR`, and `rm` of one without
-`recursive` is `ERR_FS_EISDIR`, `node:fs`'s own error. The place's own
-directory (`'/'`) always exists and never moves: a recursive `mkdir` of it
-succeeds, a plain one is `EEXIST`, writes and `unlink` are `EISDIR`, `rm`
-and `rename` are `ENOTSUP`. Through patched
-`fs`, a `rename` across a virtual place's boundary is `EXDEV` (see
-[Copies and renames](#copies-and-renames)), and the `*Sync` forms refuse a
-`sab + virtual` place (`ENOTSUP`): the main kernel publishes its
-mutations — `mkdirSync` included, except of the place's own directory,
-which answers at once.
+moves alike, and for mutations that run at the same time. `mkdir` of a
+file is `EEXIST`, under a file `ENOTDIR`, of an existing directory
+`EEXIST` without `recursive`; `rmdir` of a directory with children is
+`ENOTEMPTY`, of a file `ENOTDIR`; `unlink` of a directory is `EISDIR`, and
+`rm` of one without `recursive` is `ERR_FS_EISDIR`, `node:fs`'s own error.
+`mkdir` and `rmdir` publish: each takes a version, and its event names no
+file. The place's own directory (`'/'`) always exists and never moves: a
+recursive `mkdir` of it succeeds, a plain one is `EEXIST`, writes and
+`unlink` are `EISDIR`, `rmdir`, `rm` and `rename` are `ENOTSUP`. Through
+patched `fs`, a `rename` across a virtual place's boundary is `EXDEV` (see
+[Copies and renames](#copies-and-renames)), a recursive `rmdir` — which
+`node:fs` deprecates — is `ENOTSUP` (`rm` removes a tree), and the `*Sync`
+forms refuse a `sab + virtual` place (`ENOTSUP`): the main kernel
+publishes its mutations — `mkdirSync` and `rmdirSync` included, except
+`mkdirSync` of the place's own directory, which answers at once.
 
 #### Several files as one: `writeFiles`
 
@@ -1497,7 +1972,8 @@ touches has been routed:
   destination allows it;
 - a copy or a rename hands on the source's raw input — the raw disk file
   of a disk-origin place, prepared or not, or the canonical bytes of an
-  unprepared virtual entry — never a prepared result or a companion, and
+  unprepared virtual entry — never a prepared result or a derived
+  representation, and
   the destination publishes it through its own pipeline;
 - a recursive or compound operation whose routing could check only its top
   path is refused;
@@ -1537,7 +2013,7 @@ routing cannot hold it`).
 forms: `readFile`, `stat`, `lstat`, `access`, `realpath` (its `.native`
 variants too), `readdir`,
 `opendir`, `existsSync`, `createReadStream`, `openAsBlob`, `writeFile`,
-`appendFile`, `unlink`, `mkdir`, `rm`, `rename`, `copyFile` and a
+`appendFile`, `unlink`, `mkdir`, `rmdir`, `rm`, `rename`, `copyFile` and a
 non-recursive `cp` (see [Copies and renames](#copies-and-renames)).
 
 `openAsBlob` reads through a native binding, past every `node:fs`
@@ -1600,7 +2076,8 @@ read or written:
   past the routing and misses virtual entries.
 - A hard link into or out of a place: one physical file under two names,
   while a place gives each name its own canonical content, preparation and
-  companions — and a second name would escape the place's mutation policy.
+  representations — and a second name would escape the place's mutation
+  policy.
 - `rm` or `rmdir` of a place's own directory — an indexed place's, and
   under strict any place's: it is the place's mount, which `PlaceFs`
   keeps too (an `unlink` of it is `EISDIR`, as `PlaceFs` answers). Under
@@ -1619,11 +2096,15 @@ read or written:
   level (`readdir(parent)`) stays native.
 - A directory renamed across a place's boundary — into, out of or between
   places, a place's root included: every descendant would change policy
-  at once. And a virtual subtree that is not raw-only: a prepared or
-  compiled source cannot move without its pipeline running again.
+  at once. And a virtual directory holding a file that cannot move as it
+  is: a prepared source, one with `require.compile` cached data
+  (compiled under the file's path), or one with path-dependent
+  `scriptOptions` / `meta`, cannot move without its pipeline running
+  again.
 - A guarded mutation (below) in a virtual place, `open` with a flag that
   writes included: only its store changes its entries, and no file appears
-  in its directory on disk.
+  in its directory on disk. A recursive `rmdir` there too, which `node:fs`
+  deprecates: `rm` removes a tree.
 - A `glob` loaded before the first `install()` whose walk starts in or
   above managed territory: it walks with the native functions it captured
   (see below).
@@ -1642,14 +2123,13 @@ read or written:
   routing, and under strict lies off `appRoot`'s line (above);
 - the guarded APIs, once the routing of every path argument allows them:
   `chmod` / `lchmod`, `chown` / `lchown`, `utimes` / `lutimes`,
-  `truncate`, `readlink`, `statfs`, `watchFile`, `rmdir`
-  (without `recursive`), `mkdtemp` — its disposable forms too — whose
-  path is the directory it makes: its prefix and the six characters it
-  appends, `XXXXXX` in its errors, as in `node:fs`'s. A denied path stays
-  `EACCES` / `EROFS`, so it cannot be read, listed, copied or probed
-  through them, and the strict `appRoot` itself is refused; in a virtual
-  place a directory is implicit, so `mkdtemp` there is `ENOTSUP`, like
-  any guarded mutation.
+  `truncate`, `readlink`, `statfs`, `watchFile`, `mkdtemp` — its
+  disposable forms too — whose path is the directory it makes: its
+  prefix and the six characters it appends, `XXXXXX` in its errors, as in
+  `node:fs`'s. A denied path stays `EACCES` / `EROFS`, so it cannot be
+  read, listed, copied or probed through them, and the strict `appRoot`
+  itself is refused; in a virtual place, whose directories only its store
+  makes, `mkdtemp` is `ENOTSUP`, like any guarded mutation.
 - `glob`, which walks with the `node:fs` functions it captured when Node
   loaded it: `install()` loads it, so it walks through the patch — every
   directory read and stat routed, so it lists what the places list at
@@ -1698,7 +2178,7 @@ input** — what a publication consumes:
 | Unprepared virtual (or SEA) entry                        | its canonical bytes — they are its raw input    |
 | Prepared virtual (or SEA) entry                          | none, it is not kept: `ENOTSUP`                 |
 | Hidden source (unpublished, unmanaged, `fallback: deny`) | `EACCES`, before anything is read               |
-| Compression or bytecode companion                        | never: derived from the content, rebuilt anyway |
+| A compressed or bytecode representation                  | never: derived from the content, rebuilt anyway |
 
 The destination publishes the bytes through its own pipeline — its
 preparer runs once, the source's never runs again:
@@ -1741,19 +2221,30 @@ A `rename` routes both paths as mutations and its source as a read:
   any place, whatever its provider: a directory, the place's own included,
   or a link leaving it is `ENOTSUP` (it could take a link of the place's
   disk out of it, a link into `appRoot` from outside).
-- In a virtual place the store moves an ordinary entry atomically and keeps
-  its mtime; the preparer of a new extension runs once. A prepared entry
-  has no raw input to move: `ENOTSUP`. A file renamed onto itself changes
-  nothing — no publication, no update — as with `node:fs`.
-- A virtual directory moves as a whole subtree when every source under it
-  is raw-only — no preparer, no bytecode (`require.compile`,
-  `fs.script.compile`), no path-dependent `scriptOptions` / `meta`.
-  Sources and their compressed representations keep their bytes, stat and
-  mtime under the new prefix, in one publication; nothing is prepared,
-  compiled or compressed again. One source that cannot move refuses the
-  whole subtree (`ENOTSUP`); a destination that exists is `ENOTEMPTY` /
-  `ENOTDIR`, one under a file `ENOTDIR`, a move into itself `EINVAL` —
-  before anything changes.
+- In a virtual place a rename works as on Linux, in one commit: the file's
+  node moves — its `ino`, its payload with every representation, its
+  version — and nothing is copied; the event names it in `moved`. Onto a
+  file it replaces it (the old one in `removed`), onto a directory it is
+  `EISDIR`, and the destination's directory must exist (`ENOENT`). A file
+  whose new name takes another pipeline — a preparer of the new
+  extension, other bytecode flavors or `require.compile` (its cached data
+  is compiled under its path), another compression — is published anew
+  under that name in the same commit, its mtime kept: the preparer runs
+  once. A prepared entry has no raw input to move: `ENOTSUP`. A file
+  renamed onto itself changes nothing — no publication, no update — as
+  with `node:fs`.
+- A virtual directory moves as one node, everything below it with it, when
+  every file under it can move as it is — no preparer, no
+  `require.compile` cached data (compiled under the file's path), no
+  path-dependent `scriptOptions` / `meta`: files with their compressed
+  representations and their `fs.script.compile` cached data (the bare
+  source under V8's defaults, no filename) keep their bytes, ids,
+  versions and times under the new prefix, in one publication; nothing
+  is copied, prepared, compiled or compressed again.
+  One file that cannot move refuses the whole move (`ENOTSUP`). Onto an
+  empty directory it replaces it; onto one with children it is
+  `ENOTEMPTY`, onto a file `ENOTDIR`, under a file `ENOTDIR`, into itself
+  `EINVAL` — before anything changes.
 - Across a virtual place's boundary it is `EXDEV` — never a copy and a
   delete.
 
@@ -1763,20 +2254,22 @@ not a raw-preserving copy.
 
 ## Errors
 
-| Code            | Meaning                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                               |
-| --------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `EACCES`        | Strict routing denial: unowned path under `appRoot`, place with no fs domain, or an unpublished / excluded-ext entry in an indexed mount; any unpublished entry of a place with `fs.fallback: 'deny'`, strict or not; the hidden source of a copy, rename or link; under strict a path through a link on a place's disk (`links`)                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                     |
-| `EROFS`         | Place has `fs.writable: false` (or provider `sea`) — also for `open` / `createWriteStream` / `readFile` / `createReadStream` with a flag that writes                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                  |
-| `ENOTSUP`       | No file descriptor for a virtual entry (`open`, whatever its flags) or for the canonical content of a published disk-origin entry (`open` with a flag that can read, `+` included) — nor for `readFile` or `createReadStream` with a flag that writes, which open as `open` does; `*View` or a `{ zeroCopy: true }` stream without `fs.zeroCopy`; compressed API for an unconfigured encoding; `appendFile`, `rename` or a copy of a prepared virtual key; a write whose preparer is not registered in this thread; a `*Sync` mutation or copy into a `sab + virtual` place; a copy option the VFS cannot honor; a recursive `cp` of or into managed territory; a hard link into or out of a place; `watch` of managed territory; a recursive walk or `rename` of a tree that holds places; a directory renamed across a place's boundary (a place's root included) — under strict a directory or a link leaving any place; a virtual subtree rename that is not raw-only; `rm`, `rmdir` or `rename` of a place's own directory (through patched `fs`: an indexed place's, and under strict any place's); a guarded mutation in a virtual place, `open` / `createWriteStream` / `readFile` / `createReadStream` with a flag that writes included; a `glob` loaded before the patch whose walk starts in or above managed territory; under strict, a `node:fs` function the patch does not know (`syscall` names it), and a call that would make, remove or move a link on a place's disk, remove or move a directory through one, or move in a tree that cannot be checked for links (`links`); `writeFiles` of a disk-origin place, or with a flag that neither replaces nor creates |
-| `ENOENT`        | Missing key in a writable place; `readdir` of a missing directory                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                     |
-| `ERR_FS_EISDIR` | `rm` of a virtual directory without `recursive` — the `SystemError` `node:fs` throws, `info.code` `EISDIR`                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                            |
-| `ERR_FS_CP_*`   | `cp` of a file onto a directory (`ERR_FS_CP_NON_DIR_TO_DIR`), or onto an existing file with `errorOnExist` (`ERR_FS_CP_EEXIST`) — the `SystemError` `node:fs` throws, named by the destination                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                        |
-| `EEXIST`        | `mkdir` of a virtual file, or of a directory without `recursive` (the place's own included); a write with an `x` flag, or a `COPYFILE_EXCL` copy, onto an existing virtual entry; an existing key of a `writeFiles` set with an `x` flag                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                              |
-| `ENOTDIR`       | `readdir` of a file; a virtual key under a file — in a `writeFiles` set, under another key of the set too; a file the VFS serves or stores, named with a trailing separator (`force` ignores it in `rm`)                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                              |
-| `EXDEV`         | `rename` across a virtual place's boundary: between two places, or between one and the disk                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                           |
-| `ENOSPC`        | The pool has no room right now for content that cannot fall back to disk — a virtual write, copy or rename (a subtree move included), a prepared or SEA source, a `fs.script.compile` flavor; nothing is published. Named by the operation: `open` of the key (at startup too, where `initialize()` rejects with it), `rename` with `dest`, a copy's `copyfile` / `cp` with `dest` and the store's refusal as its `cause`, `writeFiles` with the key that did not fit                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                 |
-| `EFBIG`         | Same content as `ENOSPC`, but too large to ever fit, whatever the pool's state, never just a transient lack of room: a canonical source larger than `places.<name>.maxFileSize` (or `defaults.memory.maxFileSize`), or a companion — a `fs.script.compile` flavor, a subtree-move copy — larger than one segment (`defaults.memory.segmentSize`). Named the same way as `ENOSPC`                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                      |
-| `EISDIR`        | `readFile` / `createReadStream` / `openAsBlob` / `openAsBlobSync` of an implicit directory; a virtual file written, copied or renamed where a directory is; a write or `unlink` of a place's own directory; `unlink` of a virtual directory; a virtual file write or copy to a path with a trailing separator                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                         |
+| Code            | Meaning                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                |
+| --------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `EACCES`        | Strict routing denial: unowned path under `appRoot`, place with no fs domain, or an unpublished / excluded-ext entry in an indexed mount; any unpublished entry of a place with `fs.fallback: 'deny'`, strict or not; the hidden source of a copy, rename or link; under strict a path through a link on a place's disk (`links`)                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                      |
+| `EROFS`         | Place has `fs.writable: false` (or provider `sea`) — also for `open` / `createWriteStream` / `readFile` / `createReadStream` with a flag that writes                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                   |
+| `ENOTSUP`       | No file descriptor for a virtual entry (`open`, whatever its flags) or for the canonical content of a published disk-origin entry (`open` with a flag that can read, `+` included) — nor for `readFile` or `createReadStream` with a flag that writes, which open as `open` does; `*View` or a `{ zeroCopy: true }` stream without `fs.zeroCopy`; compressed API for an unconfigured encoding; `appendFile`, `rename` or a copy of a prepared virtual key; a write whose preparer is not registered in this thread; a `*Sync` mutation or copy into a `sab + virtual` place; a copy option the VFS cannot honor; a recursive `cp` of or into managed territory; a hard link into or out of a place; `watch` of managed territory; a recursive walk or `rename` of a tree that holds places; a directory renamed across a place's boundary (a place's root included) — under strict a directory or a link leaving any place; a virtual directory rename with a file below that cannot move as it is; a recursive `rmdir` in a virtual place; `rm`, `rmdir` or `rename` of a place's own directory (through patched `fs`: an indexed place's, and under strict any place's); a guarded mutation in a virtual place, `open` / `createWriteStream` / `readFile` / `createReadStream` with a flag that writes included; a `glob` loaded before the patch whose walk starts in or above managed territory; under strict, a `node:fs` function the patch does not know (`syscall` names it), and a call that would make, remove or move a link on a place's disk, remove or move a directory through one, or move in a tree that cannot be checked for links (`links`); `writeFiles` of a disk-origin place, or with a flag that neither replaces nor creates |
+| `ENOENT`        | Missing key in a writable place; `readdir` of a missing directory; a virtual write, append, `copyFile` or rename into a directory that does not exist                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                  |
+| `ERR_FS_EISDIR` | `rm` of a virtual directory without `recursive` — the `SystemError` `node:fs` throws, `info.code` `EISDIR`                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                             |
+| `ERR_FS_CP_*`   | `cp` of a file onto a directory (`ERR_FS_CP_NON_DIR_TO_DIR`), or onto an existing file with `errorOnExist` (`ERR_FS_CP_EEXIST`) — the `SystemError` `node:fs` throws, named by the destination                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                         |
+| `EEXIST`        | `mkdir` of a virtual file, or of a directory without `recursive` (the place's own included); a write with an `x` flag, or a `COPYFILE_EXCL` copy, onto an existing virtual entry; an existing key of a `writeFiles` set with an `x` flag                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                               |
+| `ENOTDIR`       | `readdir` of a file; a path through a file a place serves to the fs domain — `stat`, `readFile`, `readdir` of `a.txt/x`, as `node:fs` answers; `rmdir` of a virtual file; a virtual key under a file — in a `writeFiles` set, under another key of the set too; a file the VFS serves or stores, named with a trailing separator (`force` ignores it in `rm`)                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                          |
+| `EXDEV`         | `rename` across a virtual place's boundary: between two places, or between one and the disk                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                            |
+| `ENOSPC`        | The pool has no room right now for content that cannot fall back to disk — a virtual write or copy, a rename that publishes a file anew, a prepared or SEA source, a `fs.script.compile` flavor; nothing is published. Named by the operation: `open` of the key (at startup too, where `initialize()` rejects with it), `rename` with `dest`, a copy's `copyfile` / `cp` with `dest` and the store's refusal as its `cause`, `writeFiles` with the key that did not fit                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                               |
+| `EFBIG`         | Same content as `ENOSPC`, but too large to ever fit, whatever the pool's state, never just a transient lack of room: a canonical source larger than `places.<name>.maxFileSize` (or `defaults.memory.maxFileSize`), or a `fs.script.compile` flavor larger than one segment (`defaults.memory.segmentSize`). Named the same way as `ENOSPC`                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                            |
+| `EISDIR`        | `readFile` / `createReadStream` / `openAsBlob` / `openAsBlobSync` of a directory of an indexed place; a virtual file written, copied or renamed where a directory is; a write or `unlink` of a place's own directory; `unlink` of a virtual directory; a virtual file write or copy to a path with a trailing separator                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                |
+| `ENOTEMPTY`     | `rmdir` of a virtual directory with children; a virtual directory renamed onto one with children                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                       |
+| `EINVAL`        | A virtual directory renamed into its own subtree                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                       |
 
 Errors carry the same `code`, `errno`, `syscall` and `path` fields as
 `node:fs`, and `dest` for copies, links and renames. A stream stopped by
@@ -1790,39 +2283,69 @@ kernel closes, or asked of it afterwards (`[vfs] mutations requires a
 ready kernel (state: closed)`); a worker's mutation whose link to the main
 kernel closed before its answer (`[vfs] link closed before the mutation
 was answered: it may or may not have been published` — the main kernel
-may have published it before it closed).
+may have published it before it closed). So are a read of a facade of a
+closed kernel — never "no file" — and `kernel.fs()`, `snapshot()` or
+`diagnostics()` of one (`[vfs] fs() requires a ready kernel (state:
+closed)`). In a worker whose view broke, every call that reaches its
+places is `ERR_VFS_CLOSED` with the failure as its `cause`
+([`VfsKernel` (worker)](#vfskernel-worker)).
 
 ## Protocol
 
 ```
-snapshot    { segments: [{ id, sab }], places: { <name>: { entries: [[key, entry]] } },
+vfs-snapshot { name: 'vfs-snapshot', snapshot }                               main → worker
+            the first message of a link
+snapshot    { segments: [{ id, sab }], places: { <name>: tree },
+              trees: { <name>: { snapshot: tree, last } },
               version, instance, links?: { known: [path], generation } }
-vfs-update  { name, updateId, version, places: { <name>: { entries, removals,
-              retired: [[key, retireId]] } }, newSegments: [{ id, sab }] }   main → worker
+vfs-update  { name, updateId, version, places: { <name>: { delta, created,
+              replaced, removed, moved } }, trees: { <name>: { deltas,
+              seq: { from, to, loaded } | null } }, newSegments: [{ id,
+              sab }] }                                                        main → worker
 vfs-ack     { name: 'vfs-ack', updateId, retained?: [retireId] }              worker → main
 vfs-release { name: 'vfs-release', retireIds: [retireId] }                    worker → main
 vfs-mutate  { name, id, place, op, key, to?, options?, data? }                worker → main
             writeFiles: { name, id, place, op, keys, sizes, options, data }
-vfs-mutated { name, id, error?: { code, message, syscall, path, dest },
-              version? }                                                      main → worker
+            a tree's: { name, id, tree, op: 'submit' | 'load', seq,
+              ops | rows }, each payload's bytes transferred
+vfs-mutated { name, id, error?: { code, message, syscall, path, dest,
+              seq, index, id, other }, version?, result? }                    main → worker
 vfs-links   { name: 'vfs-links', add: [path], generation }                    main → worker
-entry       shared { kind, segmentId, offset, length, stat, version, scriptOptions?, meta? }
-            | disk { kind, path, stat, version, scriptOptions?, meta? }
-stat        { size, mtimeMs } (+ sourceSize, encoding for compressed companions)
+tree        the place's tree in pre-order as columns — ids, parents, names,
+            classes, payloads — typed arrays and arrays of strings, no SAB
+delta       one commit's log of steps on nodes by id (create, attach,
+            detach, kill, payload, relocate…) as columns over one
+            buffer, and the representations it retires: { id, kind,
+            retireId }
+payload     version, size, mtimeMs (+ birthtimeMs), scriptOptions?, meta?, and
+            each representation as kind, segmentId, offset, length; a source
+            kept on disk has none: its key names its file
 ```
 
-One `vfs-update` per watcher epoch or accepted virtual mutation. Source
-and companions of one file go in the same message. Every shared version
-an update replaces or removes is `retired` under a `retireId` that exists
+A link's first message is `vfs-snapshot`; `attach()` refuses a port
+without it. One `vfs-update` per commit — a watcher epoch, an accepted
+virtual mutation, a compaction — with each place's delta and the keys
+of its event; a file's source and representations change in the same
+delta, which the worker applies to its replica of the tree with the
+very code the main tree applied it with. A snapshot carries every segment
+of the pool, and an update a segment once, in `newSegments` — the first
+that publishes into it: a segment stays in the pool for good, the same SAB.
+Every shared representation an
+update replaces or removes is retired under a `retireId` that exists
 only until it is freed. A worker ACKs each update; `retained` lists the
 retired versions its streams or leases still read, and one `vfs-release`
 follows when the last of them is done. Bytes are freed once every linked
 worker has ACKed (or exited) and no thread holds them. An update's
-`version` is the kernel's after it — a relocation keeps it — and each
-entry carries the version of the commit that published it. A worker's
+`version` is the kernel's after it — a compaction keeps it — and each
+file's payload carries the version of the commit that published it. A worker's
 `writeFiles` is one `vfs-mutate`: its keys, the size of each file and
 their bytes one after another in `data`; its answer carries the version
-of the commit. Under strict with `links: 'deny'` a snapshot carries the
+of the commit. A shared tree rides the same messages: its
+snapshot and `last` in the snapshot; in an update, the deltas of one
+part of its intake's run in order and the numbers of the batches they
+show — `seq: null` for a compaction's relocation — applied in one step
+with the places'; a worker's batch or load is a `vfs-mutate` naming the
+tree, answered with what the intake resolved once the update is posted. Under strict with `links: 'deny'` a snapshot carries the
 links the main kernel knows and its index's `generation` — how many it
 has come to know; `vfs-links` hands the links its watcher finds after to
 every linked worker, with the generation they bring the index to, and a
@@ -1855,6 +2378,12 @@ Runnable demos under [examples/](examples/):
   transformation publishes several related files as one atomic
   `writeFiles`; other workers learn of it only through
   `kernel.on('publish')`, never a partial set.
+- [url-tree/](examples/url-tree/) — the pages of a site as a shared
+  tree: `server.mjs`, the quick start of
+  [Page and route trees](#page-and-route-trees), over HTTP; `run.js`, a
+  load on the main thread, a change from a worker read back at once, URLs
+  resolved under policies in another worker, a repeat and a gap of the
+  source's log.
 
 Further reading: [doc/integration.md](doc/integration.md) (integration
 notes and recipes), [doc/architecture.md](doc/architecture.md) (design
@@ -1888,9 +2417,9 @@ Without it, chunks are copies and the stream releases itself.
 Main thread                             Worker threads
 ┌──────────────────────────┐            ┌─────────────────────────┐
 │ VfsKernel                │  link()    │ attach()                │
-│ ├─ VfsConfig (frozen)    │ ─────────► │ ├─ projected Maps       │
-│ ├─ FilesystemCache       │  vfs + SAB │ ├─ per-thread map       │
-│ │  └─ Pool+Registry      │            │ └─ Pins (streams/views) │
+│ ├─ VfsConfig (frozen)    │ ─────────► │ ├─ tree replicas        │
+│ ├─ a tree per place      │  snapshot  │ ├─ map places' trees    │
+│ ├─ FilesystemCache: pool │  + SABs    │ └─ Pins (streams/views) │
 │ ├─ PlaceRegistry/FsRouter│  vfs-update│                         │
 │ ├─ scanner + DirWatcher  │ ─────────► │                         │
 │ └─ retirement: ACK +     │ ◄───────── │ vfs-ack (+ retained)    │
@@ -1899,9 +2428,10 @@ Main thread                             Worker threads
          SAB segments  ←  shared physical memory  →  zero-copy views
 ```
 
-Companions are internal keys `<source>\0require:bytecode`,
-`<source>\0script:bytecode` and `<source>\0fs:<enc>`. They never appear
-in `readdir` / `exists` / patched `fs`.
+A file's derived forms — `require:bytecode`, `script:bytecode`,
+`fs:<encoding>` — are representations in its node's payload, next to
+its source: never keys of their own, never in `readdir` / `exists` /
+patched `fs`. The design in depth: [doc/architecture.md](doc/architecture.md).
 
 ## Tests
 

@@ -361,6 +361,7 @@ describe('Aliases: where a native call on a place disk lands', () => {
 describe('FsRouter under strict: the disk of a place names the place', () => {
   const { Place } = require('../lib/place.js');
   const { VfsConfig } = require('../lib/config.js');
+  const { createTree } = require('../lib/tree.js');
   const routerOf = (strict) => {
     const config = new VfsConfig({
       defaults: { strict },
@@ -376,9 +377,24 @@ describe('FsRouter under strict: the disk of a place names the place', () => {
       places[pc.name] = new Place(pc, '/app', false);
       registry.register(places[pc.name]);
     }
-    const stat = { size: 1, mtimeMs: 0 };
-    places.site.files.set('/big.txt', { data: null, path: '/b', stat });
-    places.site.files.set('/a.txt', { data: Buffer.from('a'), stat });
+    // The site's tree: a file read from disk, and one in memory.
+    const sab = new SharedArrayBuffer(1);
+    const tree = createTree({
+      segments: new Map([[1, sab]]),
+      retireIds: { next: () => 1 },
+    });
+    const onDisk = { size: 1, mtimeMs: 0, representations: [] };
+    const extent = { segmentId: 1, offset: 0, length: 1 };
+    const inMemory = { size: 1, mtimeMs: 0, representations: [[0, extent]] };
+    tree.commit(
+      [
+        ['write', '/big.txt', onDisk],
+        ['write', '/a.txt', inMemory],
+      ],
+      1,
+      0,
+    );
+    places.site.tree = tree;
     return { router: new FsRouter(registry, strict), places };
   };
 

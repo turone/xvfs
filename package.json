@@ -2,7 +2,7 @@
   "name": "xvfs",
   "version": "1.0.0",
   "author": "Dmitriy Shyaryaiev <turone@ukr.net>",
-  "description": "Extended virtual filesystem for Node.js: places over real paths in shared memory, per-thread memory, SEA assets or on disk; disk or virtual content, prepared once and published atomically with versions; strict routing",
+  "description": "Extended virtual filesystem for Node.js, and shared page and route trees: places over real paths in shared memory, per-thread memory, SEA assets or on disk; a site's pages and routes in every worker thread, kept current from a source of truth; content prepared once and published atomically with versions; strict routing",
   "license": "MIT",
   "keywords": [
     "vfs",
@@ -21,6 +21,9 @@
     "single-executable",
     "module-hooks",
     "cache",
+    "page-tree",
+    "routes",
+    "url",
     "node.js",
     "metarhia"
   ],
