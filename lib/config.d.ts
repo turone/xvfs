@@ -265,8 +265,11 @@ export interface TreeConfig {
   maxNodes?: number;
   /** The largest payload. Default `defaults.memory.maxFileSize`. */
   maxFileSize?: Size;
-  /** Compressed representations, as a place's (`ext` by a node's name). */
-  compress?: Omit<CompressConfig, 'retainRaw'> | false | null;
+  /**
+   * The compressed forms of every rendered page, made once as it is
+   * published; the data a payload holds is never compressed.
+   */
+  compress?: Pick<CompressConfig, 'encodings' | 'options'> | false | null;
   /** Leases and borrowed stream chunks. Default false. */
   zeroCopy?: boolean;
   intake?: IntakeConfig;
@@ -387,7 +390,7 @@ export interface ResolvedTree {
   };
   readonly maxNodes: number;
   readonly maxFileSize: number;
-  readonly compress: ResolvedCompress | null;
+  readonly compress: { readonly codecs: readonly ResolvedCodec[] } | null;
   readonly zeroCopy: boolean;
   readonly intake: ResolvedIntake;
 }

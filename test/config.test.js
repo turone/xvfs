@@ -1225,7 +1225,15 @@ describe('VfsConfig: shared trees', () => {
       [{ ids: 'number', maxFileSize: '1 gib' }, /must not exceed .*segment/],
       [
         { ids: 'number', compress: { encodings: ['gzip'], retainRaw: true } },
-        /a tree keeps its sources/,
+        /compress\.retainRaw: a tree keeps its pages/,
+      ],
+      [
+        { ids: 'number', compress: { encodings: ['gzip'], ext: ['html'] } },
+        /compress\.ext: a tree compresses every rendered page/,
+      ],
+      [
+        { ids: 'number', compress: { encodings: ['gzip'], level: 9 } },
+        /unknown option "level"/,
       ],
       [{ ids: 'number', intake: { seq: 'auto' } }, /intake\.seq must be/],
       [{ ids: 'number', intake: { limit: 0 } }, /intake\.limit must be/],

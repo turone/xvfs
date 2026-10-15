@@ -175,23 +175,29 @@ describe('trees: the main thread', () => {
     }
   });
 
-  it('compresses what `compress` names; the encodings are told', async () => {
+  it('compresses every rendered page, never the data; the encodings are told', async () => {
     const { k, done } = await treeKernel({
-      pages: { ...PAGES, compress: { encodings: ['gzip'], ext: ['html'] } },
+      pages: { ...PAGES, compress: { encodings: ['gzip'] } },
     });
     try {
       const t = k.tree('pages');
       const html = '<p>' + 'x'.repeat(500) + '</p>';
-      await t.load([ROOT, page(2, 'a.html', html), page(3, 'b.bin', 'y')], 0);
-      const a = t.get('/a.html');
+      const data = JSON.stringify({ body: 'y'.repeat(500) });
+      await t.load(
+        [ROOT, { ...page(2, 'a', data), rendered: html }, page(3, 'b', data)],
+        0,
+      );
+      const a = t.get('/a');
       assert.deepEqual(t.payloadOf(a).encodings, ['gzip']);
       const zlib = require('node:zlib');
       assert.equal(
         zlib.gunzipSync(t.readCompressed(a, 'gzip')).toString(),
         html,
+        'the gzip of the page',
       );
-      assert.deepEqual(t.payloadOf(t.get('/b.bin')).encodings, []);
-      assert.equal(t.readCompressed(t.get('/b.bin'), 'gzip'), null);
+      assert.equal(t.read(a, 'utf8'), data, 'the data as it was given');
+      assert.deepEqual(t.payloadOf(t.get('/b')).encodings, []);
+      assert.equal(t.readCompressed(t.get('/b'), 'gzip'), null);
       for (const name of ['br', 'requireBytecode', 'bogus']) {
         assert.throws(() => t.readCompressed(a, name), { code: 'ENOTSUP' });
         assert.throws(() => t.createReadStreamCompressed(a, name), {
@@ -203,7 +209,7 @@ describe('trees: the main thread', () => {
         assert.equal(typeof chunk, 'string', 'an encoding string');
         text += chunk;
       }
-      assert.equal(text, html);
+      assert.equal(text, data);
       assert.equal(leakedBytes(k), 0);
     } finally {
       done();
@@ -277,10 +283,10 @@ describe('trees: the main thread', () => {
     }
   });
 
-  it('a compaction moves every representation of a node, its source and its compressed form in one segment', async () => {
+  it('a compaction moves every representation of a node, its data, its page and its gzip in one segment', async () => {
     const KB = 1024;
     const { k, done } = await treeKernel(
-      { pages: { ...PAGES, compress: { encodings: ['gzip'], ext: ['html'] } } },
+      { pages: { ...PAGES, compress: { encodings: ['gzip'] } } },
       {
         defaults: {
           memory: {
@@ -295,29 +301,33 @@ describe('trees: the main thread', () => {
     try {
       const t = k.tree('pages');
       const html = `<p>${'c'.repeat(200)}</p>`;
+      const data = 'c'.repeat(100);
       await t.load(
         [
           ROOT,
           page(2, 'a', 'a'.repeat(2 * KB)),
           page(3, 'b', 'b'.repeat(2 * KB)),
-          page(4, 'c.html', html),
+          { ...page(4, 'c', data), rendered: html },
         ],
         0,
       );
       const tree = k.trees.get('pages').tree;
       const segmentsOf = () => {
         const payload = tree.payloadOf(tree.byId(4));
-        return [payload.source.segmentId, payload.others.gzip.segmentId];
+        const { source, others } = payload;
+        return [source, others.requireBytecode, others.gzip].map(
+          (rep) => rep.segmentId,
+        );
       };
-      assert.deepEqual(segmentsOf(), [2, 2]);
-      // Freeing /a makes segment 2 the target: both move to segment 1.
+      assert.deepEqual(segmentsOf(), [2, 2, 2]);
+      // Freeing /a makes segment 2 the target: all three move to segment 1.
       await t.submit({ seq: 1, ops: [['remove', 2]] });
       assert.ok(
         await until(() => segmentsOf().every((s) => s === 1)),
-        'the source and its gzip relocated',
+        'the data, the page and its gzip relocated',
       );
       const c = t.byId(4);
-      assert.equal(t.read(c, 'utf8'), html);
+      assert.equal(t.read(c, 'utf8'), data);
       const zlib = require('node:zlib');
       assert.equal(
         zlib.gunzipSync(t.readCompressed(c, 'gzip')).toString(),

@@ -158,12 +158,15 @@ const SETTINGS = {
   maxFileSize: 1000,
 };
 
-const setup = (settings = {}, capacity, handlers = {}) => {
+// `extra.compress`: the intake's compress, none by default.
+const setup = (settings = {}, capacity, handlers = {}, extra = {}) => {
   const segments = new Map();
+  const languages = settings.languages?.length ?? 0;
   const tree = createTree({
     ids: 'number',
     containers: [0],
     segments,
+    ...(languages > 1 ? { languages } : {}),
     retireIds: {
       next: (() => {
         let n = 0;
@@ -180,7 +183,7 @@ const setup = (settings = {}, capacity, handlers = {}) => {
     tree,
     kernel,
     pool,
-    compress: async () => [],
+    compress: extra.compress ?? (async () => []),
     clock: time.clock,
     timers: time.timers,
     onGap: (gap) => gaps.push(gap),
@@ -706,5 +709,419 @@ describe('intake: what the client gives it, and what fails after a commit', () =
     await assert.rejects(loading, (err) => err === cannot);
     await assert.rejects(waiting, (err) => err === cannot);
     assert.equal(kernel.fatals.length, 2);
+  });
+});
+
+describe('intake: languages and pages', () => {
+  const LANGS = { languages: ['en', 'uk', 'de'] };
+  // The text of a node's data, or its page (kind 1), in a language.
+  const textIn = (tree, id, lang = 0, kind = 'source') => {
+    const node = tree.byId(id);
+    const p = node === null ? null : tree.payloadOf(node, lang);
+    const rep = kind === 'source' ? p?.source : p?.others?.requireBytecode;
+    return rep ? Buffer.from(rep.data).toString() : null;
+  };
+  const pageIn = (tree, id, lang = 0) => textIn(tree, id, lang, 'page');
+  // Every byte the tree publishes, in every language: what the pool holds.
+  const held = (tree) => {
+    let sum = 0;
+    const count = Math.max(1, tree.languages);
+    const root = tree.get('');
+    if (root === null) return 0;
+    const nodes = [root];
+    for (const [n] of tree.walk(root)) nodes.push(n);
+    for (const n of nodes) {
+      for (let lang = 0; lang < count; lang++) {
+        const p = tree.payloadOf(n, lang);
+        if (p === null) continue;
+        if (p.source) sum += p.source.length;
+        for (const rep of Object.values(p.others ?? {})) {
+          if (rep) sum += rep.length;
+        }
+      }
+    }
+    return sum;
+  };
+  const about = (fields) => ['put', 2, 1, 'about', { class: 1, ...fields }];
+  const row = (id, name, data) => ({
+    id,
+    parentId: 1,
+    name,
+    class: 1,
+    payload: { data },
+  });
+
+  it('a put states its languages: names, data and pages there; a page beside new data in its payload', async () => {
+    const { tree, time, intake, pool } = setup(LANGS);
+    await intake.load([ROOT], 0);
+    const done = intake.submit({
+      seq: 1,
+      ops: [
+        about({
+          payload: { data: 'en-data' },
+          rendered: '<en>',
+          translations: {
+            uk: { name: 'pro', payload: { data: 'uk-data' }, rendered: '<uk>' },
+            de: { name: 'uber' },
+          },
+        }),
+      ],
+    });
+    await time.advance(10);
+    assert.deepEqual(await done, { seq: 1, status: 'committed' });
+    const node = tree.byId(2);
+    assert.deepEqual(tree.pathsOf(node), ['/about', '/pro', '/uber']);
+    assert.equal(textIn(tree, 2), 'en-data');
+    assert.equal(pageIn(tree, 2), '<en>');
+    assert.equal(textIn(tree, 2, 1), 'uk-data');
+    assert.equal(pageIn(tree, 2, 1), '<uk>');
+    assert.equal(tree.payloadOf(node, 2), null, 'de: a name, no data');
+    // One language's change carries its own bytes only; the others stay.
+    const en = tree.payloadOf(node);
+    const again = intake.submit({
+      seq: 2,
+      ops: [about({ translations: { uk: { payload: { data: 'uk-2' } } } })],
+    });
+    await time.advance(10);
+    await again;
+    assert.equal(tree.payloadOf(node), en, 'the main payload the same object');
+    assert.equal(textIn(tree, 2, 1), 'uk-2');
+    assert.equal(pageIn(tree, 2, 1), null, 'new data without its page');
+    assert.equal(pool.used(), held(tree));
+  });
+
+  it("rendered alone renders again: the data the same object, the version the publication's; null and new data take the page away", async () => {
+    const { tree, kernel, time, intake, pool } = setup();
+    await intake.load([ROOT], 0);
+    const step = async (seq, fields) => {
+      const done = intake.submit({ seq, ops: [about(fields)] });
+      await time.advance(10);
+      return done;
+    };
+    await step(1, { payload: { data: 'data', mtimeMs: 7 } });
+    const first = tree.payloadOf(tree.byId(2));
+    await step(2, { rendered: '<p>one</p>' });
+    const second = tree.payloadOf(tree.byId(2));
+    assert.equal(second.source, first.source);
+    assert.equal(second.mtimeMs, 7);
+    assert.equal(second.version, kernel.v);
+    assert.equal(pageIn(tree, 2), '<p>one</p>');
+    await step(3, { rendered: null });
+    assert.equal(pageIn(tree, 2), null);
+    assert.equal(tree.payloadOf(tree.byId(2)).source, first.source);
+    const version = kernel.v;
+    await step(4, { rendered: null });
+    assert.equal(kernel.v, version, 'no page where there was none: nothing');
+    await step(5, { rendered: '<p>two</p>' });
+    await step(6, { payload: { data: 'new' } });
+    assert.equal(pageIn(tree, 2), null, 'new data without its page');
+    assert.equal(textIn(tree, 2), 'new');
+    assert.equal(pool.used(), held(tree));
+  });
+
+  it('compress takes the page, never the data; a form without room is left out', async () => {
+    const seen = [];
+    const compress = async (bytes) => {
+      seen.push(Buffer.from(bytes).toString());
+      return [
+        [3, Buffer.from('gz')],
+        [5, Buffer.alloc(1 << 20)],
+      ];
+    };
+    const { tree, time, intake, pool } = setup({}, 1 << 16, {}, { compress });
+    await intake.load([ROOT], 0);
+    const done = intake.submit({
+      seq: 1,
+      ops: [about({ payload: { data: 'the data' }, rendered: '<page>' })],
+    });
+    await time.advance(10);
+    await done;
+    assert.deepEqual(seen, ['<page>']);
+    const p = tree.payloadOf(tree.byId(2));
+    assert.equal(Buffer.from(p.others.gzip.data).toString(), 'gz');
+    assert.equal(p.others.br, null, 'no room for it');
+    assert.equal(pool.used(), held(tree));
+  });
+
+  it('a row states its whole node: what it lacks is none', async () => {
+    const { tree, intake, pool } = setup(LANGS);
+    const full = {
+      id: 2,
+      parentId: 1,
+      name: 'a',
+      class: 1,
+      payload: { data: 'a' },
+      rendered: '<a>',
+      policy: { p: 1 },
+      translations: { uk: { name: 'a-uk', payload: { data: 'b' } } },
+    };
+    await intake.load([ROOT, full], 0);
+    assert.equal(pageIn(tree, 2), '<a>');
+    assert.equal(textIn(tree, 2, 1), 'b');
+    await intake.load([ROOT, { id: 2, parentId: 1, name: 'a' }], 1);
+    const node = tree.byId(2);
+    assert.equal(tree.payloadOf(node), null);
+    assert.equal(tree.policyOf(node), null);
+    assert.equal(tree.nameOf(node, 1), null, 'no translation');
+    assert.equal(tree.classOf(node), 1, 'its class kept');
+    // A translation of a row has its name, but the root's.
+    assert.throws(
+      () =>
+        intake.load(
+          [ROOT, { ...full, translations: { uk: { payload: null } } }],
+          2,
+        ),
+      { code: 'EINVAL', index: 1, id: 2, lang: 'uk' },
+    );
+    await intake.load(
+      [{ ...ROOT, translations: { uk: { payload: { data: 'root' } } } }],
+      3,
+    );
+    assert.equal(textIn(tree, 1, 1), 'root');
+    assert.equal(pool.used(), held(tree));
+  });
+
+  it('refuses at once, with the language, a field no one reads, a language the tree has not, a name not one', async () => {
+    const one = setup();
+    const many = setup(LANGS);
+    for (const [ctx, fields, lang] of [
+      [one, { translations: { uk: { name: 'x' } } }, undefined],
+      [one, { rendered: 7 }, undefined],
+      [one, { payload: { data: 'x', scriptOptions: {} } }, undefined],
+      [one, { page: [] }, undefined],
+      [many, { payload: { data: 'x', meta: {}, extra: 1 } }, 'en'],
+      [many, { translations: { en: { name: 'x' } } }, 'en'],
+      [many, { translations: { fr: { name: 'x' } } }, 'fr'],
+      [many, { translations: { uk: { name: 'a/b' } } }, 'uk'],
+      [many, { translations: { uk: { title: 'x' } } }, 'uk'],
+      [many, { translations: { uk: { rendered: 1 } } }, 'uk'],
+      [many, { translations: [['uk', {}]] }, undefined],
+    ]) {
+      assert.throws(
+        () => ctx.intake.submit({ seq: 1, ops: [about(fields)] }),
+        (err) =>
+          err.code === 'EINVAL' &&
+          err.index === 0 &&
+          err.id === 2 &&
+          err.lang === lang,
+        JSON.stringify(fields),
+      );
+    }
+    assert.throws(
+      () =>
+        many.intake.submit({
+          seq: 1,
+          ops: [['put', 1, null, '', { translations: { uk: { name: 'r' } } }]],
+        }),
+      { code: 'EINVAL', lang: 'uk' },
+    );
+  });
+
+  it('a page or data too large is EFBIG, a page without data ENOENT — with its language', async () => {
+    const { time, intake, errors } = setup(LANGS);
+    const bare = { id: 2, parentId: 1, name: 'a', class: 1 };
+    await intake.load([ROOT, bare], 0);
+    const big = 'x'.repeat(1001);
+    const refused = intake.submit({
+      seq: 1,
+      ops: [
+        [
+          'put',
+          2,
+          1,
+          'a',
+          { translations: { de: { name: 'd', rendered: big } } },
+        ],
+      ],
+    });
+    refused.catch(() => {});
+    await time.advance(10);
+    await assert.rejects(refused, { code: 'EFBIG', seq: 1, lang: 'de' });
+    await intake.load([ROOT, bare], 1);
+    const orphan = intake.submit({
+      seq: 2,
+      ops: [['put', 2, 1, 'a', { rendered: '<p>' }]],
+    });
+    orphan.catch(() => {});
+    await time.advance(10);
+    await assert.rejects(orphan, { code: 'ENOENT', seq: 2, lang: 'en' });
+    assert.deepEqual(
+      errors.map((e) => [e.code, e.lang]),
+      [
+        ['EFBIG', 'de'],
+        ['ENOENT', 'en'],
+      ],
+    );
+  });
+
+  it('cache: outside the numbering, alone, the version of its payload; the latest per node and language counts', async () => {
+    const { tree, kernel, time, intake, pool, errors } = setup(LANGS);
+    await intake.load(
+      [
+        ROOT,
+        {
+          id: 2,
+          parentId: 1,
+          name: 'a',
+          class: 1,
+          payload: { data: 'd' },
+          translations: { uk: { name: 'a-uk', payload: { data: 'u' } } },
+        },
+      ],
+      0,
+    );
+    const v = (lang) => tree.payloadOf(tree.byId(2), lang).version;
+    const v0 = v(0);
+    const cached = intake.cache({ id: 2, data: '<one>', version: v0 });
+    const stale = intake.cache({ id: 2, lang: 'uk', data: '<u>', version: 99 });
+    await time.advance(10);
+    assert.deepEqual(await cached, { status: 'cached' });
+    assert.deepEqual(await stale, { status: 'stale' });
+    assert.deepEqual(kernel.published.at(-1), {
+      from: null,
+      to: null,
+      loaded: false,
+    });
+    assert.equal(intake.last, 0, 'no number moved');
+    assert.equal(pageIn(tree, 2), '<one>');
+    assert.notEqual(v(0), v0, 'a page takes a version');
+    // Two of one node and language: the earlier is stale at once.
+    const early = intake.cache({ id: 2, data: '<two>', version: v(0) });
+    const late = intake.cache({ id: 2, data: '<three>', version: v(0) });
+    assert.deepEqual(await early, { status: 'stale' });
+    await time.advance(10);
+    assert.deepEqual(await late, { status: 'cached' });
+    assert.equal(pageIn(tree, 2), '<three>');
+    // An uncache after a cache takes its place, and a cache after an
+    // uncache its.
+    const before = intake.cache({
+      id: 2,
+      lang: 'uk',
+      data: '<x>',
+      version: v(1),
+    });
+    const drop = intake.uncache({ id: 2, lang: 'uk' });
+    const takes = intake.uncache({ id: 2, lang: 'en' });
+    const after = intake.cache({ id: 2, data: '<four>', version: v(0) });
+    await time.advance(10);
+    assert.deepEqual(await before, { status: 'stale' });
+    assert.deepEqual(await drop, { dropped: 0 }, 'uk had no page');
+    assert.deepEqual(await takes, { dropped: 0 });
+    assert.deepEqual(await after, { status: 'cached' });
+    assert.equal(pageIn(tree, 2), '<four>');
+    // Nothing to drop: no publication.
+    const count = kernel.published.length;
+    const none = intake.uncache({ id: 2, lang: 'uk' });
+    await time.advance(10);
+    assert.deepEqual(await none, { dropped: 0 });
+    assert.equal(kernel.published.length, count);
+    // A page dropped: published.
+    const dropped = intake.uncache({ id: 2 });
+    await time.advance(10);
+    assert.deepEqual(await dropped, { dropped: 1 });
+    assert.equal(pageIn(tree, 2), null);
+    assert.deepEqual(errors, [], 'no page op is told');
+    assert.equal(pool.used(), held(tree));
+  });
+
+  it('page ops wait for no hold, no gap, no first load; for a load in flight they do', async () => {
+    const { tree, time, intake, pool } = setup();
+    // Before the first load the tree is empty: stale, dropped nothing.
+    const early = intake.cache({ id: 2, data: '<p>', version: 0 });
+    const none = intake.uncache({ id: 2 });
+    await time.advance(10);
+    assert.deepEqual(await early, { status: 'stale' });
+    assert.deepEqual(await none, { dropped: 0 });
+    await intake.load([ROOT, row(2, 'a', 'a')], 0);
+    // A refusal holds the batches: pages go on.
+    const refused = intake.submit({ seq: 1, ops: [put(3, 99, 'x', 'x')] });
+    refused.catch(() => {});
+    await time.advance(10);
+    assert.equal(intake.held, true);
+    const v = tree.payloadOf(tree.byId(2)).version;
+    const whileHeld = intake.cache({ id: 2, data: '<held>', version: v });
+    await time.advance(10);
+    assert.deepEqual(await whileHeld, { status: 'cached' });
+    // A load in flight: the page op waits for it and is checked after —
+    // its data changed, so did the version.
+    const loading = intake.load([ROOT, row(2, 'a', 'b')], 5);
+    const after = intake.cache({
+      id: 2,
+      data: '<after>',
+      version: tree.payloadOf(tree.byId(2)).version,
+    });
+    await time.advance(10);
+    await loading;
+    assert.deepEqual(await after, { status: 'stale' });
+    assert.equal(pageIn(tree, 2), null, 'the load stated no page');
+    assert.equal(pool.used(), held(tree));
+  });
+
+  it('page ops count in the limit of a part; an uncache of a subtree is one, in every language', async () => {
+    const { tree, kernel, time, intake, pool } = setup({ ...LANGS, limit: 2 });
+    const rows = [ROOT];
+    for (const id of [2, 3, 4]) {
+      rows.push({
+        id,
+        parentId: id === 4 ? 3 : 1,
+        name: `n${id}`,
+        class: 1,
+        payload: { data: `d${id}` },
+        rendered: `<${id}>`,
+        translations: {
+          uk: { name: `u${id}`, payload: { data: 'u' }, rendered: '<u>' },
+        },
+      });
+    }
+    await intake.load(rows, 0);
+    const before = kernel.published.length;
+    const batch = intake.submit({
+      seq: 1,
+      ops: [put(5, 1, 'x', 'x'), put(6, 1, 'y', 'y')],
+    });
+    const whole = intake.uncache({ id: 3, subtree: true });
+    await time.advance(10);
+    await batch;
+    assert.deepEqual(await whole, { dropped: 4 }, '3 and 4, en and uk');
+    assert.deepEqual(
+      kernel.published.slice(before),
+      [
+        { from: 1, to: 1, loaded: false },
+        { from: null, to: null, loaded: false },
+      ],
+      'the part was full: the pages published after it',
+    );
+    assert.equal(pageIn(tree, 4, 1), null);
+    assert.equal(pageIn(tree, 2), '<2>', 'outside the subtree');
+    assert.equal(pool.used(), held(tree));
+  });
+
+  it('close() rejects the page ops waiting; EFBIG at once, ENOSPC without waiting', async () => {
+    const { tree, time, intake, pool } = setup({}, 64);
+    await intake.load([ROOT, row(2, 'a', 'a')], 0);
+    const v = tree.payloadOf(tree.byId(2)).version;
+    await assert.rejects(
+      intake.cache({ id: 2, data: 'x'.repeat(1001), version: v }),
+      { code: 'EFBIG', id: 2 },
+    );
+    const full = intake.cache({ id: 2, data: 'x'.repeat(100), version: v });
+    const noRoom = assert.rejects(full, { code: 'ENOSPC', id: 2 });
+    await time.advance(10);
+    await noRoom;
+    // A language a tree of one has not: EINVAL at once.
+    assert.throws(
+      () => intake.cache({ id: 2, lang: 'uk', data: 'x', version: 1 }),
+      { code: 'EINVAL' },
+    );
+    const waiting = intake.cache({ id: 2, data: '<p>', version: v });
+    const dropping = intake.uncache({ id: 2 });
+    const closed = Promise.all([
+      assert.rejects(waiting, { code: 'ERR_VFS_CLOSED' }),
+      assert.rejects(dropping, { code: 'ERR_VFS_CLOSED' }),
+    ]);
+    intake.close();
+    await closed;
+    await time.advance(10);
+    assert.equal(pool.used(), held(tree));
   });
 });

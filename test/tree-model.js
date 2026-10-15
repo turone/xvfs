@@ -24,13 +24,14 @@ const KIND_COUNT = 7; // 0 source, 1…6 the `others` fields in that order
 // An id tree's page: kind 1 and its compressed forms 3…6.
 const PAGE_KINDS = new Set([1, 3, 4, 5, 6]);
 
-// `lang`: the index of the language a refusal is about, but the main one.
+// `lang`: the index of the language a refusal is about, given in a tree of
+// several languages only — the main one's, 0, too.
 const refusal = (code, index, other, lang) => {
   const err = new Error(`${code} at ${index}`);
   err.code = code;
   err.index = index;
   if (other !== undefined) err.other = other;
-  if (lang !== undefined && lang !== 0) err.lang = lang;
+  if (lang !== undefined) err.lang = lang;
   return err;
 };
 
@@ -530,6 +531,11 @@ class ModelTree {
       if (!this.validExtent(extent)) return false;
     }
     return true;
+  }
+
+  // The language of a refusal: none in a tree of one.
+  langOf(lang) {
+    return this.languages > 1 ? lang : undefined;
   }
 
   isLang(lang) {
@@ -1195,7 +1201,7 @@ class ModelTree {
         if (node === null) throw refusal('ENOENT', index);
         const payload = this.payloadIn(node, lang);
         if (payload === null || !payload.reps.has(k))
-          throw refusal('ENOENT', index, undefined, lang);
+          throw refusal('ENOENT', index, undefined, this.langOf(lang));
         relocs.push({ index, id, kind: k, extent, lang });
         return;
       }
@@ -1211,7 +1217,7 @@ class ModelTree {
         const node = this.byId.get(id) ?? null;
         if (node === null) throw refusal('ENOENT', index);
         if (this.payloadIn(node, lang) === null && page.length > 0)
-          throw refusal('ENOENT', index, undefined, lang);
+          throw refusal('ENOENT', index, undefined, this.langOf(lang));
         renders.push({ id, lang, page });
         return;
       }
@@ -1408,7 +1414,7 @@ class ModelTree {
             .sort((a, b) => a.index - b.index);
           other = others.length > 0 ? others[0].id : undefined;
         }
-        violations.set(p.index, { code: 'EEXIST', other });
+        violations.set(p.index, { code: 'EEXIST', other, lang: 0 });
       }
     }
     // The name of a node in a language but the main one after the commit,
@@ -1504,7 +1510,7 @@ class ModelTree {
       const index = Math.min(...violations.keys());
       const v = violations.get(index);
       const other = v.code === 'EEXIST' ? v.other : undefined;
-      throw refusal(v.code, index, other, v.lang);
+      throw refusal(v.code, index, other, this.langOf(v.lang));
     }
     // ENOSPC — the bound on the final state; removals before creations.
     let live = 0;
