@@ -43,7 +43,7 @@ durable part.
 | OS       | Windows Server 2022 (10.0.20348)                                                                                                                                |
 | Node.js  | v24.20.0 (V8 13.6)                                                                                                                                              |
 | Disk     | every file read below was in the page cache                                                                                                                     |
-| Revision | `lib/` (unchanged since `edcf38f`) and `bench/` of the commit that added this page; the preparer path changed after — see [Preparer results](#preparer-results) |
+| Revision | `lib/` (unchanged since `7b938a1`) and `bench/` of the commit that added this page; the preparer path changed after — see [Preparer results](#preparer-results) |
 
 ## Reproduce
 
@@ -398,7 +398,7 @@ router refuses spellings of `appRoot` the strings do not show — NTFS
 streams, 8.3 names, a drive or a real path that names it — and a native
 call on a place's disk proves where its path really lands (one
 `realpath.native`; `doc/architecture.md`, Routing and strict mode). The
-A/B of that work against the commit before it (`f0efa1a`), four
+A/B of that work against the commit before it (`ec41a90`), four
 alternating pairs of `--only router,patch,read --bench HEAD` — the new
 `patch.strict.*` rows measured on the old code too — ns/op, median of the
 four runs on each side:
@@ -439,15 +439,15 @@ native call on a place's disk is checked by the place's `links`: `'deny'`
 (the default) against the links the kernel knows, `'verify'` by a
 `realpath.native` of each call — what every strict call paid before
 `links` existed. Two A/Bs per system, four alternating pairs of
-`--only router,patch --bench HEAD`: against `f375ac3`, the proof on every
-call, and against `de1383f`, before it. The `*.verify.*` rows fall back
-to strict as it was on a revision without `links`, so on `f375ac3` they
+`--only router,patch --bench HEAD`: against `aab1d65`, the proof on every
+call, and against `5e29f1d`, before it. The `*.verify.*` rows fall back
+to strict as it was on a revision without `links`, so on `aab1d65` they
 measure the proof too. `router.*.linked` names a file of a `disk` place
 whose directory holds 10 links (the index knows them), `through` a path
 through one of them, `mutate.disk` a file of a place with none. ns/op,
 median of the four runs on each side; the `before`, `proof`, `deny` and
-`verify` columns are `de1383f`, `f375ac3`, and `links: 'deny'` and
-`'verify'` at `c9790c9`.
+`verify` columns are `5e29f1d`, `aab1d65`, and `links: 'deny'` and
+`'verify'` at `af874a0`.
 
 Windows (the machine above):
 
@@ -475,11 +475,11 @@ Linux (the same machine, WSL2, Node.js 24.20.0; wider spreads):
 | `patch.strict.territory.statSync` |  1 117 |  2 499 | 1 093 |  2 418 |
 
 ¹ Not refused before the proof: the call went through the link.
-² At `3d2db67` (next section), where a refusal asks no `lstat`; 13 935 on
-Windows and 1 244 on Linux at `c9790c9`.
+² At `5d915fb` (next section), where a refusal asks no `lstat`; 13 935 on
+Windows and 1 244 on Linux at `af874a0`.
 
 With `'deny'` a native call on a place's disk costs what it did before the
-proof — within 0–2 % of `de1383f` for reads, stats and listings on
+proof — within 0–2 % of `5e29f1d` for reads, stats and listings on
 Windows, within the noise on Linux — three to four times less than the
 proof on Windows (a `stat` 50.9 → 13.0 µs, a read 57.9 → 18.8 µs), and
 2.4 times less on Linux for a `stat` (a read, 40 % less, varied too much
@@ -498,10 +498,10 @@ in the scan a disk-origin place makes anyway, or in one walk of
 
 ### The patch changes no link on a place's disk
 
-Since `b46ef2a` the patch makes, removes and moves no link on a place's
+Since `86715f8` the patch makes, removes and moves no link on a place's
 disk under strict, and the index of `'deny'` only grows: a refusal asks
 no `lstat`, while a removal or a rename there asks one of its path — a
-rename two, its source and its destination. A/B against `e33ed38`, four
+rename two, its source and its destination. A/B against `1ef8d01`, four
 pairs, `--only router,patch --bench HEAD`; `w` is a writable `disk` place,
 `writeUnlink` a file written and removed, `renameBack` a file renamed and
 back (two renames). ns/op, medians; the busy machine spread the mutation
@@ -523,11 +523,11 @@ not move.
 
 ### No tree through a link out of a place
 
-Since `9118016` a recursive removal of a directory on a place's disk, and
+Since `60f2611` a recursive removal of a directory on a place's disk, and
 a directory's rename, ask where the directory really lies — one
 `realpath` of it, and for a rename of its destination too (a missing one:
 a failed `realpath`, then its parent's) — in both modes; a file, and a
-missing path, ask nothing more. A/B against `4122e05`, four pairs,
+missing path, ask nothing more. A/B against `178cdc2`, four pairs,
 `--only patch --bench 99443e8`: `mkdirRmTree` makes a directory and
 removes it with `recursive`, `renameDirBack` renames a directory and back
 (two renames). ns/op, medians; the Linux (WSL) mutation rows spread
