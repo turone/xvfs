@@ -11,8 +11,12 @@
 // Node, Payload and Representation objects.
 //
 //   TREE_SEEDS (40)  TREE_COMMITS (150)  TREE_SEED (one seed)
-//   TREE_ONLY=fs,client,policy,walk,aggregates (sections to run)
+//   TREE_ONLY=fs,client,policy,walk,aggregates,lang (sections to run)
 //   TREE_ENGINE=<module> (default lib/tree.js)
+//
+// `lang`: id trees of several languages — translations, their lookups,
+// names, paths and payloads, pages of every language — on two of every
+// three seeds of an id tree; the third keeps one language.
 
 const assert = require('node:assert/strict');
 const engine = require('./tree-engine.js');
@@ -30,7 +34,7 @@ const SEEDS = Number(env.TREE_SEEDS ?? 40);
 const COMMITS = Number(env.TREE_COMMITS ?? 150);
 const ONE = env.TREE_SEED === undefined ? null : Number(env.TREE_SEED);
 const SECTIONS = new Set(
-  (env.TREE_ONLY ?? 'fs,client,policy,walk,aggregates')
+  (env.TREE_ONLY ?? 'fs,client,policy,walk,aggregates,lang')
     .split(',')
     .map((s) => s.trim()),
 );
@@ -238,6 +242,80 @@ const checkFormer = (ctx, thread) => {
       );
       assert.equal(view.byteOffset, offset, what('data offset'));
     }
+  }
+};
+
+// Every node in every language but the main one: its name, path and
+// payload there, the lookup of its path there, its children there in the
+// main order; dead nodes as missing ones there too.
+const compareLanguages = (ctx, thread) => {
+  const { model, random } = ctx;
+  const t = thread.tree;
+  const what = (s) => where(ctx, thread, s);
+  const containers = containersOf(ctx, thread);
+  assert.equal(t.languages, model.languages, what('languages'));
+  for (const n of model.nodes()) {
+    const node = thread.nodes.get(n.uid);
+    const key = model.pathOf(n);
+    for (let lang = 1; lang < model.languages; lang++) {
+      const at = (s) => what(`${s} ${JSON.stringify(key)} in ${lang}`);
+      const path = model.pathOf(n, lang);
+      assert.equal(t.nameOf(node, lang), model.nameIn(n, lang), at('nameOf'));
+      assert.equal(t.pathOf(node, lang), path, at('pathOf'));
+      checkPayload(
+        ctx,
+        thread,
+        model.payloadIn(n, lang),
+        t.payloadOf(node, lang),
+        at('payload'),
+      );
+      if (path !== null) assert.equal(t.get(path, null, lang), node, at('get'));
+      assert.deepEqual(
+        t.children(node, lang),
+        model.children(n, containers, lang),
+        at('children'),
+      );
+      const named = n.kids.filter((k) => k.tr.has(lang));
+      assert.equal(t.countOf(node, lang), named.length, at('countOf'));
+      for (const k of named)
+        assert.equal(
+          t.childOf(node, k.tr.get(lang).name, lang),
+          thread.nodes.get(k.uid),
+          at(`childOf ${JSON.stringify(k.tr.get(lang).name)}`),
+        );
+      assert.equal(
+        t.childOf(node, 'no such child', lang),
+        null,
+        at('childOf a name no child has'),
+      );
+    }
+    if (random.chance(0.2)) {
+      const paths = [];
+      for (let lang = 0; lang < model.languages; lang++)
+        paths.push(model.pathOf(n, lang));
+      assert.deepEqual(t.pathsOf(node), paths, what(`pathsOf ${key}`));
+    }
+  }
+  for (const [node] of thread.dead.slice(-4)) {
+    for (const op of ['nameOf', 'pathOf', 'payloadOf', 'children'])
+      assert.equal(t[op](node, 1), null, what(`${op} of a dead node in 1`));
+    assert.equal(t.countOf(node, 1), 0, what('countOf of a dead node in 1'));
+    assert.equal(t.pathsOf(node), null, what('pathsOf of a dead node'));
+  }
+  // A language the tree has not: EINVAL.
+  if (model.root !== null && random.chance(0.1)) {
+    const root = thread.nodes.get(model.root.uid);
+    for (const lang of [model.languages, 1.5, -1])
+      assert.throws(
+        () => t.get('/', null, lang === -1 ? model.languages + 7 : lang),
+        { code: 'EINVAL' },
+        what(`get in language ${lang}`),
+      );
+    assert.throws(
+      () => t.nameOf(root, model.languages),
+      { code: 'EINVAL' },
+      what('nameOf in a language the tree has not'),
+    );
   }
 };
 
@@ -462,6 +540,7 @@ const compare = (ctx, thread) => {
     );
     assert.deepEqual(iterate(t.walk(node)), [], what('walk from a dead node'));
   }
+  if (model.languages > 1) compareLanguages(ctx, thread);
 };
 
 // A fingerprint of everything a thread shows, for "nothing changed".
@@ -496,6 +575,10 @@ const fingerprint = (ctx, thread) => {
     );
     if (ctx.model.aggregates.classes) out.push(t.leafCountOf(n));
     if (ctx.model.aggregates.subtreeVersion) out.push(t.subtreeVersionOf(n));
+    for (let lang = 1; lang < ctx.model.languages; lang++) {
+      const q = t.payloadOf(n, lang);
+      out.push(`${lang}:${t.nameOf(n, lang)}:${tag(q)}:${t.countOf(n, lang)}`);
+    }
     const kids = iterate(t.childNodesOf(n));
     for (let i = kids.length - 1; i >= 0; i--) stack.push(kids[i]);
   }
@@ -534,18 +617,32 @@ const keysOfOps = (ctx, ops, isLoad) => {
   return keys;
 };
 
-// The extent objects a commit gives: of the payloads of its writes, puts
-// and rows, and of its relocations.
+// The extent objects a commit gives: of the payloads and pages of its
+// writes, puts and rows in every language, of its relocations and renders.
 const givenExtents = (ops, isLoad) => {
   const out = new Set();
-  const of = (payload) => {
-    for (const pair of payload?.representations ?? []) out.add(pair[1]);
+  const pairs = (list) => {
+    if (Array.isArray(list)) for (const pair of list) out.add(pair?.[1]);
+  };
+  const of = (fields) => {
+    if (fields === null || typeof fields !== 'object') return;
+    pairs(fields.payload?.representations);
+    pairs(fields.page);
+    if (!Array.isArray(fields.translations)) return;
+    for (const entry of fields.translations) {
+      const said = Array.isArray(entry) ? entry[1] : null;
+      if (said === null || typeof said !== 'object') continue;
+      pairs(said.payload?.representations);
+      pairs(said.page);
+    }
   };
   for (const op of ops) {
-    if (isLoad) of(op?.payload);
-    else if (op[0] === 'write') of(op[2]);
-    else if (op[0] === 'put') of(op[4]?.payload);
+    if (isLoad) of(op);
+    else if (!Array.isArray(op)) continue;
+    else if (op[0] === 'write') of({ payload: op[2] });
+    else if (op[0] === 'put') of(op[4]);
     else if (op[0] === 'relocate') out.add(op[3]);
+    else if (op[0] === 'render') pairs(op[3]);
   }
   return out;
 };
@@ -566,6 +663,32 @@ const missKeys = (ctx) => {
     keys.push(key);
   return keys;
 };
+
+// allow(policy, owner, context): true unless the policy says no — a deny
+// policy refuses with a fresh decision object, a redirect policy with
+// another; a planned throw on one policy value. `log` gets every call, and
+// `log.decisions` every refusal's decision, in order.
+const newLog = () => {
+  const log = [];
+  log.decisions = [];
+  return log;
+};
+
+const makeAllow =
+  (log, throwOn = null) =>
+  (policy, owner, context) => {
+    log.push([policy, owner, context]);
+    if (throwOn !== null && policy === throwOn)
+      throw new Error('allow: a planned failure');
+    let decision = true;
+    // only true lets through: a truthy primitive is a decision too
+    if (policy && policy.prim !== undefined) decision = policy.prim;
+    else if (policy && policy.deny) decision = { status: 403, tag: policy.tag };
+    else if (policy && policy.redirect)
+      decision = { redirect: '/elsewhere', tag: policy.tag };
+    if (decision !== true) log.decisions.push(decision);
+    return decision;
+  };
 
 // One key: get, match and resolve as the model answers them.
 const checkKey = (ctx, thread, key) => {
@@ -628,6 +751,47 @@ const checkKey = (ctx, thread, key) => {
     );
 };
 
+// One key in a language but the main one: get and match, with allow now
+// and then, as the model answers them.
+const checkLangKey = (ctx, thread, key, lang) => {
+  const { model, random } = ctx;
+  const t = thread.tree;
+  const what = (s) =>
+    where(ctx, thread, `${s} ${JSON.stringify(key)} in ${lang}`);
+  const node = (m) => (m === null ? null : thread.nodes.get(m.uid));
+  const m = model.get(key, {}, lang);
+  assert.equal(t.get(key, undefined, lang), node(m.node), what('get'));
+  if (model.root === null) return;
+  const mm = model.match(key, {}, lang);
+  const gm = t.match(key, undefined, lang);
+  if (mm.node) assert.equal(gm, node(mm.node), what('match'));
+  else {
+    assert.ok(gm instanceof engine.NotFound, what('match: not a NotFound'));
+    assert.equal(gm.node, node(mm.notFound.node), what('match: node'));
+    assert.equal(gm.rest, mm.notFound.rest, what('match: rest'));
+  }
+  if (!on('policy') || !random.chance(0.3)) return;
+  const context = { user: random.int(10) };
+  const mlog = newLog();
+  const glog = newLog();
+  const ma = model.match(key, { allow: makeAllow(mlog), context }, lang);
+  const ga = t.match(key, { allow: makeAllow(glog), context }, lang);
+  assert.equal(glog.length, mlog.length, what('match with allow: calls'));
+  mlog.forEach(([, owner], i) =>
+    assert.equal(glog[i][1], node(owner), what(`match with allow: call ${i}`)),
+  );
+  if (ma.denied) {
+    assert.ok(ga instanceof engine.Denied, what('match with allow: Denied'));
+    assert.equal(ga.node, node(ma.denied.owner), what('Denied.node'));
+  } else if (ma.notFound) {
+    assert.ok(ga instanceof engine.NotFound, what('match with allow: miss'));
+    assert.equal(ga.node, node(ma.notFound.node), what('NotFound.node'));
+    assert.equal(ga.rest, ma.notFound.rest, what('NotFound.rest'));
+  } else {
+    assert.equal(ga, node(ma.node), what('match with allow'));
+  }
+};
+
 const checkLookups = (ctx, thread) => {
   const { model, random } = ctx;
   const keys = missKeys(ctx);
@@ -635,6 +799,17 @@ const checkLookups = (ctx, thread) => {
     keys.push(model.pathOf(n));
   if (random.chance(0.3)) keys.push('/'); // the root, as ''
   for (const key of keys) checkKey(ctx, thread, key);
+  for (let lang = 1; lang < model.languages; lang++) {
+    // The main keys there, mostly misses; the keys there, and their misses.
+    const there = [];
+    for (const n of random.shuffle([...model.nodes()]).slice(0, 6)) {
+      const path = model.pathOf(n, lang);
+      if (path === null) continue;
+      there.push(path, `${path}/miss-${random.int(5)}`);
+    }
+    for (const key of [...random.shuffle(keys).slice(0, 4), ...there])
+      checkLangKey(ctx, thread, key, lang);
+  }
   // A key without its leading '/' is no key: EINVAL (QA В41). A sample of
   // two: a refusal costs a stack trace.
   for (const key of random
@@ -649,32 +824,6 @@ const checkLookups = (ctx, thread) => {
       );
   }
 };
-
-// allow(policy, owner, context): true unless the policy says no — a deny
-// policy refuses with a fresh decision object, a redirect policy with
-// another; a planned throw on one policy value. `log` gets every call, and
-// `log.decisions` every refusal's decision, in order.
-const newLog = () => {
-  const log = [];
-  log.decisions = [];
-  return log;
-};
-
-const makeAllow =
-  (log, throwOn = null) =>
-  (policy, owner, context) => {
-    log.push([policy, owner, context]);
-    if (throwOn !== null && policy === throwOn)
-      throw new Error('allow: a planned failure');
-    let decision = true;
-    // only true lets through: a truthy primitive is a decision too
-    if (policy && policy.prim !== undefined) decision = policy.prim;
-    else if (policy && policy.deny) decision = { status: 403, tag: policy.tag };
-    else if (policy && policy.redirect)
-      decision = { redirect: '/elsewhere', tag: policy.tag };
-    if (decision !== true) log.decisions.push(decision);
-    return decision;
-  };
 
 const checkPolicies = (ctx, thread) => {
   const { model, random } = ctx;
@@ -1291,6 +1440,124 @@ const policyOf = (ctx) => {
   };
 };
 
+// Puts of languages and pages the format refuses, or the final state: a
+// language that is not one, twice, a name not one or not the root's, a
+// page beside data or of a kind no page has, a page without data, a
+// translation with data and no name.
+const badLanguageOps = (ctx, newId) => {
+  const { model, extents } = ctx;
+  const root = model.root.id;
+  const L = model.languages;
+  const data_ = () => data.payloadOf(ctx.random, extents, { noSource: true });
+  const put = (fields) => [
+    'put',
+    newId(),
+    root,
+    `bad-${ctx.counter++}`,
+    fields,
+  ];
+  return [
+    put({ class: 1, translations: [[0, { name: 'x' }]] }),
+    put({ class: 1, translations: [[L, { name: 'x' }]] }),
+    put({ class: 1, translations: [[1, { name: 'a/b' }]] }),
+    put({
+      class: 1,
+      translations: [
+        [1, {}],
+        [1, {}],
+      ],
+    }),
+    put({ class: 1, translations: [[1, 'x']] }),
+    put({ class: 1, translations: {} }),
+    ['put', root, null, '', { translations: [[1, { name: 'x' }]] }],
+    put({ class: 1, payload: data_(), page: [] }),
+    put({ class: 1, page: [[2, extents.next(8)]] }),
+    put({
+      class: 1,
+      page: [
+        [1, extents.next(8)],
+        [1, extents.next(8)],
+      ],
+    }),
+    put({ class: 1, page: [[1, extents.next(8)]] }),
+    put({ class: 1, translations: [[1, { payload: data_() }]] }),
+    put({
+      class: 1,
+      translations: [[1, { name: 'p', page: [[1, extents.next(8)]] }]],
+    }),
+    // a page beside new data in a translation: among the data's, or none
+    put({
+      class: 1,
+      translations: [[1, { name: 'p', payload: data_(), page: [] }]],
+    }),
+  ];
+};
+
+// A page of an id tree's payload: kind 1 and some of its compressed forms,
+// now and then the forms alone, or none.
+const pageOf = (ctx) => {
+  const { random, extents } = ctx;
+  if (random.chance(0.15)) return [];
+  const page = [];
+  if (random.chance(0.9)) page.push([1, extents.next(8 + random.int(24))]);
+  for (const kind of [3, 5, 4, 6])
+    if (random.chance(0.3)) page.push([kind, extents.next(8)]);
+  return random.shuffle(page);
+};
+
+const languagesBut = (model) =>
+  Array.from({ length: model.languages - 1 }, (_, i) => i + 1);
+
+// The names the nodes have in a language but the main one.
+const namesIn = (model, lang) => {
+  const out = [];
+  for (const n of model.nodes()) {
+    const t = n.tr.get(lang);
+    if (t !== undefined && n.parent !== null) out.push(t.name);
+  }
+  return out;
+};
+
+// What a put or a row states of the other languages for node `n` (null
+// for a new one), or null: a translation made, renamed or dropped, its
+// data, none, or a page of its data; names of the tight mode as often as
+// the main ones, a translation without a name now and then.
+const translationsFor = (ctx, n, root) => {
+  const { model, random } = ctx;
+  if (model.languages === 1 || !on('lang') || !random.chance(0.5)) {
+    return null;
+  }
+  const list = [];
+  for (const lang of random.shuffle(languagesBut(model))) {
+    if (!random.chance(0.6)) continue;
+    const t = n === null ? undefined : n.tr.get(lang);
+    if (t !== undefined && random.chance(0.12)) {
+      list.push([lang, null]);
+      continue;
+    }
+    const said = {};
+    if (root) {
+      if (random.chance(0.2)) said.name = '';
+    } else if (t === undefined ? random.chance(0.95) : random.chance(0.3)) {
+      // the main name now and then, or a name another node has there
+      const taken = random.chance(0.15) ? namesIn(model, lang) : [];
+      if (taken.length > 0) said.name = random.pick(taken);
+      else said.name = n !== null && random.chance(0.2) ? n.name : nameAt(ctx);
+    }
+    const data_ = t?.payload ?? null;
+    if (random.chance(0.5))
+      said.payload = sized(
+        ctx,
+        data.payloadOf(random, ctx.extents, { noSource: true }),
+      );
+    else if (data_ !== null && random.chance(0.2)) said.payload = null;
+    else if (random.chance(data_ !== null ? 0.4 : 0.05))
+      said.page = pageOf(ctx);
+    list.push([lang, said]);
+  }
+  return list.length > 0 ? list : null;
+};
+
 // A commit of an id tree: puts and removes, one per id; patterns
 // of the final state; now and then refused.
 const clientOps = (ctx) => {
@@ -1306,20 +1573,25 @@ const clientOps = (ctx) => {
     random.chance(0.6)
       ? sized(ctx, data.payloadOf(random, extents, { noSource: true }))
       : undefined;
-  const fields = (create) => {
+  // `n`: the node of the put, null for a new one.
+  const fields = (create, n = null, root = false) => {
     const f = {};
     if (create || random.chance(0.2)) f.class = random.int(5);
     const p = payload();
     if (p !== undefined) f.payload = p;
     else if (!create && random.chance(0.1)) f.payload = null;
+    if (f.payload === undefined && random.chance(n?.payload ? 0.15 : 0.02))
+      f.page = pageOf(ctx);
     const pol = policyOf(ctx);
     if (pol !== null) f.policy = pol;
     else if (!create && random.chance(0.05)) f.policy = null;
+    const tr = translationsFor(ctx, n, root);
+    if (tr !== null) f.translations = tr;
     return f;
   };
   if (model.root === null) {
     const id = newId();
-    ops.push(['put', id, null, '', fields(true)]);
+    ops.push(['put', id, null, '', fields(true, null, true)]);
     for (let i = 0; i < 3; i++)
       ops.push(['put', newId(), id, nameAt(ctx), fields(true)]);
     return ops;
@@ -1327,29 +1599,59 @@ const clientOps = (ctx) => {
   const nonRoot = all.filter((n) => n.parent !== null);
   const count = 1 + random.int(5);
   for (let i = 0; i < count; i++) {
-    const choice = random.int(12);
+    const choice = random.int(model.languages > 1 ? 15 : 12);
     if (choice <= 3 || nonRoot.length === 0) {
       const parent = random.pick(all);
       ops.push(['put', newId(), parent.id, nameAt(ctx), fields(true)]);
       continue;
     }
+    if (choice === 12) {
+      // the root, in its languages
+      const root = model.root;
+      if (named.has(root.id)) continue;
+      named.add(root.id);
+      ops.push(['put', root.id, null, '', fields(false, root, true)]);
+      continue;
+    }
     const n = random.pick(nonRoot);
     if (named.has(n.id)) continue;
     named.add(n.id);
+    if (choice === 14) {
+      // Next to a node of its name in a language, under another name
+      // there: the name it leaves under the new parent stays the other's.
+      const lang = 1 + random.int(model.languages - 1);
+      const mine = n.tr.get(lang);
+      const other =
+        mine === undefined
+          ? undefined
+          : nonRoot.find(
+              (k) =>
+                k.parent !== n.parent && k.tr.get(lang)?.name === mine.name,
+            );
+      if (other === undefined) continue;
+      ops.push([
+        'put',
+        n.id,
+        other.parent.id,
+        nameAt(ctx),
+        { translations: [[lang, { name: nameAt(ctx) }]] },
+      ]);
+      continue;
+    }
     if (choice <= 5) {
       // a move or rename, sometimes under its own descendant (a cycle)
       const parent = random.pick(all);
       const name = random.chance(0.5) ? n.name : nameAt(ctx);
-      ops.push(['put', n.id, parent.id, name, fields(false)]);
+      ops.push(['put', n.id, parent.id, name, fields(false, n)]);
     } else if (choice <= 7) {
-      ops.push(['put', n.id, n.parent.id, n.name, fields(false)]);
+      ops.push(['put', n.id, n.parent.id, n.name, fields(false, n)]);
     } else if (choice <= 9) {
       ops.push(['remove', n.id]);
     } else if (choice === 10) {
       // remove a node and create another with its name
       ops.push(['remove', n.id]);
       ops.push(['put', newId(), n.parent.id, n.name, fields(true)]);
-    } else {
+    } else if (choice === 11) {
       // swap the names of two siblings
       const sib = n.parent.kids.find((k) => k !== n && !named.has(k.id));
       if (sib) {
@@ -1357,6 +1659,42 @@ const clientOps = (ctx) => {
         ops.push(['put', n.id, n.parent.id, sib.name, {}]);
         ops.push(['put', sib.id, sib.parent.id, n.name, {}]);
       }
+    } else {
+      // swap the names of two siblings in a language, or take the name of
+      // one that drops it or moves away there
+      const lang = 1 + random.int(model.languages - 1);
+      const sib = n.parent.kids.find(
+        (k) => k !== n && !named.has(k.id) && k.tr.has(lang),
+      );
+      if (sib === undefined) continue;
+      named.add(sib.id);
+      const theirs = sib.tr.get(lang).name;
+      const mine = n.tr.get(lang)?.name ?? nameAt(ctx);
+      const away = random.pick([
+        [
+          'put',
+          sib.id,
+          sib.parent.id,
+          sib.name,
+          { translations: [[lang, { name: mine }]] },
+        ],
+        [
+          'put',
+          sib.id,
+          sib.parent.id,
+          sib.name,
+          { translations: [[lang, null]] },
+        ],
+        ['put', sib.id, random.pick(all).id, nameAt(ctx), {}],
+      ]);
+      const take = [
+        'put',
+        n.id,
+        random.chance(0.8) ? n.parent.id : random.pick(all).id,
+        n.name,
+        { translations: [[lang, { name: theirs }]] },
+      ];
+      ops.push(...random.shuffle([away, take]));
     }
   }
   if (random.chance(0.12)) {
@@ -1404,6 +1742,7 @@ const clientOps = (ctx) => {
       ],
       ['frob', 1],
       ops.length > 0 ? ops[0] : ['remove', model.root.id],
+      ...badLanguageOps(ctx, newId),
     ]);
     ops.splice(random.int(ops.length + 1), 0, bad);
   }
@@ -1417,19 +1756,36 @@ const clientOps = (ctx) => {
 const clientRelocations = (ctx) => {
   const { model, random, extents } = ctx;
   const all = [...model.nodes()];
-  const withReps = all.filter(
-    (n) => n.payload !== null && n.payload.reps.size > 0,
-  );
-  if (withReps.length === 0) return null;
-  const n = random.pick(withReps);
-  const kinds = [...n.payload.reps.keys()];
-  const op = ['relocate', n.id, random.pick(kinds), extents.next(8)];
+  // A payload of any language: the relocation names the language past the
+  // main one, and now and then the main one too.
+  const held = [];
+  for (const n of all) {
+    for (let lang = 0; lang < model.languages; lang++) {
+      const p = model.payloadIn(n, lang);
+      if (p !== null && p.reps.size > 0) held.push([n, lang, p]);
+    }
+  }
+  if (held.length === 0) return null;
+  const [n, lang, p] = random.pick(held);
+  const kinds = [...p.reps.keys()];
+  const relocation = (kind) => {
+    const op = ['relocate', n.id, kind, extents.next(8)];
+    if (lang > 0 || random.chance(0.2)) op.push(lang);
+    return op;
+  };
+  const op = relocation(random.pick(kinds));
   const others = all.filter((x) => x !== n && x.parent !== null);
   const otherKind = model.mode === 'number' ? String(n.id) : ctx.counter++;
   const dead = ctx.deadIds.filter((id) => !model.byId.has(id));
-  switch (random.int(16)) {
+  switch (random.int(18)) {
     case 0:
-      return [op, ['relocate', n.id, random.pick(kinds), extents.next(8)]];
+      return [op, relocation(random.pick(kinds))];
+    case 16:
+      // every representation of the node in one commit, as a compaction
+      // of a segment holding them all moves them
+      return random.shuffle(kinds.map(relocation));
+    case 17:
+      return [['relocate', n.id, kinds[0], extents.next(8), model.languages]];
     case 1: {
       if (others.length === 0) return [op];
       const x = random.pick(others);
@@ -1458,14 +1814,50 @@ const clientRelocations = (ctx) => {
         ? [['relocate', random.pick(dead), 0, extents.next(8)]]
         : [op];
     case 7: {
-      const lacks = [0, 1, 2, 3, 4].filter((k) => !n.payload.reps.has(k));
-      return lacks.length > 0
-        ? [['relocate', n.id, random.pick(lacks), extents.next(8)]]
-        : [op];
+      const lacks = [0, 1, 2, 3, 4].filter((k) => !p.reps.has(k));
+      return lacks.length > 0 ? [relocation(random.pick(lacks))] : [op];
     }
     default:
       return [op];
   }
+};
+
+// Pages from a thread after a render: a page or none for a payload of any
+// language, each (id, language) once; now and then refused — a page where
+// there is no data, a dead id, a page that is not one, a language the tree
+// has not, a pair twice, a put or a relocation beside.
+const clientRenders = (ctx) => {
+  const { model, random, extents } = ctx;
+  const all = [...model.nodes()];
+  if (all.length === 0) return null;
+  const ops = [];
+  const pairs = new Set();
+  for (let i = 0; i < 1 + random.int(3); i++) {
+    const n = random.pick(all);
+    const lang = random.int(model.languages);
+    if (pairs.has(`${n.uid}|${lang}`)) continue;
+    pairs.add(`${n.uid}|${lang}`);
+    const has = model.payloadIn(n, lang) !== null;
+    ops.push(['render', n.id, lang, has ? pageOf(ctx) : []]);
+  }
+  if (ops.length > 0 && random.chance(0.15)) {
+    const n = random.pick(all);
+    const page = [[1, extents.next(8)]];
+    const dead = ctx.deadIds.filter((id) => !model.byId.has(id));
+    const bad = random.pick([
+      ['render', n.id, random.int(model.languages), page],
+      ['render', dead.length > 0 ? random.pick(dead) : n.id, 0, page],
+      ['render', n.id, 0, [[0, extents.next(8)]]],
+      ['render', n.id, 0, [[1, badExtent(ctx)]]],
+      ['render', n.id, model.languages, []],
+      ['render', n.id, 0],
+      ops[0],
+      ['put', n.id, n.parent === null ? null : n.parent.id, n.name, {}],
+      ['relocate', n.id, 0, extents.next(8)],
+    ]);
+    ops.splice(random.int(ops.length + 1), 0, bad);
+  }
+  return ops;
 };
 
 const loadRows = (ctx) => {
@@ -1495,7 +1887,10 @@ const loadRows = (ctx) => {
       row.payload = random.chance(0.8)
         ? sized(ctx, data.payloadOf(random, extents, { noSource: true }))
         : null;
+    else if (n.payload !== null && random.chance(0.1)) row.page = pageOf(ctx);
     if (random.chance(0.1)) row.policy = policyOf(ctx);
+    const tr = translationsFor(ctx, n, parent === null);
+    if (tr !== null) row.translations = tr;
     rows.push(row);
   }
   // Now and then two siblings swap their names: a final state that no order
@@ -1580,6 +1975,17 @@ const loadRows = (ctx) => {
     rows.push({ id, parentId: null, name: '', class: random.int(5) });
     rootRow.parentId = id;
     rootRow.name = nameAt(ctx);
+    // Under a parent '' is no name: the former root's translations get
+    // names there or go — or, now and then, stay as they were (ENOENT).
+    const old = model.byId.get(rootRow.id);
+    if (rootRow.translations !== undefined || old.tr.size > 0) {
+      if (random.chance(0.85))
+        rootRow.translations = [...old.tr.keys()].map((lang) => [
+          lang,
+          random.chance(0.8) ? { name: nameAt(ctx) } : null,
+        ]);
+      else delete rootRow.translations;
+    }
   } else if (moved) {
     // nothing more
   } else if (rows.length > 0 && special < 20) {
@@ -1602,6 +2008,34 @@ const loadRows = (ctx) => {
   } else if (rows.length > 0 && special < 54) {
     // a row that is not an object
     rows.push(random.pick([null, 7]));
+  } else if (rootRow !== undefined && special < 64) {
+    // A node of the tree becomes the root, the former root its child: the
+    // new root is '' in every language — by its rows or of itself — and
+    // the former one needs names there (ENOENT without).
+    const named = rows.filter(
+      (r) => r.parentId !== null && model.byId.has(r.id),
+    );
+    if (named.length > 0) {
+      const r = random.pick(named);
+      const was = model.byId.get(r.id);
+      r.parentId = null;
+      r.name = '';
+      if (random.chance(0.6)) delete r.translations;
+      else if (was.tr.size > 0)
+        r.translations = [...was.tr.keys()].map((lang) => [
+          lang,
+          random.pick([{}, { name: '' }, null]),
+        ]);
+      rootRow.parentId = r.id;
+      rootRow.name = nameAt(ctx);
+      const old = model.byId.get(rootRow.id);
+      if (old.tr.size > 0 && random.chance(0.85))
+        rootRow.translations = [...old.tr.keys()].map((lang) => [
+          lang,
+          { name: nameAt(ctx) },
+        ]);
+      else if (old.tr.size === 0) delete rootRow.translations;
+    }
   }
   return random.shuffle(rows);
 };
@@ -1636,6 +2070,10 @@ const runSeed = (seed) => {
       .shuffle([0, 1, 2, 3, 4])
       .slice(0, random.int(4));
   if (random.chance(0.12)) options.maxNodes = 12 + random.int(30);
+  // Languages by the seed, not the generator: two id-tree seeds of every
+  // three have several.
+  const languages = [1, 2, 3][Math.floor(seed / 3) % 3];
+  if (!fs && on('lang') && languages > 1) options.languages = languages;
   const model = new ModelTree(options);
   const main = new Thread('main', engine.createTree(options), segments, true);
   const ctx = {
@@ -1747,6 +2185,11 @@ const runSeed = (seed) => {
     for (const bad of [
       { ids: 'number', directories: true },
       { ids: 'string', directories: true },
+      { ids: 'engine', languages: 2 },
+      { ids: 'engine', languages: 1 },
+      { ids: 'number', languages: 0 },
+      { ids: 'string', languages: 256 },
+      { ids: 'number', languages: 1.5 },
     ])
       assert.throws(
         () => engine.createTree({ ...options, ...bad }),
@@ -1793,7 +2236,9 @@ const runSeed = (seed) => {
     } else if (random.chance(0.08)) {
       ops = clientRelocations(ctx) ?? clientOps(ctx);
     } else {
-      ops = clientOps(ctx);
+      // pages after a render, now and then
+      const renders = random.chance(0.08) ? clientRenders(ctx) : null;
+      ops = renders ?? clientOps(ctx);
     }
     // The version: mostly the next one, now and then equal (the intake's
     // window), now and then below (EINVAL -1).
@@ -1898,6 +2343,7 @@ const runSeed = (seed) => {
       assert.equal(eerr.index, merr.index, what(`index of ${merr.code}`));
       if (merr.other !== undefined)
         assert.equal(eerr.other, merr.other, what('other'));
+      assert.equal(eerr.lang, merr.lang, what(`lang of ${merr.code}`));
       assert.equal(
         fingerprint(ctx, main),
         fpBefore,
@@ -1942,15 +2388,21 @@ const runSeed = (seed) => {
           `delta ${eres.delta === null ? 'null' : 'given'}, the model says ${mres.delta}`,
         ),
       );
-      // retired: as a multiset of (id, kind, extent), each rep the main
-      // tree's own object, each retireId one the counter gave.
+      // retired: as a multiset of (id, language, kind, extent), each rep the
+      // main tree's own object, each retireId one the counter gave; a tree
+      // of one language names no language.
+      const langOf = (r) => {
+        if (model.languages === 1)
+          assert.equal(r.lang, undefined, what('a language in one'));
+        return r.lang ?? 0;
+      };
       const want = mres.retired
-        .map((r) => `${r.id}|${r.kind}|${r.extent}`)
+        .map((r) => `${r.id}|${r.lang}|${r.kind}|${r.extent}`)
         .sort();
       const got = eres.retired
         .map(
           (r) =>
-            `${r.id}|${r.kind}|${r.rep ? `${r.rep.segmentId}:${r.rep.offset}:${r.rep.length}` : '?'}`,
+            `${r.id}|${langOf(r)}|${r.kind}|${r.rep ? `${r.rep.segmentId}:${r.rep.offset}:${r.rep.length}` : '?'}`,
         )
         .sort();
       assert.deepEqual(got, want, what('retired'));
@@ -1972,10 +2424,13 @@ const runSeed = (seed) => {
       const engineOwner = ownerOf((id) => main.tree.pathOf(main.tree.byId(id)));
       assert.deepEqual(
         eres.placed
-          .map((p) => `${engineOwner(p.id)}|${p.kind}|${extentKey(p.extent)}`)
+          .map(
+            (p) =>
+              `${engineOwner(p.id)}|${langOf(p)}|${p.kind}|${extentKey(p.extent)}`,
+          )
           .sort(),
         mres.placed
-          .map((p) => `${modelOwner(p.id)}|${p.kind}|${p.extent}`)
+          .map((p) => `${modelOwner(p.id)}|${p.lang}|${p.kind}|${p.extent}`)
           .sort(),
         what('placed'),
       );
@@ -2013,7 +2468,9 @@ const runSeed = (seed) => {
           ),
         );
         ids.add(r.retireId);
-        const m = mres.retired.find((x) => x.id === r.id && x.kind === r.kind);
+        const m = mres.retired.find(
+          (x) => x.id === r.id && x.kind === r.kind && x.lang === (r.lang ?? 0),
+        );
         assert.equal(
           r.rep,
           main.reps.get(m.uid),

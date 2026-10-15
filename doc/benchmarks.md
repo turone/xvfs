@@ -43,7 +43,7 @@ durable part.
 | OS       | Windows Server 2022 (10.0.20348)                                                                                                                                |
 | Node.js  | v24.20.0 (V8 13.6)                                                                                                                                              |
 | Disk     | every file read below was in the page cache                                                                                                                     |
-| Revision | `lib/` (unchanged since `edcf38f`) and `bench/` of the commit that added this page; the preparer path changed after — see [Preparer results](#preparer-results) |
+| Revision | `lib/` (unchanged since `7b938a1`) and `bench/` of the commit that added this page; the preparer path changed after — see [Preparer results](#preparer-results) |
 
 ## Reproduce
 
@@ -398,7 +398,7 @@ router refuses spellings of `appRoot` the strings do not show — NTFS
 streams, 8.3 names, a drive or a real path that names it — and a native
 call on a place's disk proves where its path really lands (one
 `realpath.native`; `doc/architecture.md`, Routing and strict mode). The
-A/B of that work against the commit before it (`f0efa1a`), four
+A/B of that work against the commit before it (`ec41a90`), four
 alternating pairs of `--only router,patch,read --bench HEAD` — the new
 `patch.strict.*` rows measured on the old code too — ns/op, median of the
 four runs on each side:
@@ -439,15 +439,15 @@ native call on a place's disk is checked by the place's `links`: `'deny'`
 (the default) against the links the kernel knows, `'verify'` by a
 `realpath.native` of each call — what every strict call paid before
 `links` existed. Two A/Bs per system, four alternating pairs of
-`--only router,patch --bench HEAD`: against `f375ac3`, the proof on every
-call, and against `de1383f`, before it. The `*.verify.*` rows fall back
-to strict as it was on a revision without `links`, so on `f375ac3` they
+`--only router,patch --bench HEAD`: against `aab1d65`, the proof on every
+call, and against `5e29f1d`, before it. The `*.verify.*` rows fall back
+to strict as it was on a revision without `links`, so on `aab1d65` they
 measure the proof too. `router.*.linked` names a file of a `disk` place
 whose directory holds 10 links (the index knows them), `through` a path
 through one of them, `mutate.disk` a file of a place with none. ns/op,
 median of the four runs on each side; the `before`, `proof`, `deny` and
-`verify` columns are `de1383f`, `f375ac3`, and `links: 'deny'` and
-`'verify'` at `c9790c9`.
+`verify` columns are `5e29f1d`, `aab1d65`, and `links: 'deny'` and
+`'verify'` at `af874a0`.
 
 Windows (the machine above):
 
@@ -475,11 +475,11 @@ Linux (the same machine, WSL2, Node.js 24.20.0; wider spreads):
 | `patch.strict.territory.statSync` |  1 117 |  2 499 | 1 093 |  2 418 |
 
 ¹ Not refused before the proof: the call went through the link.
-² At `3d2db67` (next section), where a refusal asks no `lstat`; 13 935 on
-Windows and 1 244 on Linux at `c9790c9`.
+² At `5d915fb` (next section), where a refusal asks no `lstat`; 13 935 on
+Windows and 1 244 on Linux at `af874a0`.
 
 With `'deny'` a native call on a place's disk costs what it did before the
-proof — within 0–2 % of `de1383f` for reads, stats and listings on
+proof — within 0–2 % of `5e29f1d` for reads, stats and listings on
 Windows, within the noise on Linux — three to four times less than the
 proof on Windows (a `stat` 50.9 → 13.0 µs, a read 57.9 → 18.8 µs), and
 2.4 times less on Linux for a `stat` (a read, 40 % less, varied too much
@@ -498,10 +498,10 @@ in the scan a disk-origin place makes anyway, or in one walk of
 
 ### The patch changes no link on a place's disk
 
-Since `b46ef2a` the patch makes, removes and moves no link on a place's
+Since `86715f8` the patch makes, removes and moves no link on a place's
 disk under strict, and the index of `'deny'` only grows: a refusal asks
 no `lstat`, while a removal or a rename there asks one of its path — a
-rename two, its source and its destination. A/B against `e33ed38`, four
+rename two, its source and its destination. A/B against `1ef8d01`, four
 pairs, `--only router,patch --bench HEAD`; `w` is a writable `disk` place,
 `writeUnlink` a file written and removed, `renameBack` a file renamed and
 back (two renames). ns/op, medians; the busy machine spread the mutation
@@ -523,11 +523,11 @@ not move.
 
 ### No tree through a link out of a place
 
-Since `9118016` a recursive removal of a directory on a place's disk, and
+Since `60f2611` a recursive removal of a directory on a place's disk, and
 a directory's rename, ask where the directory really lies — one
 `realpath` of it, and for a rename of its destination too (a missing one:
 a failed `realpath`, then its parent's) — in both modes; a file, and a
-missing path, ask nothing more. A/B against `4122e05`, four pairs,
+missing path, ask nothing more. A/B against `178cdc2`, four pairs,
 `--only patch --bench 99443e8`: `mkdirRmTree` makes a directory and
 removes it with `recursive`, `renameDirBack` renames a directory and back
 (two renames). ns/op, medians; the Linux (WSL) mutation rows spread
@@ -902,3 +902,88 @@ above `main` in that run, is level with it in this one (88.6 against
 89.3 MiB: `main`'s own figure moved). The three strict figures of links,
 level with `main` there, are better than `main` here in every pair,
 15–23 % by the medians.
+
+## Languages and pages of a shared tree
+
+The languages and the rendered pages of a shared tree
+([architecture → Shared trees](architecture.md#shared-trees)) on an id
+tree of the catalog's rows in two languages, every node translated — its
+name there of the same length as its main one, a page's data there a
+payload of its own — beside the tree of one language of the same rows:
+`node --expose-gc bench/run.js --only tree --n 10000,100000`, one run, on
+the machine above, Node 24.20. The rows are `tree.lang.<n>.*`.
+
+| `tree.lang.*`                |   10⁴ |  10⁵ |
+| ---------------------------- | ----: | ---: |
+| `get.random.main`, ns/op     | 201.9 |  562 |
+| `get.random.uk`, ns/op       | 201.4 |  451 |
+| `memory.translation`, B/page |   417 |  407 |
+| `commit.translation`, µs/op  |  4.63 | 9.99 |
+| `apply.translation`, µs/op   |  0.97 | 2.28 |
+| `commit.render`, µs/op       |  2.24 | 3.36 |
+| `apply.render`, µs/op        |  0.64 | 1.25 |
+
+- **A lookup in another language costs what a lookup in the main one
+  does**: 201.4 against 201.9 ns at 10⁴, both ±2 %. It walks the
+  children by their names there, one more `Map` a level read from the
+  same object. At 10⁵ both spread by a quarter to a half in this run, the
+  lookups of a tree of two languages missing the cache as often as not;
+  an earlier run with names longer by three characters there — `-uk` —
+  gave 283 against 203 ns at 10⁴: the cost of hashing a longer name, not
+  of the language.
+- **A translation takes about 410 bytes a page** of a replica's heap:
+  its name and its record, its entry in the parent's list of the
+  language, and its payload — a source, and for 30 % of the pages two
+  compressed forms — against the replica of one language of the same
+  rows. The design's probe gave 180–230 bytes for the name, the record
+  and the entry, and 160 more for a payload with one source.
+- **A commit of 1000 translations' data** — one language of a page each,
+  a payload of its own — takes 4.6 µs an op on the main thread and 1.0 µs
+  to apply on a replica at 10⁴; **1000 pages** (`render`, as a `cache`
+  commits them) 2.2 and 0.6 µs: a page keeps its payload's data object
+  and attributes, and its delta carries the page's extents only.
+
+What they cost the code that does not use them — a tree of one language,
+a place, an intake without pages — the branch measures against `main` on
+the same machine: `node bench/ab.js main b40714b --pairs 4` over the
+scenarios of a default run, and alone the two that run only when named,
+which make id trees: `--only tree --n 10000` and `--only intake`. Of the
+618 figures of the default run none is better or worse beyond the
+threshold, 90 move the same way in every pair without passing it, 2
+disagree between pairs; of `tree`'s 138 and `intake`'s 24 none passes it
+either.
+
+- **A tree of one language costs what it did.** Its lookups
+  (`tree.policy.1e4.get.*`) stay within 2.3 % both ways, an intake of
+  rows without pages within its noise (one figure of 24 slower in every
+  pair, `intake.run.10.2000`, by 5 %). A load of a live id tree, every
+  row stated and 1 % of them renamed (`tree.miss.1e4.load.rename1pct`),
+  was 22 % slower in every pair at `3d74315`, the commit before,
+  1.94 → 2.37 ms: a row had become a put of two more fields, and the
+  checks of pages and translations ran for every row. A put keeps both
+  in one field now, null where it states neither, and such a put skips
+  those checks (`b40714b`): 2.13 → 2.17 ms, the pairs disagreeing; a
+  probe of that load alone, six alternating pairs, puts them 1.6 %
+  apart.
+- **Their code** takes 0.18 MiB more of every thread's heap —
+  `memory.start.heap` 7.03 → 7.21 MiB, `pool.sab.8.workers.heap`
+  66.9 → 68.3 for eight workers — and 0.2 ms more of the first id tree a
+  thread makes. A probe of the steps of `tree.ids.*.bigIds` — an id tree
+  made, a commit, a replica of its snapshot — in a fresh process, 20 a
+  side: 1.55 → 1.73 ms the first time, 0.154 → 0.159 the second, the
+  longer code compiled once. In the bench, under its threshold, two runs:
+  `negative` 0.97 → 1.19 and 0.96 → 1.22 ms, slower in 7 pairs of 8;
+  `positive` 1.00 → 1.16 and 1.10 → 1.06, in 5.
+- **Places, per call, nothing beyond the noise.** The two figures whose
+  pairs disagree are tails of batches, `batch.writeFiles.linked.64.p99`
+  and `batch.series.64.p95`, their p50 level (121.2 → 121.2 µs,
+  244 → 247); the run at `3d74315` marked neither, but another tail,
+  `batch.writeFiles.8.p99`, and `mem.views.rss`, which moves with the
+  collector. The leases' `views.withFileView.sync`, 13 % slower in every
+  pair of that run, is level in this one (214 → 217 ns), as it was over
+  8 pairs of `views` alone (227.2 → 226.5). Of the routers,
+  `router.open.read.dir` is 6–7 % slower in three runs, in 15 pairs of
+  16 — 8 pairs of `router` alone: 226.5 → 242.2 ns, under its threshold
+  of 28 % — on a path where the branch adds one test of a language to a
+  tree's `match`, as on the path of a file, which stays level
+  (244.9 → 239.6).

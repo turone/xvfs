@@ -251,6 +251,12 @@ export interface TreeConfig {
   ids: 'number' | 'string';
   /** The classes that are containers in every thread at first. Default []. */
   containers?: readonly number[];
+  /**
+   * The languages' codes, the main one first — 1 to 255, each once: a node
+   * has a name and a payload in each it is translated to. Without, one
+   * language and no code.
+   */
+  languages?: readonly string[];
   /** Payloads keep a birthtime. Default false. */
   birthtime?: boolean;
   /** The aggregates the tree keeps; both off by default. */
@@ -259,8 +265,11 @@ export interface TreeConfig {
   maxNodes?: number;
   /** The largest payload. Default `defaults.memory.maxFileSize`. */
   maxFileSize?: Size;
-  /** Compressed representations, as a place's (`ext` by a node's name). */
-  compress?: Omit<CompressConfig, 'retainRaw'> | false | null;
+  /**
+   * The compressed forms of every rendered page, made once as it is
+   * published; the data a payload holds is never compressed.
+   */
+  compress?: Pick<CompressConfig, 'encodings' | 'options'> | false | null;
   /** Leases and borrowed stream chunks. Default false. */
   zeroCopy?: boolean;
   intake?: IntakeConfig;
@@ -372,6 +381,8 @@ export interface ResolvedTree {
   readonly name: string;
   readonly ids: 'number' | 'string';
   readonly containers: readonly number[];
+  /** As configured; [] without. */
+  readonly languages: readonly string[];
   readonly birthtime: boolean;
   readonly aggregates: {
     readonly classes: boolean;
@@ -379,7 +390,7 @@ export interface ResolvedTree {
   };
   readonly maxNodes: number;
   readonly maxFileSize: number;
-  readonly compress: ResolvedCompress | null;
+  readonly compress: { readonly codecs: readonly ResolvedCodec[] } | null;
   readonly zeroCopy: boolean;
   readonly intake: ResolvedIntake;
 }

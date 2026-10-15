@@ -95,8 +95,7 @@ describe('trees: the main thread', () => {
         size: 5,
         mtimeMs: 7,
         meta: null,
-        scriptOptions: null,
-        encodings: [],
+        rendered: null,
       });
       assert.ok(Object.isFrozen(t.payloadOf(about)));
       assert.equal(t.nodeId(about), 2);
@@ -175,23 +174,34 @@ describe('trees: the main thread', () => {
     }
   });
 
-  it('compresses what `compress` names; the encodings are told', async () => {
+  it('compresses every rendered page, never the data; the encodings are told', async () => {
     const { k, done } = await treeKernel({
-      pages: { ...PAGES, compress: { encodings: ['gzip'], ext: ['html'] } },
+      pages: { ...PAGES, compress: { encodings: ['gzip'] } },
     });
     try {
       const t = k.tree('pages');
       const html = '<p>' + 'x'.repeat(500) + '</p>';
-      await t.load([ROOT, page(2, 'a.html', html), page(3, 'b.bin', 'y')], 0);
-      const a = t.get('/a.html');
-      assert.deepEqual(t.payloadOf(a).encodings, ['gzip']);
+      const data = JSON.stringify({ body: 'y'.repeat(500) });
+      await t.load(
+        [ROOT, { ...page(2, 'a', data), rendered: html }, page(3, 'b', data)],
+        0,
+      );
+      const a = t.get('/a');
+      assert.deepEqual(t.payloadOf(a).rendered, {
+        size: html.length,
+        encodings: ['gzip'],
+      });
+      assert.equal(t.readRendered(a, 'utf8'), html);
       const zlib = require('node:zlib');
       assert.equal(
         zlib.gunzipSync(t.readCompressed(a, 'gzip')).toString(),
         html,
+        'the gzip of the page',
       );
-      assert.deepEqual(t.payloadOf(t.get('/b.bin')).encodings, []);
-      assert.equal(t.readCompressed(t.get('/b.bin'), 'gzip'), null);
+      assert.equal(t.read(a, 'utf8'), data, 'the data as it was given');
+      assert.equal(t.payloadOf(t.get('/b')).rendered, null);
+      assert.equal(t.readRendered(t.get('/b')), null);
+      assert.equal(t.readCompressed(t.get('/b'), 'gzip'), null);
       for (const name of ['br', 'requireBytecode', 'bogus']) {
         assert.throws(() => t.readCompressed(a, name), { code: 'ENOTSUP' });
         assert.throws(() => t.createReadStreamCompressed(a, name), {
@@ -203,7 +213,7 @@ describe('trees: the main thread', () => {
         assert.equal(typeof chunk, 'string', 'an encoding string');
         text += chunk;
       }
-      assert.equal(text, html);
+      assert.equal(text, data);
       assert.equal(leakedBytes(k), 0);
     } finally {
       done();
@@ -270,6 +280,63 @@ describe('trees: the main thread', () => {
       assert.ok(await until(() => segmentOf() === 1), '/c relocated');
       assert.equal(t.read(t.byId(4), 'utf8'), 'c'.repeat(200));
       assert.equal(t.payloadOf(t.byId(4)).version, version, 'its version kept');
+      assert.ok(await until(() => k.retirements().length === 0));
+      assert.equal(leakedBytes(k), 0);
+    } finally {
+      done();
+    }
+  });
+
+  it('a compaction moves every representation of a node, its data, its page and its gzip in one segment', async () => {
+    const KB = 1024;
+    const { k, done } = await treeKernel(
+      { pages: { ...PAGES, compress: { encodings: ['gzip'] } } },
+      {
+        defaults: {
+          memory: {
+            limit: '16 kib',
+            segmentSize: '4 kib',
+            maxFileSize: '4 kib',
+          },
+          compaction: { threshold: 0.5 },
+        },
+      },
+    );
+    try {
+      const t = k.tree('pages');
+      const html = `<p>${'c'.repeat(200)}</p>`;
+      const data = 'c'.repeat(100);
+      await t.load(
+        [
+          ROOT,
+          page(2, 'a', 'a'.repeat(2 * KB)),
+          page(3, 'b', 'b'.repeat(2 * KB)),
+          { ...page(4, 'c', data), rendered: html },
+        ],
+        0,
+      );
+      const tree = k.trees.get('pages').tree;
+      const segmentsOf = () => {
+        const payload = tree.payloadOf(tree.byId(4));
+        const { source, others } = payload;
+        return [source, others.requireBytecode, others.gzip].map(
+          (rep) => rep.segmentId,
+        );
+      };
+      assert.deepEqual(segmentsOf(), [2, 2, 2]);
+      // Freeing /a makes segment 2 the target: all three move to segment 1.
+      await t.submit({ seq: 1, ops: [['remove', 2]] });
+      assert.ok(
+        await until(() => segmentsOf().every((s) => s === 1)),
+        'the data, the page and its gzip relocated',
+      );
+      const c = t.byId(4);
+      assert.equal(t.read(c, 'utf8'), data);
+      const zlib = require('node:zlib');
+      assert.equal(
+        zlib.gunzipSync(t.readCompressed(c, 'gzip')).toString(),
+        html,
+      );
       assert.ok(await until(() => k.retirements().length === 0));
       assert.equal(leakedBytes(k), 0);
     } finally {
@@ -393,6 +460,42 @@ describe('trees: workers', () => {
       assert.equal(leakedBytes(k), 0);
     } finally {
       w.kernel.close();
+      done();
+    }
+  });
+
+  it('a worker of other languages is refused at attach(): the indexes would name other codes', async () => {
+    const { k, root, done } = await treeKernel({
+      pages: { ...PAGES, languages: ['en', 'uk'] },
+    });
+    try {
+      const attach = (languages) =>
+        VfsKernel.fromSnapshot(
+          k.snapshot(),
+          new VfsConfig({
+            defaults: { memory: MEMORY },
+            trees: { pages: { ...PAGES, languages } },
+          }),
+          { appRoot: root, console: quiet },
+        );
+      // Another count, other codes of the same count, another order: each
+      // would name other languages by the snapshot's indexes.
+      for (const languages of [
+        undefined,
+        ['en'],
+        ['en', 'uk', 'de'],
+        ['en', 'ua'],
+        ['uk', 'en'],
+      ]) {
+        assert.throws(() => attach(languages), {
+          code: 'EINVAL',
+          message: /tree "pages" speaks \["en","uk"\] in the snapshot/,
+        });
+      }
+      const w = attach(['en', 'uk']);
+      assert.equal(w.trees.get('pages').tree.languages, 2);
+      w.close();
+    } finally {
       done();
     }
   });
@@ -520,6 +623,7 @@ describe('trees: diagnostics', () => {
         nodes: 0,
         payloads: 0,
         bytes: 0,
+        languages: {},
         last: null,
         held: true,
         waiting: 0,
@@ -532,6 +636,7 @@ describe('trees: diagnostics', () => {
         nodes: 3,
         payloads: 2,
         bytes: 8,
+        languages: {},
         last: 4,
         held: false,
         waiting: 1,
@@ -610,6 +715,303 @@ describe('trees: the rule of containers', () => {
         { code: 'EINVAL' },
       );
       assert.deepEqual(t.containers, [0, 1], 'as it was');
+    } finally {
+      done();
+    }
+  });
+});
+
+describe('trees: languages and pages', () => {
+  const SITE = {
+    ...PAGES,
+    languages: ['en', 'uk'],
+    compress: { encodings: ['gzip'] },
+  };
+  const about = (data, rendered, uk) => ({
+    id: 2,
+    parentId: 1,
+    name: 'about',
+    class: 1,
+    payload: { data },
+    rendered,
+    translations: { uk },
+  });
+
+  it('a tree of one language, without a code or with one: its paths by code, its view, its pages as any tree’s', async () => {
+    const { k, done } = await treeKernel({
+      one: PAGES,
+      en: { ...PAGES, languages: ['en'] },
+    });
+    try {
+      for (const [name, codes] of [
+        ['one', []],
+        ['en', ['en']],
+      ]) {
+        const t = k.tree(name);
+        assert.deepEqual(t.languages, codes);
+        await t.load([ROOT, page(2, 'a', 'a')], 0);
+        const node = t.get('/a');
+        assert.deepEqual(t.pathsOf(node), codes.length ? { en: '/a' } : {});
+        if (codes.length) assert.equal(t.lang('en').get('/a'), node);
+        else assert.throws(() => t.lang('en'), { code: 'EINVAL' });
+        const translated = { translations: { en: { name: 'x' } } };
+        assert.throws(
+          () => t.submit({ seq: 1, ops: [put(2, 1, 'a', translated)] }),
+          { code: 'EINVAL', index: 0, id: 2 },
+        );
+        const events = record(k);
+        const { version } = t.payloadOf(node);
+        assert.deepEqual(await t.cache(node, '<p>', version), {
+          status: 'cached',
+        });
+        assert.equal(t.readRendered(node, 'utf8'), '<p>');
+        assert.ok(await until(() => events.length === 1));
+        assert.deepEqual(events[0].trees, [
+          { tree: name, seqFrom: null, seqTo: null, loaded: false },
+        ]);
+        const { languages } = k.diagnostics().trees[name];
+        const stats = { names: 2, payloads: 1, rendered: 1, bytes: 4 };
+        assert.deepEqual(languages, codes.length ? { en: stats } : {});
+        assert.deepEqual(await t.uncache(node), { dropped: 1 });
+        assert.equal(t.readRendered(node), null);
+      }
+      assert.ok(await until(() => k.retirements().length === 0));
+      assert.equal(leakedBytes(k), 0);
+    } finally {
+      done();
+    }
+  });
+
+  it('a tree speaks its main language; lang(code) any — lookups, names, paths, data and pages there', async () => {
+    const { k, done } = await treeKernel({ site: SITE });
+    try {
+      const t = k.tree('site');
+      assert.deepEqual(t.languages, ['en', 'uk']);
+      const uk = t.lang('uk');
+      assert.equal(t.lang('uk'), uk, 'one view a code');
+      assert.equal(uk.code, 'uk');
+      assert.throws(() => t.lang('de'), { code: 'EINVAL' });
+      await t.load(
+        [
+          ROOT,
+          about('{"en":1}', '<en>', {
+            name: 'pro',
+            payload: { data: '{"uk":1}' },
+            rendered: '<uk>',
+          }),
+          { id: 3, parentId: 2, name: 'team', class: 1 },
+        ],
+        0,
+      );
+      const node = uk.get('/pro');
+      assert.equal(node, t.get('/about'), 'one node');
+      assert.equal(uk.get('/about'), null, 'the main name is not one there');
+      assert.deepEqual(t.pathsOf(t.byId(3)), { en: '/about/team', uk: null });
+      assert.equal(uk.nameOf(t.byId(3)), null, 'not translated: not there');
+      assert.equal(t.lang('en').get('/about'), node, 'the main view');
+      assert.equal(uk.read(node, 'utf8'), '{"uk":1}');
+      assert.equal(uk.readRendered(node, 'utf8'), '<uk>');
+      assert.equal(t.readRendered(node, 'utf8'), '<en>');
+      const zlib = require('node:zlib');
+      assert.equal(
+        zlib.gunzipSync(uk.readCompressed(node, 'gzip')).toString(),
+        '<uk>',
+      );
+      assert.deepEqual(uk.payloadOf(node).rendered, {
+        size: 4,
+        encodings: ['gzip'],
+      });
+      assert.deepEqual(uk.children(t.root), [['pro', false]]);
+      assert.equal(uk.countOf(node), 0);
+      assert.equal(t.countOf(node), 1);
+      const { languages } = k.diagnostics().trees.site;
+      assert.deepEqual(languages.uk, {
+        names: 2,
+        payloads: 1,
+        rendered: 1,
+        bytes: languages.uk.bytes,
+      });
+      assert.equal(languages.en.names, 3);
+      assert.equal(leakedBytes(k), 0);
+    } finally {
+      done();
+    }
+  });
+
+  it('cache publishes the page alone — no number, an event of nulls; a worker reads its own', async () => {
+    const { k, done } = await treeKernel({
+      site: { ...SITE, maxFileSize: '1 kib' },
+    });
+    const w = worker(k);
+    try {
+      const t = k.tree('site');
+      await t.load([ROOT, about('{"en":1}', null, { name: 'pro' })], 7);
+      const wt = w.kernel.tree('site');
+      assert.ok(await until(() => wt.last === 7));
+      const events = record(k);
+      const node = wt.get('/about');
+      const info = wt.payloadOf(node);
+      assert.equal(info.rendered, null);
+      // A page of the main language, from the worker: in its replica once
+      // the promise resolves.
+      assert.deepEqual(await wt.cache(node, '<p>en</p>', info.version), {
+        status: 'cached',
+      });
+      assert.equal(wt.readRendered(node, 'utf8'), '<p>en</p>');
+      assert.equal(t.readRendered(t.get('/about'), 'utf8'), '<p>en</p>');
+      assert.equal(wt.last, 7, 'no batch: last stays');
+      assert.ok(await until(() => events.length === 1));
+      assert.deepEqual(events[0].trees, [
+        { tree: 'site', seqFrom: null, seqTo: null, loaded: false },
+      ]);
+      // Of a version no longer its payload's: stale, nothing published.
+      assert.deepEqual(await wt.cache(node, '<old>', info.version), {
+        status: 'stale',
+      });
+      // uk has no data: stale; the main thread's uncache: every language.
+      const uk = wt.lang('uk');
+      assert.deepEqual(await uk.cache(node, '<uk>', 1), { status: 'stale' });
+      assert.deepEqual(await t.uncache(t.get('/about')), { dropped: 1 });
+      assert.ok(await until(() => wt.readRendered(node) === null));
+      // Over the link: an uncache of the worker's, and a refusal with its
+      // fields — the language among them.
+      assert.deepEqual(await uk.uncache(node, { subtree: true }), {
+        dropped: 0,
+      });
+      const version = wt.payloadOf(node).version;
+      await assert.rejects(wt.cache(node, 'x'.repeat(2048), version), {
+        code: 'EFBIG',
+        id: 2,
+        lang: 'en',
+      });
+      assert.throws(() => uk.uncache(node, { subtree: 1 }), {
+        code: 'EINVAL',
+      });
+      await assertAtRest(k, { workers: [w.kernel] });
+    } finally {
+      w.kernel.close();
+      done();
+    }
+  });
+
+  it('a worker submits every language over the link; a refusal in one names it', async () => {
+    const { k, errors, done } = await treeKernel({ site: SITE });
+    const w = worker(k);
+    try {
+      await k.tree('site').load(
+        [
+          ROOT,
+          {
+            id: 3,
+            parentId: 1,
+            name: 'x',
+            class: 1,
+            translations: { uk: { name: 'taken' } },
+          },
+        ],
+        0,
+      );
+      const wt = w.kernel.tree('site');
+      assert.ok(await until(() => wt.last === 0));
+      await wt.submit({
+        seq: 1,
+        ops: [
+          put(2, 1, 'about', {
+            class: 1,
+            payload: { data: 'en' },
+            rendered: '<en>',
+            translations: {
+              uk: { name: 'pro', payload: { data: 'uk' }, rendered: '<uk>' },
+            },
+          }),
+        ],
+      });
+      const uk = wt.lang('uk');
+      assert.equal(uk.readRendered(uk.get('/pro'), 'utf8'), '<uk>');
+      assert.equal(wt.read(wt.get('/about'), 'utf8'), 'en');
+      await assert.rejects(
+        wt.submit({
+          seq: 2,
+          ops: [
+            put(2, 1, 'about', { translations: { uk: { name: 'taken' } } }),
+          ],
+        }),
+        (err) =>
+          err.code === 'EEXIST' &&
+          err.lang === 'uk' &&
+          err.other === 3 &&
+          err.id === 2,
+      );
+      assert.equal(errors.at(-1)[1].lang, 'uk');
+      assert.throws(
+        () =>
+          wt.submit({
+            seq: 3,
+            ops: [put(2, 1, 'about', { translations: { de: { name: 'd' } } })],
+          }),
+        { code: 'EINVAL', lang: 'de' },
+      );
+      assert.equal(leakedBytes(k), 0);
+    } finally {
+      w.kernel.close();
+      done();
+    }
+  });
+
+  it('a translation and its page retire with their node; a compaction moves them by language', async () => {
+    const KB = 1024;
+    const { k, done } = await treeKernel(
+      { site: { ...SITE, compress: null } },
+      {
+        defaults: {
+          memory: {
+            limit: '16 kib',
+            segmentSize: '4 kib',
+            maxFileSize: '4 kib',
+          },
+          compaction: { threshold: 0.5 },
+        },
+      },
+    );
+    try {
+      const t = k.tree('site');
+      const uk = t.lang('uk');
+      const data = 'c'.repeat(100);
+      await t.load(
+        [
+          ROOT,
+          { ...page(2, 'a', 'a'.repeat(2 * KB)) },
+          { ...page(3, 'b', 'b'.repeat(2 * KB)) },
+          {
+            ...page(4, 'c', data),
+            translations: {
+              uk: { name: 'c-uk', payload: { data }, rendered: '<c>' },
+            },
+          },
+        ],
+        0,
+      );
+      const tree = k.trees.get('site').tree;
+      const segmentsOf = () => {
+        const payload = tree.payloadOf(tree.byId(4), 1);
+        return [payload.source, payload.others.requireBytecode].map(
+          (rep) => rep.segmentId,
+        );
+      };
+      assert.deepEqual(segmentsOf(), [2, 2]);
+      await t.submit({ seq: 1, ops: [['remove', 2]] });
+      assert.ok(
+        await until(() => segmentsOf().every((s) => s === 1)),
+        'the translation and its page relocated',
+      );
+      const c = uk.get('/c-uk');
+      assert.equal(uk.read(c, 'utf8'), data);
+      assert.equal(uk.readRendered(c, 'utf8'), '<c>');
+      assert.ok(await until(() => k.retirements().length === 0));
+      // The node removed: its translation and its page retire with it.
+      await t.submit({ seq: 2, ops: [['remove', 4]] });
+      assert.ok(await until(() => k.retirements().length === 0));
+      await assertAtRest(k);
     } finally {
       done();
     }

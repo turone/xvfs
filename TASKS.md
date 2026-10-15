@@ -165,20 +165,6 @@ out of a listing.
 through the patch — a listing filtered by the rules — or the limit stays
 documented.
 
-## P3 — A shared tree compresses by class
-
-**Problem.** `trees.<name>.compress` chooses the payloads it compresses as
-a place does, by the extension of a node's name (`ext`), or takes every
-payload without it. A page's name seldom has an extension, so a tree that
-holds pages beside other payloads — the data a page renders, a
-redirect's node — compresses all of them or none: the class of a node,
-which says what it holds, does not count.
-
-**Done when.** `compress.classes` names the classes whose payloads a tree
-compresses — alone or with `ext` — checked by the config and kept by the
-intake when it prepares a batch, with tests in `test/trees.test.js` and
-the README's reference.
-
 ## P3 — The strict rules in a module of their own
 
 **Problem.** `lib/kernel.js` holds the strict rules beside the

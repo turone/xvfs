@@ -167,12 +167,15 @@ const treeReps = function* (tree) {
   if (root === null) return;
   const nodes = [root];
   for (const [node] of tree.walk(root)) nodes.push(node);
+  // Every language of the tree: a translation's payload is in the pool too.
   for (const node of nodes) {
-    const payload = tree.payloadOf(node);
-    if (payload === null) continue;
-    if (payload.source) yield payload.source;
-    for (const field in payload.others) {
-      if (payload.others[field]) yield payload.others[field];
+    for (let lang = 0; lang < tree.languages; lang++) {
+      const payload = tree.payloadOf(node, lang);
+      if (payload === null) continue;
+      if (payload.source) yield payload.source;
+      for (const field in payload.others) {
+        if (payload.others[field]) yield payload.others[field];
+      }
     }
   }
 };
