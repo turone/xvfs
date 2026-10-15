@@ -149,6 +149,7 @@ expectType<{
     readonly [name: string]: {
       readonly snapshot: object;
       readonly last: number | null;
+      readonly languages: readonly string[];
     };
   };
   readonly version: number;

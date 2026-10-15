@@ -49,11 +49,15 @@ export interface Segment {
 export interface VfsSnapshot {
   readonly segments: Segment[];
   readonly places: { readonly [name: string]: object };
-  /** Each shared tree, and the number of the last batch it shows. */
+  /**
+   * Each shared tree, the number of the last batch it shows and the codes
+   * of its languages, which `attach()` holds the worker's config to.
+   */
   readonly trees: {
     readonly [name: string]: {
       readonly snapshot: object;
       readonly last: number | null;
+      readonly languages: readonly string[];
     };
   };
   readonly version: number;

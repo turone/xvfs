@@ -464,7 +464,7 @@ describe('trees: workers', () => {
     }
   });
 
-  it('a worker of another count of languages is refused at attach(): the indexes would name other codes', async () => {
+  it('a worker of other languages is refused at attach(): the indexes would name other codes', async () => {
     const { k, root, done } = await treeKernel({
       pages: { ...PAGES, languages: ['en', 'uk'] },
     });
@@ -478,14 +478,21 @@ describe('trees: workers', () => {
           }),
           { appRoot: root, console: quiet },
         );
-      for (const languages of [undefined, ['en'], ['en', 'uk', 'de']]) {
+      // Another count, other codes of the same count, another order: each
+      // would name other languages by the snapshot's indexes.
+      for (const languages of [
+        undefined,
+        ['en'],
+        ['en', 'uk', 'de'],
+        ['en', 'ua'],
+        ['uk', 'en'],
+      ]) {
         assert.throws(() => attach(languages), {
           code: 'EINVAL',
-          message: /tree "pages" has 2 language\(s\) in the snapshot/,
+          message: /tree "pages" speaks \["en","uk"\] in the snapshot/,
         });
       }
-      // The codes are the worker's own: the same count is the same tree.
-      const w = attach(['en', 'ua']);
+      const w = attach(['en', 'uk']);
       assert.equal(w.trees.get('pages').tree.languages, 2);
       w.close();
     } finally {

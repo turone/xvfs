@@ -2450,7 +2450,7 @@ places is `ERR_VFS_CLOSED` with the failure as its `cause`
 vfs-snapshot { name: 'vfs-snapshot', snapshot }                               main → worker
             the first message of a link
 snapshot    { segments: [{ id, sab }], places: { <name>: tree },
-              trees: { <name>: { snapshot: tree, last } },
+              trees: { <name>: { snapshot: tree, last, languages } },
               version, instance, links?: { known: [path], generation } }
 vfs-update  { name, updateId, version, places: { <name>: { delta, created,
               replaced, removed, moved } }, trees: { <name>: { deltas,
