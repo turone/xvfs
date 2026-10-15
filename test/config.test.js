@@ -1142,6 +1142,7 @@ describe('VfsConfig: shared trees', () => {
       name: 'pages',
       ids: 'number',
       containers: [2, 1],
+      languages: [],
       birthtime: false,
       aggregates: { classes: false, subtreeVersion: false },
       maxNodes: 2 ** 24,
@@ -1185,6 +1186,32 @@ describe('VfsConfig: shared trees', () => {
     });
     assert.deepEqual(new VfsConfig({}).trees, []);
     assert.equal(new VfsConfig({}).tree('pages'), null);
+  });
+
+  it('languages: codes, the main one first, each once in any case', () => {
+    const t = tree({ ids: 'number', languages: ['en', 'uk', 'pt-BR'] });
+    assert.deepEqual(t.languages, ['en', 'uk', 'pt-BR']);
+    assert.ok(Object.isFrozen(t.languages));
+    assert.deepEqual(tree({ ids: 'number', languages: ['en'] }).languages, [
+      'en',
+    ]);
+    const many = Array.from({ length: 255 }, (_, i) => `l${i}`);
+    assert.equal(
+      tree({ ids: 'string', languages: many }).languages.length,
+      255,
+    );
+    for (const [languages, re] of [
+      [[], /non-empty array of language codes/],
+      ['en', /non-empty array of language codes/],
+      [['en', 'EN'], /language "EN" twice/],
+      [['en', ''], /a code is ASCII letters/],
+      [['en', 'u k'], /a code is ASCII letters/],
+      [['-en'], /a code is ASCII letters/],
+      [['en', 7], /a code is ASCII letters/],
+      [[...many, 'x'], /at most 255 languages/],
+    ]) {
+      fails({ trees: { pages: { ids: 'number', languages } } }, re);
+    }
   });
 
   it('refuses what a tree cannot be', () => {
@@ -1231,6 +1258,7 @@ describe('VfsConfig: shared trees', () => {
         '--',
         '--vfs.trees.my.pages.intake.window=20',
         '--vfs.trees.my.pages.containers=1,2',
+        '--vfs.trees.my.pages.languages=en,uk',
         '--vfs.trees.my.pages.compress.encodings=gzip,br',
       ],
       { trees: { 'my.pages': { ids: 'number' } } },
@@ -1238,6 +1266,7 @@ describe('VfsConfig: shared trees', () => {
     const t = c.tree('my.pages');
     assert.equal(t.intake.window, 20);
     assert.deepEqual(t.containers, [1, 2]);
+    assert.deepEqual(t.languages, ['en', 'uk']);
     assert.deepEqual(
       t.compress.codecs.map((x) => x.encoding),
       ['gzip', 'br'],

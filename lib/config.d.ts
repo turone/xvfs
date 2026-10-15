@@ -251,6 +251,12 @@ export interface TreeConfig {
   ids: 'number' | 'string';
   /** The classes that are containers in every thread at first. Default []. */
   containers?: readonly number[];
+  /**
+   * The languages' codes, the main one first — 1 to 255, each once: a node
+   * has a name and a payload in each it is translated to. Without, one
+   * language and no code.
+   */
+  languages?: readonly string[];
   /** Payloads keep a birthtime. Default false. */
   birthtime?: boolean;
   /** The aggregates the tree keeps; both off by default. */
@@ -372,6 +378,8 @@ export interface ResolvedTree {
   readonly name: string;
   readonly ids: 'number' | 'string';
   readonly containers: readonly number[];
+  /** As configured; [] without. */
+  readonly languages: readonly string[];
   readonly birthtime: boolean;
   readonly aggregates: {
     readonly classes: boolean;

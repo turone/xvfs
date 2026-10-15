@@ -19,12 +19,14 @@ const config = new VfsConfig({
     pages: {
       ids: 'number',
       containers: [0],
+      languages: ['en', 'uk'],
       zeroCopy: true,
       compress: { encodings: ['br'] },
       intake: { seq: 'source', window: 10, limit: 1000 },
     },
   },
 });
+expectType<readonly string[]>()(config.tree('pages')!.languages);
 
 const kernel = new VfsKernel(config, {
   trees: {
@@ -107,6 +109,8 @@ void main;
 
 // @ts-expect-error a tree's ids are 'number' or 'string'
 new VfsConfig({ trees: { t: { ids: 'uuid' } } });
+// @ts-expect-error languages are codes
+new VfsConfig({ trees: { t: { ids: 'number', languages: [1, 2] } } });
 // @ts-expect-error unknown numbering of batches
 new VfsConfig({ trees: { t: { ids: 'number', intake: { seq: 'auto' } } } });
 const tree = kernel.tree('pages');

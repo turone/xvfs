@@ -449,6 +449,35 @@ describe('trees: workers', () => {
       done();
     }
   });
+
+  it('a worker of another count of languages is refused at attach(): the indexes would name other codes', async () => {
+    const { k, root, done } = await treeKernel({
+      pages: { ...PAGES, languages: ['en', 'uk'] },
+    });
+    try {
+      const attach = (languages) =>
+        VfsKernel.fromSnapshot(
+          k.snapshot(),
+          new VfsConfig({
+            defaults: { memory: MEMORY },
+            trees: { pages: { ...PAGES, languages } },
+          }),
+          { appRoot: root, console: quiet },
+        );
+      for (const languages of [undefined, ['en'], ['en', 'uk', 'de']]) {
+        assert.throws(() => attach(languages), {
+          code: 'EINVAL',
+          message: /tree "pages" has 2 language\(s\) in the snapshot/,
+        });
+      }
+      // The codes are the worker's own: the same count is the same tree.
+      const w = attach(['en', 'ua']);
+      assert.equal(w.trees.get('pages').tree.languages, 2);
+      w.close();
+    } finally {
+      done();
+    }
+  });
 });
 
 describe('trees: policies', () => {
