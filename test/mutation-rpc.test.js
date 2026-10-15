@@ -656,3 +656,113 @@ describe('mutation RPC: writeFiles', () => {
     }
   });
 });
+
+describe('mutation RPC: a shared tree', () => {
+  const { MutationClient, serveMutation } = require('../lib/mutation-rpc.js');
+  const { checkBatch, checkCache } = require('../lib/intake.js');
+  const SETTINGS = { ids: 'number', seq: 'source', languages: ['en', 'uk'] };
+
+  // A port that keeps what is posted, with its transfer list.
+  const portOf = () => {
+    const posted = [];
+    return {
+      posted,
+      postMessage: (msg, transfer = []) => posted.push({ msg, transfer }),
+      ref() {},
+      unref() {},
+    };
+  };
+
+  it('a request carries the bytes of every language and page, each buffer once; an uncache none', async () => {
+    const port = portOf();
+    const client = new MutationClient(port);
+    const batch = checkBatch(SETTINGS, {
+      seq: 1,
+      ops: [
+        [
+          'put',
+          2,
+          1,
+          'about',
+          {
+            class: 1,
+            payload: { data: 'en' },
+            rendered: '<en>',
+            translations: {
+              uk: { name: 'pro', payload: { data: '' }, rendered: '<uk>' },
+            },
+          },
+        ],
+        ['remove', 3],
+      ],
+    });
+    client.sendTree('site', 'submit', batch).catch(() => {});
+    const cache = checkCache(SETTINGS, {
+      id: 42,
+      lang: 'uk',
+      data: Buffer.from('<page>'),
+      version: 4,
+    });
+    const page = { nodeId: cache.id, lang: 'uk', data: cache.data, version: 4 };
+    client.sendTree('site', 'cache', page).catch(() => {});
+    const drop = { nodeId: 42, lang: null, subtree: true };
+    client.sendTree('site', 'uncache', drop).catch(() => {});
+    const [put, cached, uncache] = port.posted;
+    const fields = put.msg.ops[0][4];
+    const own = [
+      fields.payload.data,
+      fields.rendered,
+      fields.translations.uk.payload.data,
+      fields.translations.uk.rendered,
+    ];
+    assert.equal(put.transfer.length, 4, 'every buffer, the empty one too');
+    assert.equal(new Set(put.transfer).size, 4, 'each once');
+    for (const bytes of own) assert.ok(put.transfer.includes(bytes.buffer));
+    assert.deepEqual(cached.transfer, [cache.data.buffer]);
+    // The node goes by `nodeId`: `id` is the request's own.
+    assert.equal(cached.msg.nodeId, 42);
+    assert.equal(cached.msg.id, 2);
+    assert.deepEqual(uncache.transfer, []);
+  });
+
+  it('a refusal crosses the port with its language, both ways', async () => {
+    // The main end: what the intake threw is a record with `lang`.
+    const answers = [];
+    const port = { postMessage: (msg) => answers.push(msg) };
+    const refused = Object.assign(new Error('EEXIST: the name is taken'), {
+      code: 'EEXIST',
+      seq: 3,
+      index: 0,
+      id: 2,
+      other: 5,
+      lang: 'uk',
+    });
+    const kernel = {
+      links: new Set(['w']),
+      writeTree() {
+        return Promise.reject(refused);
+      },
+    };
+    serveMutation(kernel, 'w', port, {
+      name: 'vfs-mutate',
+      id: 7,
+      tree: 'site',
+      op: 'submit',
+    });
+    await new Promise((resolve) => setImmediate(resolve));
+    const [answer] = answers;
+    assert.equal(answer.error.lang, 'uk');
+    assert.equal(answer.error.other, 5);
+    // The worker end: the record is an error with the same fields.
+    const client = new MutationClient(portOf());
+    const pending = client.sendTree('site', 'submit', { seq: 3, ops: [] });
+    client.handle({ name: 'vfs-mutated', id: 1, error: answer.error });
+    await assert.rejects(pending, {
+      code: 'EEXIST',
+      seq: 3,
+      id: 2,
+      other: 5,
+      lang: 'uk',
+    });
+  });
+});

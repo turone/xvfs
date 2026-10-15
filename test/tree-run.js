@@ -1485,6 +1485,11 @@ const badLanguageOps = (ctx, newId) => {
       class: 1,
       translations: [[1, { name: 'p', page: [[1, extents.next(8)]] }]],
     }),
+    // a page beside new data in a translation: among the data's, or none
+    put({
+      class: 1,
+      translations: [[1, { name: 'p', payload: data_(), page: [] }]],
+    }),
   ];
 };
 
@@ -1820,7 +1825,7 @@ const clientRelocations = (ctx) => {
 // Pages from a thread after a render: a page or none for a payload of any
 // language, each (id, language) once; now and then refused — a page where
 // there is no data, a dead id, a page that is not one, a language the tree
-// has not, a pair twice, a put beside.
+// has not, a pair twice, a put or a relocation beside.
 const clientRenders = (ctx) => {
   const { model, random, extents } = ctx;
   const all = [...model.nodes()];
@@ -1848,6 +1853,7 @@ const clientRenders = (ctx) => {
       ['render', n.id, 0],
       ops[0],
       ['put', n.id, n.parent === null ? null : n.parent.id, n.name, {}],
+      ['relocate', n.id, 0, extents.next(8)],
     ]);
     ops.splice(random.int(ops.length + 1), 0, bad);
   }

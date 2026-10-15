@@ -737,6 +737,51 @@ describe('trees: languages and pages', () => {
     translations: { uk },
   });
 
+  it('a tree of one language, without a code or with one: its paths by code, its view, its pages as any tree’s', async () => {
+    const { k, done } = await treeKernel({
+      one: PAGES,
+      en: { ...PAGES, languages: ['en'] },
+    });
+    try {
+      for (const [name, codes] of [
+        ['one', []],
+        ['en', ['en']],
+      ]) {
+        const t = k.tree(name);
+        assert.deepEqual(t.languages, codes);
+        await t.load([ROOT, page(2, 'a', 'a')], 0);
+        const node = t.get('/a');
+        assert.deepEqual(t.pathsOf(node), codes.length ? { en: '/a' } : {});
+        if (codes.length) assert.equal(t.lang('en').get('/a'), node);
+        else assert.throws(() => t.lang('en'), { code: 'EINVAL' });
+        const translated = { translations: { en: { name: 'x' } } };
+        assert.throws(
+          () => t.submit({ seq: 1, ops: [put(2, 1, 'a', translated)] }),
+          { code: 'EINVAL', index: 0, id: 2 },
+        );
+        const events = record(k);
+        const { version } = t.payloadOf(node);
+        assert.deepEqual(await t.cache(node, '<p>', version), {
+          status: 'cached',
+        });
+        assert.equal(t.readRendered(node, 'utf8'), '<p>');
+        assert.ok(await until(() => events.length === 1));
+        assert.deepEqual(events[0].trees, [
+          { tree: name, seqFrom: null, seqTo: null, loaded: false },
+        ]);
+        const { languages } = k.diagnostics().trees[name];
+        const stats = { names: 2, payloads: 1, rendered: 1, bytes: 4 };
+        assert.deepEqual(languages, codes.length ? { en: stats } : {});
+        assert.deepEqual(await t.uncache(node), { dropped: 1 });
+        assert.equal(t.readRendered(node), null);
+      }
+      assert.ok(await until(() => k.retirements().length === 0));
+      assert.equal(leakedBytes(k), 0);
+    } finally {
+      done();
+    }
+  });
+
   it('a tree speaks its main language; lang(code) any — lookups, names, paths, data and pages there', async () => {
     const { k, done } = await treeKernel({ site: SITE });
     try {

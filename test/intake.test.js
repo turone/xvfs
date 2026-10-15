@@ -1155,3 +1155,177 @@ describe('intake: languages and pages', () => {
     assert.equal(pool.used(), held(tree));
   });
 });
+
+describe('intake: page ops at their edges', () => {
+  const pageRow = (id, parentId, name, data, rendered) => ({
+    id,
+    parentId,
+    name,
+    class: 1,
+    payload: { data },
+    rendered,
+  });
+  const pageOf = (tree, id) => {
+    const p = tree.payloadOf(tree.byId(id));
+    const rep = p?.others?.requireBytecode;
+    return rep ? Buffer.from(rep.data).toString() : null;
+  };
+  const held = (tree) => {
+    let sum = 0;
+    const root = tree.get('');
+    const nodes = [root];
+    for (const [n] of tree.walk(root)) nodes.push(n);
+    for (const n of nodes) {
+      const p = tree.payloadOf(n);
+      if (p === null) continue;
+      if (p.source) sum += p.source.length;
+      for (const rep of Object.values(p.others ?? {}))
+        if (rep) sum += rep.length;
+    }
+    return sum;
+  };
+  const outcome = (p) =>
+    p.then(
+      (v) => v,
+      (e) => ({ error: e.code }),
+    );
+
+  it('a cache and an uncache of one page on two sides of the limit keep the order of their calls', async () => {
+    const { tree, kernel, time, intake, pool } = setup({ limit: 3 });
+    await intake.load([ROOT, pageRow(2, 1, 'a', 'a', '<old>')], 0);
+    const before = kernel.published.length;
+    const v = tree.payloadOf(tree.byId(2)).version;
+    // The batch and the cache fill the part; the uncache goes after.
+    const batch = intake.submit({
+      seq: 1,
+      ops: [put(3, 1, 'x', 'x'), put(4, 1, 'y', 'y')],
+    });
+    const cached = intake.cache({ id: 2, data: '<new>', version: v });
+    const dropped = intake.uncache({ id: 2 });
+    await time.advance(20);
+    assert.deepEqual(await batch, { seq: 1, status: 'committed' });
+    assert.deepEqual(await cached, { status: 'cached' });
+    assert.deepEqual(await dropped, { dropped: 1 });
+    assert.deepEqual(kernel.published.slice(before), [
+      { from: 1, to: 1, loaded: false },
+      { from: null, to: null, loaded: false },
+    ]);
+    assert.equal(pageOf(tree, 2), null, 'the later op counts');
+    // The other order: the cache, later, counts.
+    const v2 = tree.payloadOf(tree.byId(2)).version;
+    const batch2 = intake.submit({
+      seq: 2,
+      ops: [put(5, 1, 'p', 'p'), put(6, 1, 'q', 'q')],
+    });
+    const dropped2 = intake.uncache({ id: 2 });
+    const cached2 = intake.cache({ id: 2, data: '<again>', version: v2 });
+    await time.advance(20);
+    await batch2;
+    assert.deepEqual(await dropped2, { dropped: 0 });
+    assert.deepEqual(await cached2, { status: 'cached' });
+    assert.equal(pageOf(tree, 2), '<again>');
+    assert.equal(pool.used(), held(tree));
+  });
+
+  it('an uncache of a subtree and a cache of a node in it, in one window: the later counts for that node', async () => {
+    const { tree, time, intake, pool } = setup();
+    await intake.load(
+      [
+        ROOT,
+        pageRow(2, 1, 'p', 'p', '<p>'),
+        pageRow(3, 2, 'c', 'c', '<c>'),
+        pageRow(4, 2, 'd', 'd', '<d>'),
+      ],
+      0,
+    );
+    const whole = intake.uncache({ id: 2, subtree: true });
+    const child = intake.cache({
+      id: 3,
+      data: '<c2>',
+      version: tree.payloadOf(tree.byId(3)).version,
+    });
+    await time.advance(20);
+    assert.deepEqual(await whole, { dropped: 2 }, '2 and 4: 3 is the cache’s');
+    assert.deepEqual(await child, { status: 'cached' });
+    assert.deepEqual(
+      [2, 3, 4].map((id) => pageOf(tree, id)),
+      [null, '<c2>', null],
+    );
+    const again = intake.cache({
+      id: 3,
+      data: '<c3>',
+      version: tree.payloadOf(tree.byId(3)).version,
+    });
+    const whole2 = intake.uncache({ id: 2, subtree: true });
+    await time.advance(20);
+    assert.deepEqual(
+      await again,
+      { status: 'stale' },
+      'the uncache came later',
+    );
+    assert.deepEqual(await whole2, { dropped: 1 });
+    assert.deepEqual(
+      [2, 3, 4].map((id) => pageOf(tree, id)),
+      [null, null, null],
+    );
+    assert.equal(pool.used(), held(tree));
+  });
+
+  it('close() while a page compresses rejects its ops and gives the pool back', async () => {
+    let release = null;
+    const gate = new Promise((resolve) => (release = resolve));
+    const compress = async () => {
+      await gate;
+      return [[3, Buffer.from('gz')]];
+    };
+    const { tree, time, intake, pool } = setup({}, 1 << 16, {}, { compress });
+    await intake.load([ROOT, pageRow(2, 1, 'a', 'a')], 0);
+    const v = tree.payloadOf(tree.byId(2)).version;
+    const cached = outcome(intake.cache({ id: 2, data: '<page>', version: v }));
+    const dropping = outcome(intake.uncache({ id: 2 }));
+    await time.advance(20); // the page placed, its compression waiting
+    assert.ok(pool.used() > held(tree), 'the page is in the pool');
+    intake.close();
+    release();
+    await time.advance(20);
+    assert.deepEqual(await cached, { error: 'ERR_VFS_CLOSED' });
+    assert.deepEqual(await dropping, { error: 'ERR_VFS_CLOSED' });
+    assert.equal(pool.used(), held(tree));
+  });
+
+  it("an 'intake' mode load while a page compresses puts it back: checked after the load, stale; the next lands", async () => {
+    let release = null;
+    let calls = 0;
+    const gate = new Promise((resolve) => (release = resolve));
+    const compress = async () => {
+      if (++calls === 1) await gate;
+      return [[3, Buffer.from('gz')]];
+    };
+    const { tree, time, intake, pool } = setup(
+      { seq: 'intake' },
+      1 << 16,
+      {},
+      { compress },
+    );
+    await intake.load([ROOT, pageRow(2, 1, 'a', 'a')]);
+    const v = tree.payloadOf(tree.byId(2)).version;
+    const cached = outcome(intake.cache({ id: 2, data: '<page>', version: v }));
+    await time.advance(20); // placed, compression waiting
+    const loading = intake.load([ROOT, pageRow(2, 1, 'a', 'b')]); // cuts the run
+    release();
+    await time.advance(20);
+    await loading;
+    await time.advance(20);
+    assert.deepEqual(await cached, { status: 'stale' }, 'its data changed');
+    assert.equal(pool.used(), held(tree));
+    const again = intake.cache({
+      id: 2,
+      data: '<page2>',
+      version: tree.payloadOf(tree.byId(2)).version,
+    });
+    await time.advance(20);
+    assert.deepEqual(await outcome(again), { status: 'cached' });
+    assert.equal(pageOf(tree, 2), '<page2>');
+    assert.equal(pool.used(), held(tree));
+  });
+});
