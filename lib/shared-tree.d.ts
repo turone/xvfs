@@ -330,7 +330,10 @@ export class SharedTree {
   parentOf(node: TreeNode): TreeNode | null;
   /** `'/a/b'`, `''` for the root, null for a dead node. */
   pathOf(node: TreeNode): string | null;
-  /** Its path in every language, by code — null where it is not — or null. */
+  /**
+   * Its path in every language, by code — null where it is not — or null
+   * for a dead node; `{}` in a tree without `languages`.
+   */
   pathsOf(node: TreeNode): { readonly [code: string]: string | null } | null;
   /** The nodes from the root down to it. */
   trailOf(node: TreeNode): TreeNode[] | null;

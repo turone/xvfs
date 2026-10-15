@@ -551,7 +551,10 @@ below it (quick start).
 ### Languages
 
 `trees.<name>.languages` lists the codes of a tree's languages, the main
-one first. A node is one in all of them — its id, parent, class and
+one first — ASCII letters, digits, `-` and `_` (`en`, `pt-BR`), each
+once whatever its case; `translations` and `lang(code)` name them as
+listed. Without the list a tree has one language and no code, and
+`pathsOf(node)` gives `{}`. A node is one in all of them — its id, parent, class and
 policy are the node's — and has a name and a payload in each: in the
 main language its own, in another its **translation** there, or none. A
 node without a translation in a language is not there, nor what lies
@@ -588,8 +591,8 @@ takes the data, the name stays. A name is unique among the children of
 a parent that have one in that language: `EEXIST` names the language
 (`lang`) and the node that keeps the name (`other`). A move takes every
 name of the node with it. `languages` changes with a restart and a
-`load`; a worker attached to a snapshot of another count of languages
-is refused.
+`load`; a worker attached to a snapshot of other languages — another
+list of codes — is refused.
 
 ### Pages
 
@@ -602,7 +605,9 @@ page has one: a page made per request has none. A page comes two ways:
 - **In a batch**, from the source: `rendered` beside `payload` (or in a
   translation), a `Uint8Array` or a string. New data without `rendered`
   has no page — the old one goes with the old data; `rendered` alone
-  renders the data as it is anew; `rendered: null` takes the page away.
+  renders the data as it is anew, a final state's refusal (`ENOENT`)
+  where the node has none there; `rendered: null` takes the page away. A
+  page beside `payload: null` is a wrong form, `EINVAL` at once.
 - **From any thread, after a render**: `cache(node, page, version)` —
   `version` the `payloadOf(node).version` the page was rendered from —
   resolves `{ status: 'cached' }` once every thread has it, or
@@ -610,10 +615,13 @@ page has one: a page made per request has none. A page comes two ways:
   `uncache(node, { subtree })` takes pages away, `{ dropped }` of them.
   Neither is a batch of the source: no number, no `onError`, no wait for
   a hold or the first load. At the end of a window they go after the
-  batches, one commit, the latest per node and language counting; a
-  page too large is `EFBIG`, a pool without room `ENOSPC`, at once.
-  `site.cache` is the main language's and `site.uncache` every
-  language's; `site.lang(code).cache` and `.uncache` one language's.
+  batches of the window are placed and committed, one commit, the
+  latest per node and language counting — an `uncache` of a subtree one
+  op, as large a commit as the subtree has pages. A wrong form throws
+  `EINVAL` at once, as `submit` does; a page too large is `EFBIG`, a
+  pool without room `ENOSPC`, both at once. `site.cache` is the main
+  language's and `site.uncache` every language's; `site.lang(code).cache`
+  and `.uncache` one language's.
 
 A page that shows other nodes' data — a menu, breadcrumbs, the titles
 of its neighbours — is the application's to `uncache` when they change:
@@ -671,8 +679,9 @@ rendered, policy, translations }]`, a node made, changed or moved under
 `parentId` (null: the root), and `['remove', id]`, a node gone with all
 below it — each id once. A `payload` is `{ data?, mtimeMs?, meta? }`,
 `data` a `Uint8Array` or a string (UTF-8), empty without; `null` takes
-it off, an absent one keeps it; `rendered` and `policy` likewise. A
-batch is taken when submitted: its bytes copied, a `policy` and a `meta`
+it off, an absent one keeps it; `policy` likewise, and `rendered` too
+but beside new data, which has no page but its own `rendered` (Pages,
+above). A batch is taken when submitted: its bytes copied, a `policy` and a `meta`
 cloned — data structured clone carries, kept frozen in every thread — so
 what the caller does to its own objects after changes nothing. A wrong
 form, a field no one reads — a typo would leave a page as it was — or a

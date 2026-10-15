@@ -309,6 +309,10 @@ update or delete on pages for each row`, sees each of them — a cascade
   commit;
   ```
 
+  A row of it becomes a row of `load` as a batch's does: `body` is
+  `payload.data`, and a language's `{ name, body }` its translation —
+  `{ name, payload: { data: body } }`, decoded from base64.
+
 - **The log** keeps what a gap may need — rows past what every process
   has loaded, or a window of them; a gap past it is a reload.
 

@@ -525,7 +525,9 @@ iterator copies nothing, and only a change of structure breaks it
 (`ESTALE`). The tree's numbers: its revision, which orders deltas; its
 `version`, the last publication that changed it other than by relocation;
 its `structureVersion`, the last that made, removed, moved or renamed a
-node.** _Why:_ in synchronous code the tree does not change — a delta
+node — in an id tree of several languages, in any of them, a name there
+taken away too, which breaks an iterator as well.** _Why:_ in
+synchronous code the tree does not change — a delta
 applies in a port's handler, a commit in its own task — so an iterator
 breaks only across an `await`, which is the guard it is for. A payload, a
 commit with nothing to change and a relocation leave every `Map` of
@@ -1427,10 +1429,14 @@ its parent's `LangKids.alt` keeps the children by their names there, a
 below it; the root is in every language, named `''`. A name is unique
 per (parent, language, name) — `EEXIST` with `lang` and `other` — a move
 takes every name of the node along, and a node that becomes the root is
-`''` everywhere, one that leaves it needs its names restated. The engine
-knows the number of languages (`createTree({ languages })`, the
-snapshot's); the codes are the config's, the facade's and the intake's,
-and a worker's `attach()` refuses a snapshot of another count.** _Why:_
+`''` everywhere, one that leaves it needs its names restated. Of the
+violations of one put the first counts: a parent that will not live, a
+cycle, a name of the main language, a name of another by ascending
+index, then a page without data or a translation without a name, in the
+order of its languages. The engine knows the number of languages
+(`createTree({ languages })`, the snapshot's); the codes are the
+config's, the facade's and the intake's — the kernel's snapshot carries
+them, and a worker's `attach()` refuses another list.** _Why:_
 a site's database keeps a page in one main row — id, parent, the fields
 every language shares — and its content in a row per language: one node
 a page, its languages beside it, keep one id, one place, one policy and
