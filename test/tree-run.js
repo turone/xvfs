@@ -1410,10 +1410,11 @@ const clientOps = (ctx) => {
   return random.shuffle(ops);
 };
 
-// Compaction of an id tree: one relocation, mostly; now and then
-// one the first group refuses — the id named twice, a put or a remove
-// beside it, an id of another kind, an unknown kind, an extent that is not
-// one — or one the node refuses: an id no live node has, a kind it has not.
+// Compaction of an id tree: one relocation, mostly, or every
+// representation of a node; now and then one the first group refuses — a
+// representation named twice, a put or a remove beside it, an id of
+// another kind, an unknown kind, an extent that is not one — or one the
+// node refuses: an id no live node has, a kind it has not.
 const clientRelocations = (ctx) => {
   const { model, random, extents } = ctx;
   const all = [...model.nodes()];
@@ -1427,9 +1428,15 @@ const clientRelocations = (ctx) => {
   const others = all.filter((x) => x !== n && x.parent !== null);
   const otherKind = model.mode === 'number' ? String(n.id) : ctx.counter++;
   const dead = ctx.deadIds.filter((id) => !model.byId.has(id));
-  switch (random.int(16)) {
+  switch (random.int(17)) {
     case 0:
       return [op, ['relocate', n.id, random.pick(kinds), extents.next(8)]];
+    case 16:
+      // every representation of the node in one commit, as a compaction
+      // of a segment holding them all moves them
+      return random.shuffle(
+        kinds.map((kind) => ['relocate', n.id, kind, extents.next(8)]),
+      );
     case 1: {
       if (others.length === 0) return [op];
       const x = random.pick(others);

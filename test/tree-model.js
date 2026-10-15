@@ -970,6 +970,7 @@ class ModelTree {
   #commitClient(ops, next, now) {
     // Group 1: in the order of the ops.
     const named = new Set();
+    const relocated = new Set(); // `${id}|${kind}` of the relocations
     let rootId = this.root === null ? null : this.root.id;
     let kind = null; // 'relocate' or 'change', from the first op
     const puts = [];
@@ -1034,9 +1035,10 @@ class ModelTree {
         if (!Number.isInteger(k) || k < 0 || k >= KIND_COUNT)
           throw refusal('EINVAL', index);
         if (!this.validExtent(extent)) throw refusal('EINVAL', index);
-        // one op per id in an id tree, a relocation's included
-        if (named.has(id)) throw refusal('EINVAL', index);
-        named.add(id);
+        // each representation once: a node may have several in a segment
+        const pin = `${typeof id}:${id}|${k}`;
+        if (relocated.has(pin)) throw refusal('EINVAL', index);
+        relocated.add(pin);
         if (kind === null) kind = 'relocate';
         else if (kind !== 'relocate') throw refusal('EINVAL', index);
         const node = this.byId.get(id) ?? null;

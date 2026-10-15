@@ -277,6 +277,59 @@ describe('trees: the main thread', () => {
     }
   });
 
+  it('a compaction moves every representation of a node, its source and its compressed form in one segment', async () => {
+    const KB = 1024;
+    const { k, done } = await treeKernel(
+      { pages: { ...PAGES, compress: { encodings: ['gzip'], ext: ['html'] } } },
+      {
+        defaults: {
+          memory: {
+            limit: '16 kib',
+            segmentSize: '4 kib',
+            maxFileSize: '4 kib',
+          },
+          compaction: { threshold: 0.5 },
+        },
+      },
+    );
+    try {
+      const t = k.tree('pages');
+      const html = `<p>${'c'.repeat(200)}</p>`;
+      await t.load(
+        [
+          ROOT,
+          page(2, 'a', 'a'.repeat(2 * KB)),
+          page(3, 'b', 'b'.repeat(2 * KB)),
+          page(4, 'c.html', html),
+        ],
+        0,
+      );
+      const tree = k.trees.get('pages').tree;
+      const segmentsOf = () => {
+        const payload = tree.payloadOf(tree.byId(4));
+        return [payload.source.segmentId, payload.others.gzip.segmentId];
+      };
+      assert.deepEqual(segmentsOf(), [2, 2]);
+      // Freeing /a makes segment 2 the target: both move to segment 1.
+      await t.submit({ seq: 1, ops: [['remove', 2]] });
+      assert.ok(
+        await until(() => segmentsOf().every((s) => s === 1)),
+        'the source and its gzip relocated',
+      );
+      const c = t.byId(4);
+      assert.equal(t.read(c, 'utf8'), html);
+      const zlib = require('node:zlib');
+      assert.equal(
+        zlib.gunzipSync(t.readCompressed(c, 'gzip')).toString(),
+        html,
+      );
+      assert.ok(await until(() => k.retirements().length === 0));
+      assert.equal(leakedBytes(k), 0);
+    } finally {
+      done();
+    }
+  });
+
   it('close() rejects what waits; a closed kernel refuses every call', async () => {
     const { k, done } = await treeKernel({ pages: PAGES });
     const t = k.tree('pages');
