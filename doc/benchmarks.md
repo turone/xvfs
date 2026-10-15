@@ -942,3 +942,48 @@ the machine above, Node 24.20. The rows are `tree.lang.<n>.*`.
   to apply on a replica at 10⁴; **1000 pages** (`render`, as a `cache`
   commits them) 2.2 and 0.6 µs: a page keeps its payload's data object
   and attributes, and its delta carries the page's extents only.
+
+What they cost the code that does not use them — a tree of one language,
+a place, an intake without pages — the branch measures against `main` on
+the same machine: `node bench/ab.js main b40714b --pairs 4` over the
+scenarios of a default run, and alone the two that run only when named,
+which make id trees: `--only tree --n 10000` and `--only intake`. Of the
+618 figures of the default run none is better or worse beyond the
+threshold, 90 move the same way in every pair without passing it, 2
+disagree between pairs; of `tree`'s 138 and `intake`'s 24 none passes it
+either.
+
+- **A tree of one language costs what it did.** Its lookups
+  (`tree.policy.1e4.get.*`) stay within 2.3 % both ways, an intake of
+  rows without pages within its noise (one figure of 24 slower in every
+  pair, `intake.run.10.2000`, by 5 %). A load of a live id tree, every
+  row stated and 1 % of them renamed (`tree.miss.1e4.load.rename1pct`),
+  was 22 % slower in every pair at `3d74315`, the commit before,
+  1.94 → 2.37 ms: a row had become a put of two more fields, and the
+  checks of pages and translations ran for every row. A put keeps both
+  in one field now, null where it states neither, and such a put skips
+  those checks (`b40714b`): 2.13 → 2.17 ms, the pairs disagreeing; a
+  probe of that load alone, six alternating pairs, puts them 1.6 %
+  apart.
+- **Their code** takes 0.18 MiB more of every thread's heap —
+  `memory.start.heap` 7.03 → 7.21 MiB, `pool.sab.8.workers.heap`
+  66.9 → 68.3 for eight workers — and 0.2 ms more of the first id tree a
+  thread makes. A probe of the steps of `tree.ids.*.bigIds` — an id tree
+  made, a commit, a replica of its snapshot — in a fresh process, 20 a
+  side: 1.55 → 1.73 ms the first time, 0.154 → 0.159 the second, the
+  longer code compiled once. In the bench, under its threshold, two runs:
+  `negative` 0.97 → 1.19 and 0.96 → 1.22 ms, slower in 7 pairs of 8;
+  `positive` 1.00 → 1.16 and 1.10 → 1.06, in 5.
+- **Places, per call, nothing beyond the noise.** The two figures whose
+  pairs disagree are tails of batches, `batch.writeFiles.linked.64.p99`
+  and `batch.series.64.p95`, their p50 level (121.2 → 121.2 µs,
+  244 → 247); the run at `3d74315` marked neither, but another tail,
+  `batch.writeFiles.8.p99`, and `mem.views.rss`, which moves with the
+  collector. The leases' `views.withFileView.sync`, 13 % slower in every
+  pair of that run, is level in this one (214 → 217 ns), as it was over
+  8 pairs of `views` alone (227.2 → 226.5). Of the routers,
+  `router.open.read.dir` is 6–7 % slower in three runs, in 15 pairs of
+  16 — 8 pairs of `router` alone: 226.5 → 242.2 ns, under its threshold
+  of 28 % — on a path where the branch adds one test of a language to a
+  tree's `match`, as on the path of a file, which stays level
+  (244.9 → 239.6).
