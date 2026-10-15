@@ -896,6 +896,14 @@ describe('intake: languages and pages', () => {
       [many, { translations: { uk: { title: 'x' } } }, 'uk'],
       [many, { translations: { uk: { rendered: 1 } } }, 'uk'],
       [many, { translations: [['uk', {}]] }, undefined],
+      // A page beside no data: two things at once, in the put itself.
+      [one, { payload: null, rendered: '<p>' }, undefined],
+      [many, { payload: null, rendered: '<p>' }, 'en'],
+      [
+        many,
+        { translations: { uk: { name: 'u', payload: null, rendered: '<p>' } } },
+        'uk',
+      ],
     ]) {
       assert.throws(
         () => ctx.intake.submit({ seq: 1, ops: [about(fields)] }),
@@ -915,6 +923,28 @@ describe('intake: languages and pages', () => {
         }),
       { code: 'EINVAL', lang: 'uk' },
     );
+    // A row states its node: a page without its data is no state.
+    const row = { id: 2, parentId: 1, name: 'a', class: 1, rendered: '<p>' };
+    assert.throws(() => one.intake.load([ROOT, row], 1), {
+      code: 'EINVAL',
+      index: 1,
+      id: 2,
+    });
+    const uk = { name: 'u', rendered: '<p>' };
+    assert.throws(
+      () =>
+        many.intake.load(
+          [ROOT, { ...row, rendered: null, translations: { uk } }],
+          1,
+        ),
+      { code: 'EINVAL', index: 1, lang: 'uk' },
+    );
+    // Rendered alone keeps the data: a final state's to refuse, not a form.
+    const alone = one.intake.submit({
+      seq: 9,
+      ops: [about({ rendered: 'x' })],
+    });
+    alone.catch(() => {});
   });
 
   it('a page or data too large is EFBIG, a page without data ENOENT — with its language', async () => {
