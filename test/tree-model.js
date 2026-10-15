@@ -21,14 +21,23 @@ const OTHERS = [
   'zstd',
 ];
 const KIND_COUNT = 7; // 0 source, 1…6 the `others` fields in that order
+// An id tree's page: kind 1 and its compressed forms 3…6.
+const PAGE_KINDS = new Set([1, 3, 4, 5, 6]);
 
-const refusal = (code, index, other) => {
+// `lang`: the index of the language a refusal is about, but the main one.
+const refusal = (code, index, other, lang) => {
   const err = new Error(`${code} at ${index}`);
   err.code = code;
   err.index = index;
   if (other !== undefined) err.other = other;
+  if (lang !== undefined && lang !== 0) err.lang = lang;
   return err;
 };
+
+// Whether what a put states of a language holds data or a page.
+const states = (said) =>
+  (said.payload !== undefined && said.payload !== null) ||
+  (said.page !== undefined && said.page.length > 0);
 
 // A key as get() takes it: '' or '/' (the root), or names each after one '/',
 // none empty, '.' or '..', none holding '\' or NUL.
@@ -63,6 +72,7 @@ class ModelNode {
     this.policy = null;
     this.kids = [];
     this.subVer = 0;
+    this.tr = new Map(); // language → { name, payload }: its translations
   }
 }
 
@@ -103,6 +113,7 @@ class ModelTree {
       subtreeVersion: options.aggregates?.subtreeVersion === true,
     };
     this.maxNodes = options.maxNodes ?? 2 ** 24;
+    this.languages = options.languages ?? 1;
     this.segments = options.segments ?? new Map();
     this.containers = this.fs ? [0] : [...(options.containers ?? [])];
     this.version = 0;
@@ -142,9 +153,27 @@ class ModelTree {
     return this.fs ? node.cls === 0 : containers.includes(node.cls);
   }
 
-  pathOf(node) {
+  // `lang` in what follows: a language but the main one (0), where a node
+  // is by its translation; one without has no name, path or payload there,
+  // nor what lies below it. The root is in every language, named ''.
+  nameIn(node, lang = 0) {
+    if (lang === 0) return node.name;
+    if (node.parent === null) return '';
+    return node.tr.get(lang)?.name ?? null;
+  }
+
+  payloadIn(node, lang = 0) {
+    if (lang === 0) return node.payload;
+    return node.tr.get(lang)?.payload ?? null;
+  }
+
+  pathOf(node, lang = 0) {
     const names = [];
-    for (let n = node; n.parent !== null; n = n.parent) names.push(n.name);
+    for (let n = node; n.parent !== null; n = n.parent) {
+      const name = this.nameIn(n, lang);
+      if (name === null) return null;
+      names.push(name);
+    }
     return names.length === 0 ? '' : '/' + names.reverse().join('/');
   }
 
@@ -154,8 +183,8 @@ class ModelTree {
     return trail.reverse();
   }
 
-  childOf(node, name) {
-    return node.kids.find((k) => k.name === name) ?? null;
+  childOf(node, name, lang = 0) {
+    return node.kids.find((k) => this.nameIn(k, lang) === name) ?? null;
   }
 
   // Every live node, pre-order, children in their order.
@@ -199,7 +228,7 @@ class ModelTree {
   //   { denied: { owner, decision } };
   //   { miss: { stop, rest } } — `stop` the deepest existing node (in the FS
   //   also a file the path broke off at), `rest` from the first missing name.
-  walkNames(names, options = {}) {
+  walkNames(names, options = {}, lang = 0) {
     const { allow, context, log } = options;
     if (this.root === null) return { miss: { stop: null, rest: names } };
     let n = this.root;
@@ -211,7 +240,7 @@ class ModelTree {
         if (decision !== true) return { denied: { owner: n, decision } };
       }
       if (i === names.length) return { node: n };
-      const next = this.childOf(n, names[i]);
+      const next = this.childOf(n, names[i], lang);
       if (next === null) return { miss: { stop: n, rest: names.slice(i) } };
       n = next;
     }
@@ -225,8 +254,8 @@ class ModelTree {
     return canonical(key);
   }
 
-  get(key, options) {
-    const r = this.walkNames(namesOf(ModelTree.#keyOf(key)), options);
+  get(key, options, lang = 0) {
+    const r = this.walkNames(namesOf(ModelTree.#keyOf(key)), options, lang);
     if (r.node) return { node: r.node };
     if (r.denied) return { denied: r.denied };
     return { node: null };
@@ -245,8 +274,8 @@ class ModelTree {
     return { node: null };
   }
 
-  match(key, options) {
-    const r = this.walkNames(namesOf(ModelTree.#keyOf(key)), options);
+  match(key, options, lang = 0) {
+    const r = this.walkNames(namesOf(ModelTree.#keyOf(key)), options, lang);
     if (r.node) return { node: r.node };
     if (r.denied) return { denied: r.denied };
     return {
@@ -260,9 +289,11 @@ class ModelTree {
     return d === null ? { node } : { denied: d };
   }
 
-  children(node, containers = this.containers) {
+  children(node, containers = this.containers, lang = 0) {
     if (this.fs && node.cls === 1) return null;
-    return node.kids.map((k) => [k.name, this.isContainer(k, containers)]);
+    return node.kids
+      .filter((k) => this.nameIn(k, lang) !== null)
+      .map((k) => [this.nameIn(k, lang), this.isContainer(k, containers)]);
   }
 
   classCount(node, cls) {
@@ -391,6 +422,7 @@ class ModelTree {
       birthtime: this.birthtime,
       aggregates: this.aggregates,
       maxNodes: this.maxNodes,
+      languages: this.languages,
       segments: this.segments,
     });
     const st = this.#copy();
@@ -436,6 +468,9 @@ class ModelTree {
         c.payload = n.payload;
         c.policy = n.policy;
         c.subVer = n.subVer;
+        for (const [lang, t] of n.tr) {
+          c.tr.set(lang, { name: t.name, payload: t.payload });
+        }
         map.set(n, c);
         byId.set(n.id, c);
         return c;
@@ -481,6 +516,55 @@ class ModelTree {
       if (!this.validExtent(extent)) return false;
     }
     return true;
+  }
+
+  // A page: [[kind, extent], …] of the page's kinds, each once; [] for none.
+  validPage(page) {
+    if (!Array.isArray(page)) return false;
+    const seen = new Set();
+    for (const pair of page) {
+      if (!Array.isArray(pair) || pair.length !== 2) return false;
+      const [kind, extent] = pair;
+      if (!PAGE_KINDS.has(kind) || seen.has(kind)) return false;
+      seen.add(kind);
+      if (!this.validExtent(extent)) return false;
+    }
+    return true;
+  }
+
+  isLang(lang) {
+    return Number.isInteger(lang) && lang >= 0 && lang < this.languages;
+  }
+
+  // The translations of a put or a row — [[lang, null | { name, payload,
+  // page }], …] — as a Map, null when it states none; EINVAL at `index`,
+  // with the language when the record is the fault.
+  translationsOf(list, root, index) {
+    if (list === undefined) return null;
+    if (this.languages === 1 || !Array.isArray(list))
+      throw refusal('EINVAL', index);
+    const tr = new Map();
+    for (const entry of list) {
+      const lang = Array.isArray(entry) && entry.length === 2 ? entry[0] : -1;
+      if (lang === 0 || !this.isLang(lang) || tr.has(lang))
+        throw refusal('EINVAL', index);
+      const said = entry[1];
+      if (said !== null) {
+        let good = typeof said === 'object';
+        if (good) {
+          const { name, payload, page } = said;
+          const data = payload !== undefined && payload !== null;
+          if (name !== undefined && !(root ? name === '' : isName(name)))
+            good = false;
+          if (data && !this.validPayload(payload)) good = false;
+          if (page !== undefined && (data || !this.validPage(page)))
+            good = false;
+        }
+        if (!good) throw refusal('EINVAL', index, undefined, lang);
+      }
+      tr.set(lang, said);
+    }
+    return tr;
   }
 
   validExtent(e) {
@@ -570,18 +654,59 @@ class ModelTree {
     });
   }
 
-  // The representations a state publishes, by identity: uid → { id, rep }.
+  // A payload's page replaced (RENDER): the page's kinds those of `page`,
+  // the other representations the same, a new payload of `version` with the
+  // attributes and extras of the data. null when nothing changes: no
+  // page where there was none.
+  #rendered(payload, page, version) {
+    const had =
+      payload !== null &&
+      [...payload.reps.keys()].some((k) => PAGE_KINDS.has(k));
+    if (page.length === 0 && !had) return null;
+    const reps = new Map();
+    for (const [kind, rep] of payload.reps) {
+      if (!PAGE_KINDS.has(kind)) reps.set(kind, rep);
+    }
+    for (const [kind, e] of page) {
+      const rep = {
+        kind,
+        segmentId: e.segmentId,
+        offset: e.offset,
+        length: e.length,
+        uid: this.nextUid++,
+      };
+      reps.set(kind, rep);
+      this.made.push(rep);
+    }
+    const sorted = new Map([...reps].sort((a, b) => a[0] - b[0]));
+    const derived = [...sorted.keys()].some((k) => k !== 0);
+    return new ModelPayload(this.nextUid++, {
+      version,
+      size: payload.size,
+      mtimeMs: payload.mtimeMs,
+      birthtimeMs: payload.birthtimeMs,
+      reps: sorted,
+      extras: payload.extras,
+      othersUid: derived ? this.nextUid++ : null,
+    });
+  }
+
+  // The representations a state publishes, by identity: uid → { id, rep,
+  // lang }.
   static published(root) {
     const out = new Map();
     if (root === null) return out;
     const stack = [root];
+    const add = (id, payload, lang) => {
+      if (payload === null) return;
+      for (const rep of payload.reps.values()) {
+        if (!isEmptyExtent(rep)) out.set(rep.uid, { id, rep, lang });
+      }
+    };
     while (stack.length > 0) {
       const n = stack.pop();
-      if (n.payload !== null) {
-        for (const rep of n.payload.reps.values()) {
-          if (!isEmptyExtent(rep)) out.set(rep.uid, { id: n.id, rep });
-        }
-      }
+      add(n.id, n.payload, 0);
+      for (const [lang, t] of n.tr) add(n.id, t.payload, lang);
       for (const k of n.kids) stack.push(k);
     }
     return out;
@@ -921,9 +1046,9 @@ class ModelTree {
     const changes = this.wantChanges ? this.#changes(st) : null;
     const after = ModelTree.published(st.root);
     const retired = [];
-    for (const [uid, { id, rep }] of before) {
+    for (const [uid, { id, rep, lang }] of before) {
       if (!after.has(uid))
-        retired.push({ id, kind: rep.kind, uid, extent: extentKey(rep) });
+        retired.push({ id, kind: rep.kind, uid, extent: extentKey(rep), lang });
     }
     const dropped = [];
     const placed = [];
@@ -932,7 +1057,12 @@ class ModelTree {
       const owner = after.get(rep.uid);
       if (owner === undefined) dropped.push(extentKey(rep));
       else
-        placed.push({ id: owner.id, kind: rep.kind, extent: extentKey(rep) });
+        placed.push({
+          id: owner.id,
+          kind: rep.kind,
+          extent: extentKey(rep),
+          lang: owner.lang,
+        });
     }
     const delta = f.changed || f.relocated;
     if (f.changed) {
@@ -967,15 +1097,29 @@ class ModelTree {
       : typeof id === 'string';
   }
 
+  // The format of a page in a put or a row: a page comes without the data
+  // it renders — the page of new data is among the data's representations.
+  #pageFormat(fields, index) {
+    if (fields.page === undefined) return;
+    const data = fields.payload !== undefined && fields.payload !== null;
+    if (data || !this.validPage(fields.page)) throw refusal('EINVAL', index);
+  }
+
   #commitClient(ops, next, now) {
     // Group 1: in the order of the ops.
     const named = new Set();
-    const relocated = new Set(); // `${id}|${kind}` of the relocations
+    const pinned = new Set(); // `${id}|${lang}|${kind}` of relocations, renders
     let rootId = this.root === null ? null : this.root.id;
-    let kind = null; // 'relocate' or 'change', from the first op
+    let kind = null; // 'relocate', 'render' or 'change', from the first op
     const puts = [];
     const removes = [];
     const relocs = [];
+    const renders = [];
+    const once = (id, at, index) => {
+      const key = `${typeof id}:${id}|${at}`;
+      if (pinned.has(key)) throw refusal('EINVAL', index);
+      pinned.add(key);
+    };
     ops.forEach((op, index) => {
       if (!Array.isArray(op) || typeof op[0] !== 'string')
         throw refusal('EINVAL', index);
@@ -998,6 +1142,12 @@ class ModelTree {
           !this.validPayload(fields.payload)
         )
           throw refusal('EINVAL', index);
+        this.#pageFormat(fields, index);
+        const tr = this.translationsOf(
+          fields.translations,
+          parentId === null,
+          index,
+        );
         if (named.has(id)) throw refusal('EINVAL', index);
         named.add(id);
         // The root rules: a root exists when it existed or a lower put made it.
@@ -1012,7 +1162,7 @@ class ModelTree {
           throw refusal('EINVAL', index);
         if (kind === null) kind = 'change';
         else if (kind !== 'change') throw refusal('EINVAL', index);
-        puts.push({ index, id, parentId, name: nodeName, fields, exists });
+        puts.push({ index, id, parentId, name: nodeName, fields, exists, tr });
         return;
       }
       if (name === 'remove') {
@@ -1029,28 +1179,46 @@ class ModelTree {
         return;
       }
       if (name === 'relocate') {
-        if (op.length !== 4) throw refusal('EINVAL', index);
+        if (op.length !== 4 && op.length !== 5) throw refusal('EINVAL', index);
         const [, id, k, extent] = op;
+        const lang = op[4] === undefined ? 0 : op[4];
         if (!this.isId(id)) throw refusal('EINVAL', index);
         if (!Number.isInteger(k) || k < 0 || k >= KIND_COUNT)
           throw refusal('EINVAL', index);
+        if (!this.isLang(lang)) throw refusal('EINVAL', index);
         if (!this.validExtent(extent)) throw refusal('EINVAL', index);
         // each representation once: a node may have several in a segment
-        const pin = `${typeof id}:${id}|${k}`;
-        if (relocated.has(pin)) throw refusal('EINVAL', index);
-        relocated.add(pin);
+        once(id, `${lang}:${k}`, index);
         if (kind === null) kind = 'relocate';
         else if (kind !== 'relocate') throw refusal('EINVAL', index);
         const node = this.byId.get(id) ?? null;
         if (node === null) throw refusal('ENOENT', index);
-        if (node.payload === null || !node.payload.reps.has(k))
-          throw refusal('ENOENT', index);
-        relocs.push({ index, id, kind: k, extent });
+        const payload = this.payloadIn(node, lang);
+        if (payload === null || !payload.reps.has(k))
+          throw refusal('ENOENT', index, undefined, lang);
+        relocs.push({ index, id, kind: k, extent, lang });
+        return;
+      }
+      if (name === 'render') {
+        if (op.length !== 4) throw refusal('EINVAL', index);
+        const [, id, lang, page] = op;
+        if (!this.isId(id) || !this.isLang(lang))
+          throw refusal('EINVAL', index);
+        if (!this.validPage(page)) throw refusal('EINVAL', index);
+        once(id, lang, index);
+        if (kind === null) kind = 'render';
+        else if (kind !== 'render') throw refusal('EINVAL', index);
+        const node = this.byId.get(id) ?? null;
+        if (node === null) throw refusal('ENOENT', index);
+        if (this.payloadIn(node, lang) === null && page.length > 0)
+          throw refusal('ENOENT', index, undefined, lang);
+        renders.push({ id, lang, page });
         return;
       }
       throw refusal('EINVAL', index);
     });
     if (kind === 'relocate') return this.#relocateClient(relocs);
+    if (kind === 'render') return this.#renderClient(renders, next);
     return this.#finalState(puts, removes, next, now, false);
   }
 
@@ -1059,8 +1227,12 @@ class ModelTree {
     const before = ModelTree.published(this.root);
     for (const r of relocs) {
       const node = st.byId.get(r.id);
-      if (!node.payload.reps.has(r.kind)) throw refusal('ENOENT', r.index);
-      node.payload = this.#relocated(node.payload, r.kind, r.extent);
+      if (r.lang === 0) {
+        node.payload = this.#relocated(node.payload, r.kind, r.extent);
+      } else {
+        const t = node.tr.get(r.lang);
+        t.payload = this.#relocated(t.payload, r.kind, r.extent);
+      }
     }
     return this.#finish(st, before, {
       changed: false,
@@ -1069,6 +1241,39 @@ class ModelTree {
       policy: false,
       marks: new Set(),
       next: this.version,
+    });
+  }
+
+  // Pages, from any thread after a render: each a new payload of its
+  // language with the page replaced, or nothing — no page where there was
+  // none. The data and the place stay.
+  #renderClient(renders, next) {
+    const st = this.#copy();
+    const before = ModelTree.published(this.root);
+    const marks = new Set();
+    let changed = false;
+    for (const { id, lang, page } of renders) {
+      const n = st.byId.get(id);
+      const t = lang === 0 ? null : n.tr.get(lang);
+      const fresh = this.#rendered(
+        lang === 0 ? n.payload : (t?.payload ?? null),
+        page,
+        next,
+      );
+      if (fresh === null) continue;
+      if (lang === 0) n.payload = fresh;
+      else t.payload = fresh;
+      this.wrote.add(n.uid);
+      for (let a = n; a !== null && !marks.has(a); a = a.parent) marks.add(a);
+      changed = true;
+    }
+    return this.#finish(st, before, {
+      changed,
+      relocated: false,
+      structure: false,
+      policy: false,
+      marks,
+      next,
     });
   }
 
@@ -1206,10 +1411,100 @@ class ModelTree {
         violations.set(p.index, { code: 'EEXIST', other });
       }
     }
+    // The name of a node in a language but the main one after the commit,
+    // or null: the one its put states, else the one it has. The root's is
+    // '' — a node that becomes the root takes it, one that leaves the root
+    // has none — and the root has a translation it states data of.
+    const nameAfter = (id, lang) => {
+      const n = this.byId.get(id) ?? null;
+      const t = n === null ? null : (n.tr.get(lang) ?? null);
+      const p = putById.get(id);
+      if (p === undefined) return t === null ? null : t.name;
+      const said = p.tr === null ? undefined : p.tr.get(lang);
+      if (said === null) return null;
+      if (said !== undefined && said.name !== undefined) return said.name;
+      const root = p.parentId === null;
+      if (t === null)
+        return root && said !== undefined && states(said) ? '' : null;
+      if (root) return '';
+      return t.name === '' ? null : t.name;
+    };
+    // EEXIST in each language, by ascending index: live children of one
+    // name there under one parent, the one that had it and keeps it the
+    // keeper.
+    for (let lang = 1; lang < this.languages; lang++) {
+      const byName = new Map();
+      for (const id of ids) {
+        if (!aliveOf(id)) continue;
+        const parent = finalParent.get(id);
+        if (parent === null) continue;
+        const name = nameAfter(id, lang);
+        if (name === null) continue;
+        const k = `${typeof parent}:${parent}\0${name}`;
+        if (!byName.has(k)) byName.set(k, []);
+        byName.get(k).push(id);
+      }
+      for (const members of byName.values()) {
+        if (members.length < 2) continue;
+        const keeper = members.find((id) => {
+          const n = this.byId.get(id);
+          if (n === undefined || n.parent === null) return false;
+          if (n.parent.id !== finalParent.get(id)) return false;
+          return (n.tr.get(lang)?.name ?? null) === nameAfter(id, lang);
+        });
+        const violators = members
+          .filter((id) => id !== keeper && putById.has(id))
+          .map((id) => putById.get(id))
+          .sort((a, b) => a.index - b.index);
+        for (const p of violators) {
+          if (violations.has(p.index)) continue;
+          let other = keeper;
+          if (other === undefined)
+            other = violators.find((v) => v !== p)?.id ?? undefined;
+          violations.set(p.index, { code: 'EEXIST', other, lang });
+        }
+      }
+    }
+    // ENOENT, in a language, for what the final state cannot hold: a page
+    // without the data it renders, a translation with data or a page and
+    // no name; the former root under a parent, where '' is no name.
+    const unstated = (p) => {
+      const n = this.byId.get(p.id) ?? null;
+      const { fields } = p;
+      if (fields.page !== undefined && fields.page.length > 0) {
+        if (fields.payload === null || n === null || n.payload === null)
+          return { code: 'ENOENT', lang: 0 };
+      }
+      if (p.tr !== null) {
+        for (const [lang, said] of p.tr) {
+          if (said === null) continue;
+          const t = n === null ? null : (n.tr.get(lang) ?? null);
+          if ((t !== null || states(said)) && nameAfter(p.id, lang) === null)
+            return { code: 'ENOENT', lang };
+          if (said.page !== undefined && said.page.length > 0) {
+            if (said.payload === null || t === null || t.payload === null)
+              return { code: 'ENOENT', lang };
+          }
+        }
+      }
+      if (p.parentId !== null && n !== null && n.parent === null) {
+        for (let lang = 1; lang < this.languages; lang++) {
+          if (n.tr.has(lang) && (p.tr === null || !p.tr.has(lang)))
+            return { code: 'ENOENT', lang };
+        }
+      }
+      return null;
+    };
+    for (const p of putsByIndex) {
+      if (violations.has(p.index)) continue;
+      const v = unstated(p);
+      if (v !== null) violations.set(p.index, v);
+    }
     if (violations.size > 0) {
       const index = Math.min(...violations.keys());
       const v = violations.get(index);
-      throw refusal(v.code, index, v.code === 'EEXIST' ? v.other : undefined);
+      const other = v.code === 'EEXIST' ? v.other : undefined;
+      throw refusal(v.code, index, other, v.lang);
     }
     // ENOSPC — the bound on the final state; removals before creations.
     let live = 0;
@@ -1229,6 +1524,67 @@ class ModelTree {
     const markUp = (n) => {
       // a mark always reaches the root: an ancestor marked has all above it
       for (let a = n; a !== null && !marks.has(a); a = a.parent) marks.add(a);
+    };
+    // What a put states of the other languages, on its node `n` of the new
+    // state: a change of a name a change of the structure, every change one
+    // of the node itself. A node that becomes the root takes '' in every
+    // language the put leaves as it is.
+    const translate = (p, n, becomesRoot) => {
+      const touched = () => {
+        markUp(n);
+        changed = true;
+      };
+      if (p.tr !== null) {
+        for (const [lang, said] of p.tr) {
+          const t = n.tr.get(lang) ?? null;
+          if (said === null) {
+            if (t === null) continue;
+            n.tr.delete(lang);
+            if (t.payload !== null) this.wrote.add(n.uid);
+            touched();
+            structure = true;
+            continue;
+          }
+          const name = nameAfter(p.id, lang);
+          if (name === null) continue;
+          let tt = t;
+          if (tt === null) {
+            tt = { name: own(name), payload: null };
+            n.tr.set(lang, tt);
+          }
+          if (tt !== t || tt.name !== name) {
+            tt.name = own(name);
+            touched();
+            structure = true;
+          }
+          if (said.payload === null) {
+            if (tt.payload === null) continue;
+            tt.payload = null;
+          } else if (said.payload !== undefined) {
+            tt.payload = this.#newPayload(
+              said.payload,
+              next,
+              tt.payload,
+              false,
+            );
+          } else if (said.page !== undefined) {
+            const fresh = this.#rendered(tt.payload, said.page, next);
+            if (fresh === null) continue;
+            tt.payload = fresh;
+          } else {
+            continue;
+          }
+          this.wrote.add(n.uid);
+          touched();
+        }
+      }
+      if (!becomesRoot) return;
+      for (const [lang, t] of n.tr) {
+        if (t.name === '' || (p.tr !== null && p.tr.has(lang))) continue;
+        t.name = '';
+        touched();
+        structure = true;
+      }
     };
     // Removals: nodes not alive after the commit.
     for (const [id, n] of [...st.byId]) {
@@ -1315,6 +1671,7 @@ class ModelTree {
         n.policy = p.fields.policy === undefined ? null : p.fields.policy;
         if (ownPolicy(n.policy)) policy = true;
         markUp(n);
+        translate(p, n, false);
         continue;
       }
       // A move or rename marks the ancestors of the new place, not the node.
@@ -1346,6 +1703,13 @@ class ModelTree {
           );
           own = true;
         }
+      } else if (p.fields.page !== undefined) {
+        const fresh = this.#rendered(n.payload, p.fields.page, next);
+        if (fresh !== null) {
+          n.payload = fresh;
+          this.wrote.add(n.uid);
+          own = true;
+        }
       }
       if (p.fields.policy !== undefined) {
         const value = p.fields.policy;
@@ -1362,6 +1726,8 @@ class ModelTree {
         markUp(n);
         changed = true;
       }
+      const wasRoot = this.byId.get(p.id).parent === null;
+      translate(p, n, p.parentId === null && !wasRoot);
     }
     return this.#finish(st, before, {
       changed,
@@ -1397,6 +1763,12 @@ class ModelTree {
         !this.validPayload(row.payload)
       )
         throw refusal('EINVAL', index);
+      this.#pageFormat(row, index);
+      const tr = this.translationsOf(
+        row.translations,
+        parentId === null,
+        index,
+      );
       if (seen.has(id)) throw refusal('EINVAL', index);
       seen.add(id);
       // The row without a parent is the root; a second one is EEXIST. The
@@ -1411,7 +1783,8 @@ class ModelTree {
       if (row.class !== undefined) fields.class = row.class;
       if (row.payload !== undefined) fields.payload = row.payload;
       if (row.policy !== undefined) fields.policy = row.policy;
-      puts.push({ index, id, parentId, name, fields, exists });
+      if (row.page !== undefined) fields.page = row.page;
+      puts.push({ index, id, parentId, name, fields, exists, tr });
     });
     return this.#finalState(puts, [], next, now, true);
   }
@@ -1430,5 +1803,6 @@ module.exports = {
   extentKey,
   OTHERS,
   KIND_COUNT,
+  PAGE_KINDS,
   SMALL,
 };
