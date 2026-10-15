@@ -5,7 +5,10 @@
 import { SharedTree, Denied, NotFound, VfsConfig, VfsKernel } from 'xvfs';
 import type {
   BatchResult,
+  CacheResult,
+  Encoding,
   NodeId,
+  TreeLanguage,
   TreeLease,
   TreeNode,
   TreePayloadInfo,
@@ -102,8 +105,63 @@ const main = async () => {
     expectType<TreeNode | null>()(matched.node);
     expectType<string>()(matched.rest);
   }
+
+  // Languages and pages.
+  expectType<readonly string[]>()(pages.languages);
+  const uk = pages.lang('uk');
+  expectType<TreeLanguage>()(uk);
+  expectType<string>()(uk.code);
+  await pages.submit({
+    seq: 12,
+    ops: [
+      [
+        'put',
+        5,
+        1,
+        'contacts',
+        {
+          class: 1,
+          payload: { meta: { title: 'Contacts' } },
+          rendered: '<h1>Contacts</h1>',
+          translations: {
+            uk: { name: 'kontakty', payload: { data: '{}' }, rendered: null },
+            de: null,
+          },
+        },
+      ],
+    ],
+  });
+  const page = uk.get('/kontakty');
+  if (page !== null) {
+    expectType<string | null>()(uk.pathOf(page));
+    expectType<{ readonly [code: string]: string | null } | null>()(
+      pages.pathsOf(page),
+    );
+    const info = uk.payloadOf(page);
+    if (info !== null) {
+      expectType<number>()(info.version);
+      expectType<{
+        readonly size: number;
+        readonly encodings: readonly Encoding[];
+      } | null>()(info.rendered);
+      const cached = await uk.cache(page, '<p>', info.version);
+      expectType<CacheResult>()(cached);
+      expectType<'cached' | 'stale'>()(cached.status);
+    }
+    expectType<string | null>()(uk.readRendered(page, 'utf8'));
+    expectType<Buffer | null>()(pages.readRendered(page));
+    expectType<TreeLease | null>()(uk.viewRendered(page));
+    expectType<VfsReadStream | null>()(pages.createRenderedStream(page));
+    const { dropped } = await pages.uncache(page, { subtree: true });
+    expectType<number>()(dropped);
+    await uk.uncache(page);
+  }
 };
 void main;
+
+const onError = (err: TreeRefusal) =>
+  expectType<string | undefined>()(err.lang);
+void onError;
 
 // --- Refusals ---
 
@@ -120,6 +178,16 @@ void tree.submit({
   seq: 1,
   // @ts-expect-error a payload's data is bytes or a string
   ops: [['put', 1, null, '', { payload: { data: 1 } }]],
+});
+void tree.submit({
+  seq: 1,
+  // @ts-expect-error a tree's payload has no scriptOptions
+  ops: [['put', 1, null, '', { payload: { data: 'x', scriptOptions: {} } }]],
+});
+void tree.submit({
+  seq: 1,
+  // @ts-expect-error a page is bytes, a string or null
+  ops: [['put', 1, null, '', { rendered: 1 }]],
 });
 // @ts-expect-error a Denied is no node
 const denied: TreeNode = tree.get('/a', { allow: () => true });

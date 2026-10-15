@@ -760,7 +760,7 @@ describe('examples smoke', () => {
   });
 
   it(
-    'url-tree server answers from a shared tree: a page, 304, 301, 403, 404 with a tail, 400',
+    'url-tree server answers from a shared tree in two languages: a page rendered once, its alternate, 304, 301, 403, 404 with a tail, 400',
     { timeout: URL_TREE_MS },
     async () => {
       const { child, port } = await startExample(
@@ -775,7 +775,12 @@ describe('examples smoke', () => {
         assert.equal(br.statusCode, 200);
         assert.equal(br.headers['content-encoding'], 'br');
         const html = zlib.brotliDecompressSync(br.body).toString();
-        assert.equal(html, '<h1>Intro</h1>');
+        assert.equal(html, '<h1>Intro</h1>', 'rendered on its first request');
+        assert.equal(br.headers['content-language'], 'en');
+        assert.equal(
+          br.headers.link,
+          '</uk/dokumenty/vstup>; rel="alternate"; hreflang="uk"',
+        );
 
         // A query and a trailing slash make the same key; no encoding taken.
         const plain = await httpGet(at('/guide/intro/?ref=x'));
@@ -788,6 +793,20 @@ describe('examples smoke', () => {
         });
         assert.equal(cached.statusCode, 304);
 
+        // The other language: its names, its data, its own page.
+        const ukr = await httpGet(at('/uk/dokumenty/vstup'));
+        assert.equal(ukr.statusCode, 200);
+        assert.equal(ukr.body.toString(), '<h1>Вступ</h1>');
+        assert.equal(ukr.headers['content-language'], 'uk');
+        assert.equal(
+          ukr.headers.link,
+          '</guide/intro>; rel="alternate"; hreflang="en"',
+        );
+        assert.notEqual(ukr.headers.etag, br.headers.etag);
+        const mainName = await httpGet(at('/uk/guide/intro'));
+        assert.equal(mainName.statusCode, 404, 'no such name there');
+        assert.equal(mainName.headers['x-under'], '');
+
         // /docs moved: its node redirects it and every path below it.
         const moved = await httpGet(at('/docs/intro'));
         assert.equal(moved.statusCode, 301);
@@ -799,6 +818,7 @@ describe('examples smoke', () => {
         const admin = await httpGet(at('/admin/stats'), { 'x-role': 'admin' });
         assert.equal(admin.statusCode, 200);
         assert.equal(admin.body.toString(), '<h1>Stats</h1>');
+        assert.equal(admin.headers.link, undefined, 'not in uk');
 
         const tail = await httpGet(at('/products/42'));
         assert.equal(tail.statusCode, 404);
@@ -807,6 +827,7 @@ describe('examples smoke', () => {
 
         assert.equal((await httpGet(at('/a%2Fb'))).statusCode, 400);
         assert.equal((await httpGet(at('/'))).statusCode, 404);
+        assert.equal((await httpGet(at('/uk'))).statusCode, 404);
       } finally {
         await stopChild(child);
       }

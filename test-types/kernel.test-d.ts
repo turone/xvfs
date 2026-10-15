@@ -110,8 +110,8 @@ const onPublish = (event: PublishEvent) => {
     };
     readonly trees: readonly {
       readonly tree: string;
-      readonly seqFrom: number;
-      readonly seqTo: number;
+      readonly seqFrom: number | null;
+      readonly seqTo: number | null;
       readonly loaded: boolean;
     }[];
   }>()(event);
@@ -235,6 +235,14 @@ expectType<{
       readonly nodes: number;
       readonly payloads: number;
       readonly bytes: number;
+      readonly languages: {
+        readonly [code: string]: {
+          readonly names: number;
+          readonly payloads: number;
+          readonly rendered: number;
+          readonly bytes: number;
+        };
+      };
       readonly last: number | null;
       readonly held: boolean;
       readonly waiting: number;
