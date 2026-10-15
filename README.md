@@ -74,7 +74,9 @@ Pages and routes:
 - **Page and route trees** — a site's pages and routes as a tree of URL
   segments in every worker thread: stable ids from its database, access
   policies checked on the way down, redirects, breadcrumbs and id → URL;
-  the pages' bytes and their compressed forms stored once in shared
+  a page's names and data in every language of the site, one node for
+  all of them; a page rendered once — by the source or by any thread
+  after a render — and its compressed forms stored once in shared
   memory; kept current by ordered changes from the source of truth,
   published atomically — [Page and route trees](#page-and-route-trees).
 
@@ -291,19 +293,21 @@ for `fs.script` bundles, which are `PlaceFs.script(key)` (below).
 
 A site's pages and routes are a tree: each URL segment a node, each node
 a page or a section with a stable id from the site's database, an access
-policy and the page's bytes. xvfs makes that tree available in every
-worker thread — its structure replicated in each thread for fast walks,
-the pages' bytes stored once in shared memory — and keeps it current by
-ordered changes from the application's source of truth: each change is a
-numbered batch, applied in order and published to every thread at once.
-A worker answers a request from memory: no query to the database, no
-copy of a page per worker.
+policy, the page's data and — once rendered — the page itself, in every
+language the site has. xvfs makes that tree available in every worker
+thread — its structure replicated in each thread for fast walks, the
+data and the pages stored once in shared memory — and keeps it current
+by ordered changes from the application's source of truth: each change
+is a numbered batch, applied in order and published to every thread at
+once. A worker answers a request from memory: no query to the database,
+no copy of a page per worker, a page rendered once for all of them.
 
 ```
-GET /guide/intro   → the page, in br or gzip, with an ETag
-GET /admin/stats   → 403 unless the user is an admin
-GET /docs/intro    → 301 to /guide/intro: /docs has moved
-GET /products/42   → 404 past /products — or '/42' for the application
+GET /guide/intro         → the page, in br or gzip, with an ETag
+GET /uk/dokumenty/vstup  → the same page in Ukrainian: its names, its data
+GET /admin/stats         → 403 unless the user is an admin
+GET /docs/intro          → 301 to /guide/intro: /docs has moved
+GET /products/42         → 404 past /products — or '/42' for the application
 ```
 
 It is a tree, not a cache: it holds the whole tree, a lookup walks its
@@ -320,8 +324,10 @@ application itself — is in
 ### Quick start: from a request to a page
 
 [`examples/url-tree/server.mjs`](examples/url-tree/server.mjs), whole: a
-tree loaded at change 41 of the database, then its change 42, which
-moves a section and leaves a redirect at its old path.
+tree of two languages loaded at change 41 of the database, then its
+change 42, which moves a section and leaves a redirect at its old path.
+A page is rendered from its data on its first request and cached for
+every thread.
 
 <!-- quickstart: examples/url-tree/server.mjs -->
 
@@ -403,16 +409,18 @@ await site.submit({
 });
 ```
 
-A node's policy is the application's own, and so is what `allow` makes
-of it: `true` lets a lookup through, anything else stops it — a `Denied`
-whose `decision` is that answer. A request gets one of four results:
+A request finds its node in the language its path names (`/uk/…`
+Ukrainian, the rest English), by the names there. A node's policy is the
+application's own, and so is what `allow` makes of it: `true` lets a
+lookup through, anything else stops it — a `Denied` whose `decision` is
+that answer. A request gets one of four results:
 
-| `match()` gives             | When                                                               | The response                                                                     |
-| --------------------------- | ------------------------------------------------------------------ | -------------------------------------------------------------------------------- |
-| a node                      | the path leads to it, and every policy on the way lets it through  | 200 — the page, compressed where the client takes it — or 304; 404 for a section |
-| `Denied { node, decision }` | a policy on the way refused: the uppermost                         | 403, or 301 when it is a redirect: its target, then the rest of the path         |
-| `NotFound { node, rest }`   | a name is missing: the deepest node on the path, what lies past it | 404, or a dynamic tail the application serves                                    |
-| —                           | the URL makes no key (`keyOf`, below)                              | 400                                                                              |
+| `match()` gives             | When                                                               | The response                                                                                    |
+| --------------------------- | ------------------------------------------------------------------ | ----------------------------------------------------------------------------------------------- |
+| a node                      | the path leads to it, and every policy on the way lets it through  | 200 — its page, rendered once, compressed where the client takes it — or 304; 404 for a section |
+| `Denied { node, decision }` | a policy on the way refused: the uppermost                         | 403, or 301 when it is a redirect: its target, then the rest of the path                        |
+| `NotFound { node, rest }`   | a name is missing: the deepest node on the path, what lies past it | 404, or a dynamic tail the application serves                                                   |
+| —                           | the URL makes no key (`keyOf`, below)                              | 400                                                                                             |
 
 ```js
 // A policy is the application's own: a role, or where a path has moved.
@@ -540,17 +548,98 @@ valid. Its old path is free; a node of the application's own there,
 whose policy names the new one, redirects that path and every path
 below it (quick start).
 
+### Languages
+
+`trees.<name>.languages` lists the codes of a tree's languages, the main
+one first. A node is one in all of them — its id, parent, class and
+policy are the node's — and has a name and a payload in each: in the
+main language its own, in another its **translation** there, or none. A
+node without a translation in a language is not there, nor what lies
+below it: a lookup there misses, its path there is null, it is no child
+there. What a site shows for a page it has not translated — the main
+language's data under a name of the language, or nothing — is its
+source's to say. The root is in every language, named `''`.
+
+```js
+const uk = site.lang('uk'); // the tree in Ukrainian: what depends on it
+const node = uk.get('/dokumenty/vstup'); // the node of /guide/intro
+site.pathsOf(node); // { en: '/guide/intro', uk: '/dokumenty/vstup' }
+uk.read(node, 'utf8'); // its data in Ukrainian
+```
+
+A batch carries the languages that changed:
+
+```js
+const fields = {
+  payload: { data: json }, // the main language's
+  rendered: html,
+  translations: {
+    uk: { name: 'vstup', payload: { data: jsonUk }, rendered: htmlUk },
+  },
+};
+await site.submit({ seq: 43, ops: [['put', 3, 2, 'intro', fields]] });
+```
+
+In `translations`, a language absent is as it was; `null` takes its
+translation away, name, data and page; `{ name }` makes or renames it —
+a new one has no data; `{ payload }` gives it new data, which a node
+takes only where it has a name (`ENOENT` otherwise); `{ payload: null }`
+takes the data, the name stays. A name is unique among the children of
+a parent that have one in that language: `EEXIST` names the language
+(`lang`) and the node that keeps the name (`other`). A move takes every
+name of the node with it. `languages` changes with a restart and a
+`load`; a worker attached to a snapshot of another count of languages
+is refused.
+
+### Pages
+
+A payload holds the **data** a page is rendered from — the fields of a
+database row, which never leave the server and are never compressed —
+and, where the application gives one, the **page**: the bytes a client
+gets, compressed by `compress` once, when it is published. Not every
+page has one: a page made per request has none. A page comes two ways:
+
+- **In a batch**, from the source: `rendered` beside `payload` (or in a
+  translation), a `Uint8Array` or a string. New data without `rendered`
+  has no page — the old one goes with the old data; `rendered` alone
+  renders the data as it is anew; `rendered: null` takes the page away.
+- **From any thread, after a render**: `cache(node, page, version)` —
+  `version` the `payloadOf(node).version` the page was rendered from —
+  resolves `{ status: 'cached' }` once every thread has it, or
+  `'stale'` when that payload is no longer the node's;
+  `uncache(node, { subtree })` takes pages away, `{ dropped }` of them.
+  Neither is a batch of the source: no number, no `onError`, no wait for
+  a hold or the first load. At the end of a window they go after the
+  batches, one commit, the latest per node and language counting; a
+  page too large is `EFBIG`, a pool without room `ENOSPC`, at once.
+  `site.cache` is the main language's and `site.uncache` every
+  language's; `site.lang(code).cache` and `.uncache` one language's.
+
+A page that shows other nodes' data — a menu, breadcrumbs, the titles
+of its neighbours — is the application's to `uncache` when they change:
+only it knows what a page shows.
+
+A payload's `version` is the publication that last changed what it
+holds, its data or its page: an ETag made of it never answers 304 for
+bytes that changed, and the first page of a payload changes it once. Its
+`mtimeMs` is the data's: a page rendered anew leaves it, and so a
+`Last-Modified` made of it. A source sends `payload` only when the data
+changed — a batch that only changes a policy and sends the data again
+would take the page away and change the version
+([doc/external-sources.md](doc/external-sources.md#a-batch)).
+
 ### Reference
 
 | `trees.<name>.*`      | Type     | Default       | Description                                                         |
 | --------------------- | -------- | ------------- | ------------------------------------------------------------------- |
 | `ids`                 | string   | required      | `'number'` (safe integers) or `'string'`: the source's ids          |
 | `containers`          | number[] | `[]`          | Classes whose nodes hold others, at first, in every thread          |
+| `languages`           | string[] | one, no code  | Codes, the main one first: 1 to 255, each once                      |
 | `birthtime`           | bool     | `false`       | Payloads keep a birthtime                                           |
 | `aggregates`          | object   | both off      | `{ classes, subtreeVersion }`: counts by class, a subtree's version |
 | `maxNodes`            | number   | 2^24          | Live nodes at most                                                  |
-| `maxFileSize`         | size     | from defaults | A payload's bytes at most (`EFBIG`)                                 |
-| `compress`            | object   | off           | `{ encodings, ext? }`, as a place's but without `retainRaw`         |
+| `maxFileSize`         | size     | from defaults | A payload's data, a page, at most (`EFBIG`)                         |
+| `compress`            | object   | off           | `{ encodings, options? }`: every rendered page; never the data      |
 | `zeroCopy`            | bool     | `false`       | Leases and borrowed stream chunks                                   |
 | `intake.seq`          | string   | `'source'`    | Who numbers the batches: `'source'` or `'intake'`                   |
 | `intake.window`       | number   | 10            | How long batches gather, ms                                         |
@@ -562,13 +651,12 @@ A tree takes no name of a place, in any case. A node's **class** is a
 small integer of the application's own — page, section, redirect…; the
 classes of `containers` hold other nodes.
 
-**Compression** is made once, when a payload is published: of every
-payload of the tree without `ext`; with it, of the payloads of nodes
-whose names end with one of its extensions — which a page's name seldom
-has. A node without a payload — a section — has nothing to compress.
-`payloadOf(node).encodings` names the forms a payload has: a form the
-pool had no room for is left out — the source never is — so a server
-checks it and falls back to `read()`.
+**Compression** is made once, when a page is published, of every page of
+the tree, in every language; the data is never compressed. A node
+without a page has nothing to compress. `payloadOf(node).rendered`
+names the forms a page has, `encodings`: a form the pool had no room
+for is left out — the page never is — so a server checks it and falls
+back to `readRendered()`.
 
 **Changes.** A tree changes only by the batches of its source, which
 the **intake** — a queue on the main thread — applies in the order of
@@ -579,22 +667,25 @@ throws is its own — an uncaught exception — and never stops the intake.
 `submit({ seq, ops })` gives one change of the source, from any thread:
 `seq` its number in the source's log, `ops` the final state of every
 node it touched — `['put', id, parentId, name, { class, payload,
-policy }]`, a node made, changed or moved under `parentId` (null: the
-root), and `['remove', id]`, a node gone with all below it — each id
-once. A `payload` is `{ data, mtimeMs?, meta?, scriptOptions? }`, `data`
-a `Uint8Array` or a string (UTF-8); `null` takes it off, an absent one
-keeps it; `policy` likewise. A batch is taken when submitted: its bytes
-copied, a `policy`, a `meta` and `scriptOptions` cloned — data
-structured clone carries, kept frozen in every thread — so what the
-caller does to its own objects after changes nothing. A wrong form, or a
-value structured clone cannot carry, throws `EINVAL` at once, with the
+rendered, policy, translations }]`, a node made, changed or moved under
+`parentId` (null: the root), and `['remove', id]`, a node gone with all
+below it — each id once. A `payload` is `{ data?, mtimeMs?, meta? }`,
+`data` a `Uint8Array` or a string (UTF-8), empty without; `null` takes
+it off, an absent one keeps it; `rendered` and `policy` likewise. A
+batch is taken when submitted: its bytes copied, a `policy` and a `meta`
+cloned — data structured clone carries, kept frozen in every thread — so
+what the caller does to its own objects after changes nothing. A wrong
+form, a field no one reads — a typo would leave a page as it was — or a
+value structured clone cannot carry throws `EINVAL` at once, with the
 `index` and `id` of the op. The promise resolves `{ seq, status }` once
 the batch is published and this thread's tree shows it — `'committed'`,
 `'duplicate'` (a number applied or waiting already: a worker's batch
 and the same change read back from the source's log collapse) or
 `'superseded'` (a load past it) — and rejects with a refusal: the
 commit's (`ENOENT`, `EEXIST`, …), `EFBIG`, `ENOSPC` after
-`spaceTimeout`, each with `seq`, `index` and `id`.
+`spaceTimeout`, each with `seq`, `index` and `id` — and in a tree of
+several languages, for a refusal about one, its code: `lang`, the main
+one's too.
 
 - Batches are applied strictly by number, from `last + 1`: those of a
   window go in parts of at most `limit` ops, each part one publication
@@ -604,11 +695,16 @@ commit's (`ENOENT`, `EEXIST`, …), `EFBIG`, `ENOSPC` after
 - A refused batch is told to `onError`; the batches before it publish,
   it and everything after it wait for a load.
 - `load(rows, seq)` replaces the tree's state with the source's at
-  `seq` — rows `{ id, parentId, name, class, payload, policy }` — in one
-  commit; the batches waiting up to `seq` are `'superseded'`, those
-  after it join its publication. A load older than the tree is
-  `ESTALE`. In `'source'` mode nothing applies before the first load —
-  an empty source loads `[]`.
+  `seq` — rows `{ id, parentId, name, class, payload, rendered, policy,
+translations }` — in one commit; the batches waiting up to `seq` are
+  `'superseded'`, those after it join its publication. A load older
+  than the tree is `ESTALE`. In `'source'` mode nothing applies before
+  the first load — an empty source loads `[]`.
+- A row states its **whole** node: what it lacks is none — no payload,
+  no page, no policy, no translation; a translation but the root's has
+  its name. Only a `class` it lacks stays a live node's. A load takes
+  away the pages its rows do not carry: the next requests render them
+  anew.
 - `intake.seq: 'intake'` is for a single writer over one channel that
   loses nothing: the intake numbers the batches as they come, there are
   no gaps, no repeats and no `ESTALE`, and `load(rows)` takes no number
@@ -619,13 +715,20 @@ commit's (`ENOENT`, `EEXIST`, …), `EFBIG`, `ENOSPC` after
 `classOf`, `policyOf`, `isContainer`, `childOf`, `children`,
 `childNodesOf`, `countOf`, `walk`; with aggregates `classCountOf`,
 `leafCountOf`, `subtreeVersionOf`. `payloadOf(node)` is a frozen `{
-version, size, mtimeMs, birthtimeMs?, meta, scriptOptions, encodings }`;
-the bytes come as a copy (`read`, `readCompressed`), a lease (`view`,
-`viewCompressed`, with `zeroCopy`) or a stream (`createReadStream`,
-`createReadStreamCompressed`), pinned while they read, as `PlaceFs`'s
-are. `last` is the number of the last batch this thread's tree shows;
-`version`, `structureVersion` and `policyVersion` the publications that
-last changed it, its structure, its policies.
+version, size, mtimeMs, birthtimeMs?, meta, rendered }` — `rendered` the
+`{ size, encodings }` of its page, or null. The data comes as a copy
+(`read`), a lease (`view`, with `zeroCopy`) or a stream
+(`createReadStream`); the page as `readRendered`, `viewRendered`,
+`createRenderedStream`, and its compressed forms as `readCompressed`,
+`viewCompressed`, `createReadStreamCompressed` — each pinned while it
+reads, as `PlaceFs`'s are. All of it reads the main language;
+`lang(code)` — a `TreeLanguage` — reads one language: `get`, `match`,
+`nameOf`, `pathOf`, `childOf`, `children`, `countOf`, the data, the page
+and its forms there, `cache` and `uncache`; `pathsOf(node)` gives a
+node's path in every language. `last` is the number of the last batch
+this thread's tree shows; `version`, `structureVersion` and
+`policyVersion` the publications that last changed it, its structure —
+a name in any language among it — its policies.
 
 **Policies.** A lookup with `{ allow, context }` — `get`, `match` —
 passes each policy on its way, from the root down, to `allow(policy,
@@ -637,9 +740,10 @@ lookup without `allow` passes every policy.
 
 **Events.** A publication that changed a tree names it in `'publish'`:
 `trees: [{ tree, seqFrom, seqTo, loaded }]` — the numbers of the batches
-it shows, `loaded` when it began with a load, which replaced the state
-whole. A batch that changes nothing publishes nothing, and still moves
-`last` in every thread.
+it shows, both null for pages alone (`cache`, `uncache`), `loaded` when
+it began with a load, which replaced the state whole. A batch that
+changes nothing publishes nothing, and still moves `last` in every
+thread.
 
 ## Providers
 
@@ -1728,7 +1832,8 @@ kernel.on('publish', ({ version, places, trees }) => {
 - **Shared places only.** A `map` place is each thread's own: its writes
   publish nothing and announce nothing.
 - **Shared trees.** `trees` names each tree the publication changed:
-  `[{ tree, seqFrom, seqTo, loaded }]`, empty when it changed none
+  `[{ tree, seqFrom, seqTo, loaded }]` — `seqFrom` and `seqTo` null for
+  pages alone — empty when it changed none
   ([Page and route trees](#page-and-route-trees)).
 - **Errors.** What a listener throws is an uncaught exception, as from any
   emitter; the publication, its ACK and the mutation's promise are done by
@@ -1792,8 +1897,9 @@ of the call — a frozen plain object, a new one each time:
   },
   trees: {              // each shared tree
     [name]: {
-      nodes, payloads,  // its live nodes, the payloads among them
+      nodes, payloads,  // its live nodes, their payloads in every language
       bytes,            // what their representations take of the pool
+      languages,        // { [code]: { names, payloads, rendered, bytes } }
       last,             // the number of the last batch it shows
       held, waiting,    // its intake holds the batches; how many wait
     },
@@ -2355,16 +2461,18 @@ vfs-release { name: 'vfs-release', retireIds: [retireId] }                    wo
 vfs-mutate  { name, id, place, op, key, to?, options?, data? }                worker → main
             writeFiles: { name, id, place, op, keys, sizes, options, data }
             a tree's: { name, id, tree, op: 'submit' | 'load', seq,
-              ops | rows }, each payload's bytes transferred
+              ops | rows }, each payload's and page's bytes transferred;
+              { name, id, tree, op: 'cache', nodeId, lang, version, data },
+              { name, id, tree, op: 'uncache', nodeId, lang, subtree }
 vfs-mutated { name, id, error?: { code, message, syscall, path, dest,
-              seq, index, id, other }, version?, result? }                    main → worker
+              seq, index, id, other, lang }, version?, result? }              main → worker
 vfs-links   { name: 'vfs-links', add: [path], generation }                    main → worker
 tree        the place's tree in pre-order as columns — ids, parents, names,
             classes, payloads — typed arrays and arrays of strings, no SAB
 delta       one commit's log of steps on nodes by id (create, attach,
-            detach, kill, payload, relocate…) as columns over one
-            buffer, and the representations it retires: { id, kind,
-            retireId }
+            detach, kill, payload, relocate, a name or a payload in a
+            language, a page…) as columns over one buffer, and the
+            representations it retires: { id, kind, retireId, lang? }
 payload     version, size, mtimeMs (+ birthtimeMs), scriptOptions?, meta?, and
             each representation as kind, segmentId, offset, length; a source
             kept on disk has none: its key names its file
@@ -2391,9 +2499,10 @@ their bytes one after another in `data`; its answer carries the version
 of the commit. A shared tree rides the same messages: its
 snapshot and `last` in the snapshot; in an update, the deltas of one
 part of its intake's run in order and the numbers of the batches they
-show — `seq: null` for a compaction's relocation — applied in one step
-with the places'; a worker's batch or load is a `vfs-mutate` naming the
-tree, answered with what the intake resolved once the update is posted. Under strict with `links: 'deny'` a snapshot carries the
+show — `seq: null` for a compaction's relocation, from and to null for
+pages alone — applied in one step with the places'; a worker's batch,
+load, `cache` or `uncache` is a `vfs-mutate` naming the tree, answered
+with what the intake resolved once the update is posted. Under strict with `links: 'deny'` a snapshot carries the
 links the main kernel knows and its index's `generation` — how many it
 has come to know; `vfs-links` hands the links its watcher finds after to
 every linked worker, with the generation they bring the index to, and a

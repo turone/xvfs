@@ -41,7 +41,7 @@ So the source provides four things:
 await tree.submit({
   seq: 1042, // the source's number of this change
   ops: [
-    ['put', 17, 3, 'about', { class: 1, payload: { data: html }, policy }],
+    ['put', 17, 3, 'about', { class: 1, payload: { data: json }, policy }],
     ['remove', 21],
   ],
 });
@@ -57,9 +57,22 @@ await tree.submit({
   parent lives.
 - **`put`** names the node's parent (`null`: the root), its name — unique
   among its siblings — and its fields: `class` (required for a new id),
-  `payload` (`{ data, mtimeMs?, meta?, scriptOptions? }`, `null` to take
-  it off, absent to keep it) and `policy` (likewise). A `put` that changes
-  nothing publishes nothing.
+  `payload` (`{ data?, mtimeMs?, meta? }` — the fields a page is rendered
+  from — `null` to take it off, absent to keep it), `rendered` (the page,
+  if the source renders it; likewise), `policy` (likewise) and
+  `translations` (`{ <code>: { name, payload, rendered } | null }`, the
+  languages but the main one that changed). A field no one reads is
+  `EINVAL`. A `put` that changes nothing publishes nothing.
+- **The data only when it changed.** An absent `payload` keeps the
+  node's; a `payload` sent again with the same data is new data: it takes
+  the page away — new data has none but its `rendered` — and changes the
+  version, so every ETag. A change of a policy, a name or a parent sends
+  no `payload`. In SQL the trigger compares the row's content:
+  `OLD.body IS DISTINCT FROM NEW.body`.
+- **A language** is a translation of the same node: its name there,
+  unique among the siblings that have one there, and its own data and
+  page. A change of one language carries that language only; a
+  translation with data has a name — a new one states it.
 - **`remove`** takes the node away with everything below it before the
   batch. An id the tree does not hold is no error.
 - **The exact rule of removal.** A descendant of a removed node that the
@@ -77,8 +90,10 @@ await tree.submit({
   root is `EINVAL`. An empty source starts with the `put` of its root.
 - **Refusals** are of the final state: a parent that does not live
   (`ENOENT`), a cycle (`EINVAL`), two siblings of one name (`EEXIST`, with
-  `other`), a payload larger than `maxFileSize` (`EFBIG`), a pool without
-  room for `spaceTimeout` (`ENOSPC`). A refused batch changes nothing; the
+  `other` — and `lang`, the code of the language the names are of), a
+  page without data there (`ENOENT` with `lang`), a payload or a page
+  larger than `maxFileSize` (`EFBIG`), a pool without room for
+  `spaceTimeout` (`ENOSPC`). A refused batch changes nothing; the
   batches before it publish; it and every later one wait for a load
   (`onError`).
 
@@ -115,8 +130,13 @@ source's number of its change:
   tree and the counter with them, in one transaction (`REPEATABLE READ`),
   one `MULTI`, one script — so that `seq` is exactly the state the rows
   show.
-- **Rows** are `{ id, parentId, name, class, payload, policy }`, in any
-  order; nodes not in them are gone after the load.
+- **Rows** are `{ id, parentId, name, class, payload, rendered, policy,
+translations }`, in any order; nodes not in them are gone after the
+  load. A row carries **every** field of its node: one it lacks is none —
+  no data, no page, no policy, no translation — as a node it lacks is
+  gone; only `class` stays a live node's. A translation of a row has its
+  name. The languages of a page are one row: a `LEFT JOIN` of its
+  content rows by language into `translations`.
 - **The batches up to `seq`** waiting in the intake are dropped
   (`'superseded'`); those after it join the load's publication.
 - **Older than the tree** — `seq` below `tree.last` — is `ESTALE`: take a
@@ -132,6 +152,10 @@ source's number of its change:
 | the process starts                   | load a snapshot, then follow the log from its number |
 | the log no longer holds a gap's part | load a snapshot                                      |
 | its counter is ahead of `tree.last`  | replay the difference                                |
+
+A load takes away every page its rows do not carry — rendered by the
+source, or by a thread with `cache` — so after a recovery the pages are
+rendered anew, on their next requests.
 
 A batch refused by the final state means the source and the tree
 disagree — a batch was lost or built wrong — and only the source's
@@ -188,6 +212,14 @@ create table pages (
   policy jsonb,
   unique (parent_id, name)
 );
+-- A page's content in the languages but the main one.
+create table page_l10n (
+  page_id bigint references pages (id) on delete cascade,
+  lang text not null,
+  name text not null,
+  body bytea,
+  primary key (page_id, lang)
+);
 create table tree_seq (tree text primary key, seq bigint not null);
 create table tree_log (
   tree text not null,
@@ -218,8 +250,10 @@ update or delete on pages for each row`, sees each of them — a cascade
   The row lock it takes is held until the commit ends, so the changes of
   one tree get their numbers in the order they commit. With the number it
   builds the batch — for each id of `tree_changed`, a `put` of what
-  `pages` holds now, or a `remove` where it holds nothing: a row updated
-  twice is one op, a row deleted and inserted again one `put` — inserts it
+  `pages` and `page_l10n` hold now, or a `remove` where it holds nothing:
+  a row updated twice is one op, a row deleted and inserted again one
+  `put`; `payload` only where `OLD.body IS DISTINCT FROM NEW.body`, a
+  language in `translations` only where its row changed — inserts it
   into `tree_log`, calls `pg_notify('tree_pages', seq::text)` — delivered
   once the commit is done — and deletes its rows of `tree_changed` and
   `tree_tx`.
@@ -266,7 +300,12 @@ update or delete on pages for each row`, sees each of them — a cascade
   ```sql
   begin isolation level repeatable read;
   select seq from tree_seq where tree = 'pages';
-  select id, parent_id, name, class, body, policy from pages;
+  select p.id, p.parent_id, p.name, p.class, p.body, p.policy,
+    jsonb_object_agg(l.lang, jsonb_build_object('name', l.name,
+      'body', encode(l.body, 'base64'))) filter (where l.lang is not null)
+      as translations
+  from pages p left join page_l10n l on l.page_id = p.id
+  group by p.id;
   commit;
   ```
 

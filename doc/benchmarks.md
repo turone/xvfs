@@ -902,3 +902,43 @@ above `main` in that run, is level with it in this one (88.6 against
 89.3 MiB: `main`'s own figure moved). The three strict figures of links,
 level with `main` there, are better than `main` here in every pair,
 15–23 % by the medians.
+
+## Languages and pages of a shared tree
+
+The languages and the rendered pages of a shared tree
+([architecture → Shared trees](architecture.md#shared-trees)) on an id
+tree of the catalog's rows in two languages, every node translated — its
+name there of the same length as its main one, a page's data there a
+payload of its own — beside the tree of one language of the same rows:
+`node --expose-gc bench/run.js --only tree --n 10000,100000`, one run, on
+the machine above, Node 24.20. The rows are `tree.lang.<n>.*`.
+
+| `tree.lang.*`                |   10⁴ |  10⁵ |
+| ---------------------------- | ----: | ---: |
+| `get.random.main`, ns/op     | 201.9 |  562 |
+| `get.random.uk`, ns/op       | 201.4 |  451 |
+| `memory.translation`, B/page |   417 |  407 |
+| `commit.translation`, µs/op  |  4.63 | 9.99 |
+| `apply.translation`, µs/op   |  0.97 | 2.28 |
+| `commit.render`, µs/op       |  2.24 | 3.36 |
+| `apply.render`, µs/op        |  0.64 | 1.25 |
+
+- **A lookup in another language costs what a lookup in the main one
+  does**: 201.4 against 201.9 ns at 10⁴, both ±2 %. It walks the
+  children by their names there, one more `Map` a level read from the
+  same object. At 10⁵ both spread by a quarter to a half in this run, the
+  lookups of a tree of two languages missing the cache as often as not;
+  an earlier run with names longer by three characters there — `-uk` —
+  gave 283 against 203 ns at 10⁴: the cost of hashing a longer name, not
+  of the language.
+- **A translation takes about 410 bytes a page** of a replica's heap:
+  its name and its record, its entry in the parent's list of the
+  language, and its payload — a source, and for 30 % of the pages two
+  compressed forms — against the replica of one language of the same
+  rows. The design's probe gave 180–230 bytes for the name, the record
+  and the entry, and 160 more for a payload with one source.
+- **A commit of 1000 translations' data** — one language of a page each,
+  a payload of its own — takes 4.6 µs an op on the main thread and 1.0 µs
+  to apply on a replica at 10⁴; **1000 pages** (`render`, as a `cache`
+  commits them) 2.2 and 0.6 µs: a page keeps its payload's data object
+  and attributes, and its delta carries the page's extents only.

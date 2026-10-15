@@ -1287,10 +1287,10 @@ asks for one. What a source provides — batches, numbers, a log, a
 snapshot — is [external-sources.md](external-sources.md).
 
 **`trees.<name>`: `ids` (`'number'` or `'string'`, required),
-`containers`, `birthtime`, `aggregates`, `maxNodes`, `maxFileSize`
-(`defaults.memory.maxFileSize` unless given), `compress` (as a place's,
-without `retainRaw`: every payload, or with `ext` those of nodes whose
-names end with one of them), `zeroCopy` and `intake: { seq, window,
+`containers`, `languages` (codes, the main one first), `birthtime`,
+`aggregates`, `maxNodes`, `maxFileSize` (`defaults.memory.maxFileSize`
+unless given), `compress` (`{ encodings, options }`: every rendered page,
+never the data), `zeroCopy` and `intake: { seq, window,
 limit, gapTimeout, spaceTimeout }` — `'source'`, 10 ms, 1 000 ops, 2 s,
 2 s by default. A tree takes no name of a place, in any case. The handlers of an
 intake are kernel options of the main thread, `trees: { <name>: { onGap,
@@ -1304,10 +1304,12 @@ nobody receives is lost.
 
 **A node is the engine's and opaque: the facade hands it out and takes it
 back, and `payloadOf(node)` is a frozen `{ version, size, mtimeMs,
-birthtimeMs?, meta, scriptOptions, encodings }`. A `Representation` never
-leaves the facade: bytes come as a copy (`read`, `readCompressed`), a lease
-(`view`, `viewCompressed` — `{ view, version, release, [Symbol.dispose]
-}`, with `zeroCopy` only) or a stream (`createReadStream`,
+birthtimeMs?, meta, rendered }`, `rendered` the `{ size, encodings }` of
+its page or null. A `Representation` never leaves the facade: bytes come
+as a copy (`read` the data, `readRendered` the page, `readCompressed` a
+form of the page), a lease (`view`, `viewRendered`, `viewCompressed` —
+`{ view, version, release, [Symbol.dispose] }`, with `zeroCopy` only) or
+a stream (`createReadStream`, `createRenderedStream`,
 `createReadStreamCompressed`), each pinned while it reads, by the
 thread's `Pins`, as `PlaceFs` pins. A closed kernel refuses every call
 with `ERR_VFS_CLOSED`, a broken worker view with what broke it.** _Why:_ a
@@ -1372,10 +1374,12 @@ a state the source never had either: only the source's snapshot repairs
 it.
 
 **A batch and the rows of a load are the intake's own once taken, in
-the thread that takes them: the ops and their fields copied, every
-payload's bytes copied over a buffer of their own, a policy, a meta and
-scriptOptions cloned by structured clone and frozen — what it cannot
-clone is `EINVAL` at once, nothing taken; a replica freezes what it takes
+the thread that takes them: the ops and their fields copied, the bytes
+of every payload and page, of every language, copied over a buffer of
+their own, a policy and a meta cloned by structured clone and frozen —
+what it cannot clone, and a field no one reads, is `EINVAL` at once,
+nothing taken; the owned form is the caller's, so the main thread takes
+a worker's again as it came; a replica freezes what it takes
 of them from a snapshot or a delta. A worker's `submit` and `load` are
 so taken, then sent over its link as a `vfs-mutate` naming the tree, its
 copies transferred; the answer comes
@@ -1396,17 +1400,91 @@ application that has several processes.
 
 **A tree's publication goes through the tail of the places': what a
 commit placed is committed, what it took back freed at once, what it
-retired recorded — by `#<id>`, a node a commit kills having no key after
-it — and the books of compaction follow its `placed`. The `'publish'`
-event carries `trees: [{ tree, seqFrom, seqTo, loaded }]`, always an
-array, empty when a publication touched no tree; `loaded` says it began
-with a load, which replaced the state whole. A compaction relocates a
-tree's representations by id, in a commit of its own that keeps their
-versions; its update carries `seq: null`, and no event.** _Why:_ one
+retired recorded — by `#<id>`, `#<id>@<code>` in a tree of several
+languages, a node a commit kills having no key after it — and the books
+of compaction follow its `placed`. The `'publish'` event carries `trees:
+[{ tree, seqFrom, seqTo, loaded }]`, always an array, empty when a
+publication touched no tree; `loaded` says it began with a load, which
+replaced the state whole; `seqFrom` and `seqTo` are null for pages
+alone. A compaction relocates a tree's representations by id — each of
+a node in the segment, in any language (`tree.repAt`), the relocation
+naming the language — in a commit of its own that keeps their versions;
+its update carries `seq: null`, and no event.** _Why:_ one
 path for every publication keeps ACK-before-free, pins and compaction
 the same for files and nodes. A consumer that caches by id drops
 everything after a load, a range otherwise; an entry of an object leaves
 room for the ids a publication changed, without a change of protocol.
+
+**Languages: the main one makes the structure, the others lie over the
+same nodes. A node is one in every language — its id, parent, class,
+policy, its place among its siblings, the counters — and its `name` and
+`payload` are the main language's. In another it has a translation, a
+name and a payload there, or none: `LangNode.tr`, an array of
+`Translation | null` by the language's index − 1, made with the first;
+its parent's `LangKids.alt` keeps the children by their names there, a
+`Map` a language, made with the first that has one. A lookup there walks
+`alt`; a node without a translation there is not there, nor what lies
+below it; the root is in every language, named `''`. A name is unique
+per (parent, language, name) — `EEXIST` with `lang` and `other` — a move
+takes every name of the node along, and a node that becomes the root is
+`''` everywhere, one that leaves it needs its names restated. The engine
+knows the number of languages (`createTree({ languages })`, the
+snapshot's); the codes are the config's, the facade's and the intake's,
+and a worker's `attach()` refuses a snapshot of another count.** _Why:_
+a site's database keeps a page in one main row — id, parent, the fields
+every language shares — and its content in a row per language: one node
+a page, its languages beside it, keep one id, one place, one policy and
+one move for all of them. A walk in a language costs a lookup in
+another `Map` a level, about 4 ns more on the stand; a tree of one
+language has the classes, the walk and the deltas it had before
+languages, byte for byte. What a site shows for a page it has not
+translated — the main language's data, a fallback language, nothing — is
+its choice, and its source makes it by what it sends: a node the tree
+showed under another language's name would answer for a URL the site
+never published.
+
+**A page is kind 1 of a payload (`PAGE`, the slot of `require` cached
+data, which a tree never has) and the compressed kinds 3…6 are its
+forms; the data — kind 0, the source — is never compressed: it stays on
+the server. A page is given with new data, among its representations,
+or alone by the step `RENDER` — a `rendered` of a batch without data, a
+`cache` or an `uncache` — which makes a new payload of the commit's
+version over the same data object and attributes and retires the page
+it replaces. The version of a payload is the publication that last
+changed what it holds, data or page; a relocation keeps it.** _Why:_ the
+bytes a client gets are not the bytes of the database: the application's
+templates make them, not xvfs, and not for every page — one made per
+request has none. Kept beside the data, a page lives and dies with its
+payload, retires with it and needs no object of its own; an ETag made of
+the version changes whenever the bytes do, and `mtimeMs` stays the
+data's time. A source that sends the data again only to change a policy
+takes the page away: it sends `payload` only when the data changed
+([external-sources.md](external-sources.md#a-batch)).
+
+**`cache` and `uncache` are no batches of the source: numbered by no
+one, they wait for no hold, gap or first load — only for a load in
+flight, in the same queue, and are checked after it. The intake keeps
+them by (id, language), the latest counting and the one it replaces
+`'stale'`, its bytes back to the pool at once; an `uncache` of a subtree
+takes its nodes as they are when it commits. At the end of a window they
+go after the part of the run, counted in its limit, or as a publication
+of their own: one commit of `render` ops, whose version check runs in
+the step, after the batches — a page of a payload no longer the node's
+there is `'stale'`.** _Why:_ a page rendered by a worker is the worker's
+work, not a change of the source: a hold after a refused batch, a gap,
+a first load that has not come would keep it waiting for nothing, and a
+number would make it a part of the source's log. Checked in the step,
+not at the call, a page never lands on data that changed in the batches
+of its own publication.
+
+**A row of `load` states its whole node: the intake gives the engine a
+row of every field — none where it lacks one, a translation of every
+language — and the engine keeps what a row lacks, as it keeps what a put
+lacks.** _Why:_ a snapshot is the source's whole state; a row that kept
+an old page or translation because it said nothing of it would leave the
+tree in a state the source never had. The rule lives where the source's
+form does, in the intake: the engine, its model and its stand have one
+rule of fields for `commit` and `load`.
 
 ## Routing and strict mode
 
@@ -2590,7 +2668,15 @@ length)` views made on each read; `readFile*` returns owned copies;
 - A shared tree is written by its intake only, on the main thread:
   its batches in the order of their numbers, a publication a continuous
   run of them, in one synchronous step — no thread sees a state between
-  two batches of one publication.
+  two batches of one publication; the pages of `cache` and `uncache` in
+  one commit after them, or alone.
+- A node is one in every language of its tree; a name is unique per
+  (parent, language, name); a node without a translation in a language
+  is not there, nor what lies below it. A tree of one language makes the
+  deltas it made before languages.
+- The data of a shared tree's payload is never compressed; its page is,
+  and a page never outlives its payload. A payload's version changes
+  whenever its data or its page does, never on a relocation.
 - A batch of a tree never resolves without its commit: one whose kernel
   closes before it rejects as the closed kernel; a worker's resolves once
   its replica shows it.
@@ -2636,17 +2722,21 @@ vfs-release { name: 'vfs-release', retireIds: [retireId] }                    wo
 vfs-mutate  { name, id, place, op, key, to?, options?, data? }                worker → main
             writeFiles: { name, id, place, op, keys, sizes, options, data }
             a tree's: { name, id, tree, op: 'submit' | 'load', seq, ops |
-              rows }, each payload's data a Uint8Array over a transferred
-              buffer
+              rows }, the bytes of each payload and page, of every
+              language, a Uint8Array over a transferred buffer;
+              { name, id, tree, op: 'cache', nodeId, lang, version, data },
+              { name, id, tree, op: 'uncache', nodeId, lang, subtree }
 vfs-mutated { name, id, error?: { code, message, syscall, path, dest,
-              seq, index, id, other }, version?, result? }                    main → worker
+              seq, index, id, other, lang }, version?, result? }              main → worker
 vfs-links   { name: 'vfs-links', add: [path], generation }                    main → worker
 tree        the place's tree in pre-order as columns — ids, parents, names,
-            classes, payloads — typed arrays and arrays of strings, no SAB
+            classes, payloads, the translations and their languages —
+            typed arrays and arrays of strings, no SAB
 delta       one commit's log of steps on nodes by id (create, attach,
-            detach, kill, payload, relocate…) as columns over one
-            buffer, and the representations it retires: { id, kind,
-            retireId }
+            detach, kill, payload, relocate, and in a tree of several
+            languages a name, a payload, a relocation there; a page) as
+            columns over one buffer, and the representations it retires:
+            { id, kind, retireId, lang? }
 payload     version, size, mtimeMs (+ birthtimeMs), scriptOptions?, meta?, and
             each representation as kind, segmentId, offset, length; a source
             kept on disk has none: its key names its file

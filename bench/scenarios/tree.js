@@ -70,6 +70,9 @@ const data = require('../../test/tree-data.js');
 //             of a main tree and its replica before and after one file of a
 //             size above 2³⁰ (or 2³¹) and one commit of a version above it,
 //             the time of those commits and applies, the first pass after
+//   lang      an id tree of two languages, every node translated: get in
+//             each, random; a replica's heap per translation; a commit of
+//             1000 translations' data and of 1000 pages (render), applied
 //
 // Not part of `npm test` or CI.
 
@@ -862,6 +865,122 @@ const liveLoad = (b, ctx) => {
   b.rounds(`${id}.rename1pct.apply`, 'ms', 'lower', out.renameApply);
 };
 
+// --- Languages ------------------------------------------------------------------------------
+
+// The catalog as an id tree of two languages: every node but the root
+// translated, its name there its main one's of the same length with a
+// `u` first — a lookup there hashes as much — a page's data there a
+// payload of its own; beside the tree of one language of the same rows
+// (clientSetup).
+const ukName = (name) => `u${name.slice(1)}`;
+const ukOf = (key) =>
+  key
+    .split('/')
+    .map((name) => (name === '' ? name : ukName(name)))
+    .join('/');
+
+const langSetup = (ctx) => {
+  const keys = data.catalogKeys(ctx.n);
+  const dirs = data.directoriesOf(keys);
+  const { rows, pages } = clientRowsOf(keys, dirs, ctx.extents);
+  for (const row of rows) {
+    if (row.parentId === null) continue;
+    const t = { name: ukName(row.name) };
+    if (row.payload !== undefined) t.payload = inputOf(ctx.extents, row.id);
+    row.translations = [[1, t]];
+  }
+  const tree = engine.createTree({
+    ids: 'number',
+    containers: [0],
+    languages: 2,
+    sep: SEP,
+    segments: ctx.segments,
+    retireIds: new data.RetireIds(),
+    now: clock.now(),
+  });
+  tree.load(rows, clock.next(), clock.now());
+  return { keys, pages, tree };
+};
+
+// The heap per translation is against the tree of one language of the
+// same rows; the commits and their applies are per op.
+const languages = (b, ctx) => {
+  const { nk, client } = ctx;
+  const lang = langSetup(ctx);
+  const one = structuredClone(client.tree.snapshot());
+  const two = structuredClone(lang.tree.snapshot());
+  const h0 = heap();
+  const plain = engine.fromSnapshot(one, ctx.segments);
+  const h1 = heap();
+  const replica = engine.fromSnapshot(two, ctx.segments);
+  const h2 = heap();
+  // Read after the measurement: gc() would free them unread.
+  if (plain.get(lang.keys[0]) === null || replica.get(lang.keys[0]) === null) {
+    throw new Error('the trees of languages');
+  }
+  const translation = (h2 - h1 - (h1 - h0)) / lang.pages.length;
+  const id = `tree.lang.${nk}`;
+  b.value(`${id}.memory.translation`, 'B/page', 'lower', translation);
+  const random = shuffled(lang.keys, 42);
+  const main = fresh(random);
+  const uk = fresh(random.map(ukOf));
+  if (replica.get(uk[0].slice(1), undefined, 1) === null) {
+    throw new Error(`no ${uk[0].slice(1)} in uk`);
+  }
+  const uniform = streamOf(random.length, 'uniform', 1);
+  b.ops(`${id}.get.random.main`, (i) =>
+    replica.get(main[uniform[i & MASK]].slice(1)),
+  );
+  b.ops(`${id}.get.random.uk`, (i) =>
+    replica.get(uk[uniform[i & MASK]].slice(1), undefined, 1),
+  );
+  // Commits of the other language's data and of pages, applied by the
+  // replica: per op.
+  const out = {
+    translation: [],
+    translationApply: [],
+    render: [],
+    renderApply: [],
+  };
+  const perOp = (ms) => (1000 * ms) / CHANGES;
+  const run = (ops) => {
+    const t0 = hr();
+    const { delta } = lang.tree.commit(ops, clock.next(), clock.now());
+    const commit = msSince(t0);
+    const clone = structuredClone(delta);
+    const t1 = hr();
+    replica.apply(clone, NO_PINS);
+    return [commit, msSince(t1)];
+  };
+  for (let r = 0; r <= b.repeats; r++) {
+    const picked = shuffled(lang.pages, 700 + r).slice(0, CHANGES);
+    global.gc();
+    const [commit, apply] = run(
+      picked.map((row) => [
+        'put',
+        row.id,
+        row.parentId,
+        row.name,
+        { translations: [[1, { payload: inputOf(ctx.extents, row.id) }]] },
+      ]),
+    );
+    global.gc();
+    const [render, renderApply] = run(
+      picked.map((row) => ['render', row.id, 0, [[1, ctx.extents.next(32)]]]),
+    );
+    if (r === 0) continue;
+    out.translation.push(perOp(commit));
+    out.translationApply.push(perOp(apply));
+    out.render.push(perOp(render));
+    out.renderApply.push(perOp(renderApply));
+  }
+  b.rounds(`${id}.commit.translation`, 'us/op', 'lower', out.translation);
+  b.rounds(`${id}.apply.translation`, 'us/op', 'lower', out.translationApply);
+  b.rounds(`${id}.commit.render`, 'us/op', 'lower', out.render);
+  b.rounds(`${id}.apply.render`, 'us/op', 'lower', out.renderApply);
+  use(plain);
+};
+
 // --- Refusal, id isolation, large numbers: workers --------------------------------------
 
 const refusal = async (b, ctx, withLoad) => {
@@ -934,6 +1053,7 @@ const inProcess = async (b, ctx, first) => {
   ctx.client = clientSetup(ctx);
   policies(b, ctx);
   liveLoad(b, ctx);
+  languages(b, ctx);
   ctx.client = null;
   await views(b, ctx);
   await refusal(b, ctx, first);
